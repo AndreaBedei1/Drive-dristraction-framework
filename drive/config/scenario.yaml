@@ -1,0 +1,60 @@
+carla:
+  host: "127.0.0.1"
+  port: 2000
+  timeout: 10.0
+  seed: 42
+
+  # Prefer short names (Town10HD/Town04). The runner will pick the first available.
+  map_preference: ["Town10HD", "Town04"]
+
+  sync: true
+  fixed_delta_seconds: 0.055
+
+  traffic_manager:
+    port: 8000
+    hybrid_physics_radius: 80.0
+    global_speed_percentage_difference: -10.0  # negative => faster, positive => slower
+    min_distance_to_leading_vehicle: 2.5
+    ignore_lights_percentage: 10
+    ignore_signs_percentage: 5
+    random_left_lanechange_percentage: 20
+    random_right_lanechange_percentage: 20
+
+weather:
+  preset: "ClearNoon"  # try also: CloudyNoon, WetNoon, HardRainNoon, ClearSunset
+
+traffic:
+  vehicles: 90
+  safe_radius_from_route_start: 35.0
+
+pedestrians:
+  walkers: 80
+  running_percentage: 10
+  crossing_percentage: 35
+  max_speed_walking: 1.4
+  max_speed_running: 3.2
+
+route:
+  # "auto" = deterministic pick using seed
+  start_spawn_point: "auto"
+  # "auto_far" = farthest spawn point from start
+  end_spawn_point: "auto_far"
+
+  sampling_resolution: 2.0
+  waypoint_reached_threshold: 4.0
+
+  draw: true
+  draw_step: 10
+  draw_life_time: 999999.0
+
+  auto_reset_on_finish: true
+  reset_cooldown_seconds: 3.0
+
+manual_control:
+  path: "src/manual_control_steeringwheel.py"
+  extra_args:
+    - "--filter=vehicle.tesla.model3"
+    - "--res=1280x720"
+    # opzionale:
+    # - "-a"
+
