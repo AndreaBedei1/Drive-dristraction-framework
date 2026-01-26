@@ -79,3 +79,4 @@ class PedestrianSpawner:
                 pass
 
         return walker_ids, controller_ids
+

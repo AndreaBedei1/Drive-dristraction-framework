@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from typing import Optional, List
+import time
 import carla
 
 
 class CarlaSession:
     def __init__(self, host: str, port: int, timeout: float) -> None:
         self._client = carla.Client(host, port)
-        self._client.set_timeout(timeout)
+        self._timeout = float(timeout)
+        self._client.set_timeout(self._timeout)
 
     @property
     def client(self) -> carla.Client:
@@ -23,13 +25,45 @@ class CarlaSession:
         for m in available:
             short = m.split("/")[-1]
             short_to_full[short] = m
+        current_world = None
+        current_short = None
+        try:
+            current_world = self._client.get_world()
+            current_short = current_world.get_map().name.split("/")[-1]
+        except Exception:
+            current_world = None
+            current_short = None
 
         for short in preference:
             if short in short_to_full:
-                return self._client.load_world(short_to_full[short])
+                if current_short == short and current_world is not None:
+                    return current_world
+                return self._load_world_with_retries(short_to_full[short])
 
         # Fallback: keep current world
+        if current_world is not None:
+            return current_world
         return self._client.get_world()
+
+    def _load_world_with_retries(self, map_name: str) -> carla.World:
+        load_timeout = max(self._timeout, 30.0)
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                self._client.set_timeout(load_timeout)
+                world = self._client.load_world(map_name)
+                self._client.set_timeout(self._timeout)
+                return world
+            except Exception as exc:
+                last_exc = exc
+                self._client.set_timeout(self._timeout)
+                time.sleep(1.0 + 0.5 * attempt)
+        try:
+            return self._client.get_world()
+        except Exception:
+            if last_exc is not None:
+                raise last_exc
+            raise
 
     def configure_sync(self, world: carla.World, sync: bool, fixed_delta_seconds: float) -> None:
         settings = world.get_settings()

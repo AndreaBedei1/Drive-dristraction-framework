@@ -794,7 +794,25 @@ def game_loop(args):
         #display = pygame.display.set_mode(
         #    (args.width, args.height),
         #    pygame.HWSURFACE | pygame.DOUBLEBUF)
-        display = pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
+        win_w = args.width
+        win_h = args.height
+        win_x = os.environ.get("SIM_WINDOW_X")
+        win_y = os.environ.get("SIM_WINDOW_Y")
+        win_w_env = os.environ.get("SIM_WINDOW_W")
+        win_h_env = os.environ.get("SIM_WINDOW_H")
+
+        flags = pygame.RESIZABLE
+        if win_x and win_y and win_w_env and win_h_env:
+            try:
+                win_w = int(win_w_env)
+                win_h = int(win_h_env)
+                os.environ["SDL_VIDEO_WINDOW_POS"] = f"{int(win_x)},{int(win_y)}"
+                flags = pygame.NOFRAME
+            except Exception:
+                flags = pygame.RESIZABLE
+
+        display = pygame.display.set_mode((win_w, win_h), flags)
+        pygame.display.set_caption("CARLA Manual Control")
 
         hud = HUD(args.width, args.height)
         world = World(client.get_world(), hud, args.filter)

@@ -80,24 +80,25 @@ class TrafficSpawner:
             if len(selected) >= max(n, 0):
                 break
 
-        batch = []
+        actor_ids: List[int] = []
         for sp in selected:
             bp = self._rng.choice(vehicle_bps)
             set_random_color(bp, self._rng)
             bp.set_attribute("role_name", "autopilot")
 
-            cmd = carla.command.SpawnActor(bp, sp).then(
-                carla.command.SetAutopilot(carla.command.FutureActor, True, tm_port)
-            )
-            batch.append(cmd)
-
-        results = self._client.apply_batch_sync(batch, True)
-
-        actor_ids: List[int] = []
-        for r in results:
-            if r.error:
+            # Spawn sequentially to avoid overlapping spawns that can cause jumps/falls.
+            v = self._world.try_spawn_actor(bp, sp)
+            if v is None:
                 continue
-            actor_ids.append(r.actor_id)
+            try:
+                v.set_autopilot(True, tm_port)
+            except Exception:
+                pass
+            actor_ids.append(v.id)
+            try:
+                existing_locs.append(v.get_location())
+            except Exception:
+                pass
 
         actors = self._world.get_actors(actor_ids)
         for a in actors:

@@ -13,7 +13,7 @@ carla:
   traffic_manager:
     port: 8000
     hybrid_physics_radius: 80.0
-    global_speed_percentage_difference: -10.0  # negative => faster, positive => slower
+    global_speed_percentage_difference: -20.0  # negative => faster, positive => slower
     min_distance_to_leading_vehicle: 2.5
     ignore_lights_percentage: 10
     ignore_signs_percentage: 5
@@ -23,8 +23,13 @@ carla:
 weather:
   preset: "ClearNoon"  # try also: CloudyNoon, WetNoon, HardRainNoon, ClearSunset
 
+traffic_lights:
+  green_time: 6.0
+  yellow_time: 2.0
+  red_time: 4.0
+
 traffic:
-  vehicles: 90
+  vehicles: 50
   safe_radius_from_route_start: 35.0
 
 pedestrians:
@@ -54,7 +59,50 @@ manual_control:
   path: "src/manual_control_steeringwheel.py"
   extra_args:
     - "--filter=vehicle.tesla.model3"
-    - "--res=1280x720"
-    # opzionale:
+    - "--res=1920x1080"
+    # optional:
     # - "-a"
+
+experiment:
+  user_id: "participant_01"
+  run_id: 1
+  weather_label: "day"
+  output_dir: "data"
+  mode: "train"  # train | test
+  test_map_preference: ["Town04"]
+  test_vehicles: 50
+  test_walkers: 120
+  test_dataset_suffix: "_test"
+
+errors:
+  harsh_brake_threshold_mps2: 3.5
+  harsh_brake_min_speed_kmh: 10.0
+  harsh_brake_min_brake: 0.7
+  harsh_brake_cooldown_seconds: 1.5
+  red_light_min_speed_kmh: 1.0
+  red_light_distance_m: 12.0
+  red_light_pass_distance_m: 1.5
+  red_light_pass_buffer_m: 0.8
+  red_light_cooldown_seconds: 5.0
+  stop_sign_min_speed_kmh: 10.0
+  stop_sign_zone_half_width_m: 1.0
+  stop_sign_zone_length_m: 3.0
+  stop_sign_dedupe_distance_m: 1.5
+  stop_sign_dedupe_time_s: 0.6
+  debug_stop_visualization: true
+  debug_stop_life_time: 6.0
+  solid_line_cooldown_seconds: 2.0
+  collision_cooldown_seconds: 2.0
+
+distractions:
+  min_interval_seconds: 25.0
+  max_interval_seconds: 35.0
+  min_gap_between_windows_seconds: 5.0
+  flash_duration_seconds: 5.0
+  flash_start_interval_seconds: 0.5
+  flash_min_interval_seconds: 0.05
+  beep_frequency_hz: 880
+  beep_duration_ms: 200
+  window_titles: ["Distraction 1", "Distraction 2"]
+  simulation_window_title: "CARLA Manual Control"
 
