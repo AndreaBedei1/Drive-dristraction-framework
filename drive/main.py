@@ -184,14 +184,38 @@ def _concat_routes(routes: List[List[carla.Location]]) -> List[carla.Location]:
     return combined
 
 
+def _compute_spawn_points_center(spawn_points: List[carla.Transform]) -> carla.Location:
+    if not spawn_points:
+        return carla.Location(x=0.0, y=0.0, z=0.0)
+    avg_x = sum(sp.location.x for sp in spawn_points) / len(spawn_points)
+    avg_y = sum(sp.location.y for sp in spawn_points) / len(spawn_points)
+    avg_z = sum(sp.location.z for sp in spawn_points) / len(spawn_points)
+    return carla.Location(x=avg_x, y=avg_y, z=avg_z)
+
+
+def _compute_spawn_point_densities(spawn_points: List[carla.Transform], radius_m: float) -> List[int]:
+    if not spawn_points or radius_m <= 0:
+        return [0 for _ in spawn_points]
+    r2 = float(radius_m) * float(radius_m)
+    densities: List[int] = []
+    for sp in spawn_points:
+        loc = sp.location
+        count = 0
+        for other in spawn_points:
+            dx = loc.x - other.location.x
+            dy = loc.y - other.location.y
+            dz = loc.z - other.location.z
+            if dx * dx + dy * dy + dz * dz <= r2:
+                count += 1
+        densities.append(count)
+    return densities
+
+
 def _pick_center_spawn_index(spawn_points: List[carla.Transform]) -> int:
     # Pick the spawn point closest to the average of all spawn locations.
     if not spawn_points:
         return 0
-    avg_x = sum(sp.location.x for sp in spawn_points) / len(spawn_points)
-    avg_y = sum(sp.location.y for sp in spawn_points) / len(spawn_points)
-    avg_z = sum(sp.location.z for sp in spawn_points) / len(spawn_points)
-    center = carla.Location(x=avg_x, y=avg_y, z=avg_z)
+    center = _compute_spawn_points_center(spawn_points)
     best_i = 0
     best_d = 1e18
     for i, sp in enumerate(spawn_points):
@@ -217,6 +241,31 @@ def _pick_farthest_index(spawn_points: List[carla.Transform], from_loc: carla.Lo
     return int(best_i)
 
 
+def _pick_farthest_index_filtered(
+    spawn_points: List[carla.Transform],
+    from_loc: carla.Location,
+    avoid_indices: set,
+    predicate,
+) -> int:
+    best_i = None
+    best_d = -1.0
+    for i, sp in enumerate(spawn_points):
+        if i in avoid_indices:
+            continue
+        try:
+            if not predicate(i, sp):
+                continue
+        except Exception:
+            continue
+        d = dist(sp.location, from_loc)
+        if d > best_d:
+            best_d = d
+            best_i = i
+    if best_i is None:
+        return _pick_farthest_index(spawn_points, from_loc, avoid_indices)
+    return int(best_i)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="Path to scenario YAML config.")
@@ -227,6 +276,7 @@ def main() -> int:
     seed_everything(cfg.carla.seed)
 
     session = CarlaSession(cfg.carla.host, cfg.carla.port, cfg.carla.timeout)
+    shutdown_flag_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "shutdown.flag"))
 
     mode = cfg.experiment.mode.strip().lower()
     map_preference = cfg.carla.map_preference
@@ -262,29 +312,107 @@ def main() -> int:
     planner = RoutePlanner(world.get_map(), sampling_resolution=cfg.route.sampling_resolution)
 
     if mode == "test":
-        # Test route: start near center, then visit far points to cover more map.
-        start_idx = _pick_center_spawn_index(spawn_points)
-        start_tr = spawn_points[start_idx]
-        far1_idx = _pick_farthest_index(spawn_points, start_tr.location, {start_idx})
-        far1_tr = spawn_points[far1_idx]
-        far2_idx = _pick_farthest_index(spawn_points, far1_tr.location, {start_idx, far1_idx})
-        far2_tr = spawn_points[far2_idx]
-        far3_idx = _pick_farthest_index(spawn_points, far2_tr.location, {start_idx, far1_idx, far2_idx})
-        far3_tr = spawn_points[far3_idx]
+        route = None
+        test_indices: List[int] = []
+        if getattr(cfg.route, "test_spawn_points", None):
+            seen = set()
+            for raw_idx in cfg.route.test_spawn_points:
+                try:
+                    idx = int(raw_idx)
+                except Exception:
+                    continue
+                if idx < 0 or idx >= len(spawn_points):
+                    continue
+                if idx in seen:
+                    continue
+                seen.add(idx)
+                test_indices.append(idx)
 
-        print(f"[Runner] Route start spawn point: {start_idx}")
-        print(f"[Runner] Route far1  spawn point: {far1_idx}")
-        print(f"[Runner] Route far2  spawn point: {far2_idx}")
-        print(f"[Runner] Route far3  spawn point: {far3_idx}")
+        if len(test_indices) >= 2:
+            start_idx = test_indices[0]
+            start_tr = spawn_points[start_idx]
+            print(f"[Runner] Test route (manual) spawn points: {test_indices}")
+            legs: List[List[carla.Location]] = []
+            for i, idx in enumerate(test_indices):
+                nxt = test_indices[(i + 1) % len(test_indices)]
+                legs.append(planner.build_route(spawn_points[idx].location, spawn_points[nxt].location))
+            route = _concat_routes(legs)
+        else:
+            # Test route: prefer dense (city) spawn points, then far (highway) points.
+            city_density_radius = float(getattr(cfg.route, "test_city_density_radius_m", 60.0))
+            city_density_ratio = float(getattr(cfg.route, "test_city_density_ratio", 0.7))
+            highway_distance_ratio = float(getattr(cfg.route, "test_highway_distance_ratio", 0.6))
+            target_city_points = 4
 
-        route = _concat_routes(
-            [
-                planner.build_route(start_tr.location, far1_tr.location),
-                planner.build_route(far1_tr.location, far2_tr.location),
-                planner.build_route(far2_tr.location, far3_tr.location),
-                planner.build_route(far3_tr.location, start_tr.location),
+            center_loc = _compute_spawn_points_center(spawn_points)
+            max_center_dist = max((dist(sp.location, center_loc) for sp in spawn_points), default=0.0)
+
+            densities = _compute_spawn_point_densities(spawn_points, city_density_radius)
+            max_density = max(densities) if densities else 0
+            city_candidates: List[int] = []
+            if max_density > 0:
+                city_candidates = [i for i, d in enumerate(densities) if d >= max_density * city_density_ratio]
+
+            if not city_candidates:
+                city_ratio = float(getattr(cfg.route, "test_city_radius_ratio", 0.35))
+                city_radius = max_center_dist * max(0.0, min(1.0, city_ratio))
+                city_candidates = [
+                    i for i, sp in enumerate(spawn_points) if dist(sp.location, center_loc) <= city_radius
+                ]
+                if not city_candidates:
+                    city_candidates = list(range(len(spawn_points)))
+
+            city_indices: List[int] = []
+            if densities and max_density > 0:
+                first_city_idx = max(city_candidates, key=lambda i: densities[i])
+            else:
+                first_city_idx = min(
+                    city_candidates, key=lambda i: dist(spawn_points[i].location, center_loc)
+                )
+            city_indices.append(first_city_idx)
+            remaining = [i for i in city_candidates if i != first_city_idx]
+            while remaining and len(city_indices) < target_city_points:
+                def _min_dist_to_cities(idx: int) -> float:
+                    loc = spawn_points[idx].location
+                    return min(dist(loc, spawn_points[c].location) for c in city_indices)
+
+                next_idx = max(remaining, key=_min_dist_to_cities)
+                city_indices.append(next_idx)
+                remaining.remove(next_idx)
+
+            city_trs = [spawn_points[i] for i in city_indices]
+            start_tr = city_trs[0]
+
+            highway_min_dist = max_center_dist * max(0.0, min(1.0, highway_distance_ratio))
+            highway_candidates = [
+                i
+                for i, sp in enumerate(spawn_points)
+                if dist(sp.location, center_loc) >= highway_min_dist and i not in set(city_indices)
             ]
-        )
+            if highway_candidates:
+                highway1_idx = max(highway_candidates, key=lambda i: dist(spawn_points[i].location, center_loc))
+                highway1_tr = spawn_points[highway1_idx]
+            else:
+                highway1_idx = None
+                highway1_tr = None
+
+            print(f"[Runner] Test route city spawn points: {city_indices}")
+            if highway1_idx is not None:
+                print(f"[Runner] Test route highway spawn point: {highway1_idx}")
+
+            legs: List[List[carla.Location]] = []
+            if highway1_tr is not None and len(city_trs) >= 2:
+                legs.append(planner.build_route(city_trs[0].location, highway1_tr.location))
+                legs.append(planner.build_route(highway1_tr.location, city_trs[1].location))
+                for i in range(1, len(city_trs) - 1):
+                    legs.append(planner.build_route(city_trs[i].location, city_trs[i + 1].location))
+                legs.append(planner.build_route(city_trs[-1].location, city_trs[0].location))
+            else:
+                for i in range(len(city_trs)):
+                    nxt = city_trs[(i + 1) % len(city_trs)]
+                    legs.append(planner.build_route(city_trs[i].location, nxt.location))
+
+            route = _concat_routes(legs)
     else:
         start_idx, end_idx = pick_spawn_point_indices(
             spawn_points=spawn_points,
@@ -445,10 +573,10 @@ def main() -> int:
         w.start()
 
     proc = None
-    mc_env = None
+    mc_env = os.environ.copy()
+    mc_env["SIM_SHUTDOWN_FILE"] = shutdown_flag_path
     if center_rect is not None:
         x, y, w, h = center_rect
-        mc_env = os.environ.copy()
         mc_env["SIM_WINDOW_X"] = str(x)
         mc_env["SIM_WINDOW_Y"] = str(y)
         mc_env["SIM_WINDOW_W"] = str(w)
@@ -466,6 +594,9 @@ def main() -> int:
             )
 
             while True:
+                if os.path.exists(shutdown_flag_path):
+                    print("[Runner] Shutdown flag detected. Stopping scenario.")
+                    break
                 rc = proc.poll()
                 if rc is not None:
                     print(f"[Runner] manual_control exited with code: {rc}")
@@ -474,6 +605,9 @@ def main() -> int:
         else:
             print("[Runner] --no-launch-manual set. Scenario running; you can start manual_control separately.")
             while True:
+                if os.path.exists(shutdown_flag_path):
+                    print("[Runner] Shutdown flag detected. Stopping scenario.")
+                    break
                 time.sleep(1.0)
 
     except KeyboardInterrupt:
@@ -502,6 +636,12 @@ def main() -> int:
                 proc.terminate()
             except Exception:
                 pass
+
+        try:
+            if os.path.exists(shutdown_flag_path):
+                os.remove(shutdown_flag_path)
+        except Exception:
+            pass
 
         _safe_destroy_ids(world, vehicle_ids + controller_ids + walker_ids)
 

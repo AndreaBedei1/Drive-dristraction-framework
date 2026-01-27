@@ -60,6 +60,12 @@ class RouteConfig:
     draw_life_time: float
     auto_reset_on_finish: bool
     reset_cooldown_seconds: float
+    test_spawn_points: List[int]
+    test_city_radius_ratio: float
+    test_highway_radius_ratio: float
+    test_city_density_radius_m: float
+    test_city_density_ratio: float
+    test_highway_distance_ratio: float
 
 
 @dataclass(frozen=True)
@@ -206,6 +212,12 @@ def load_config(path: str) -> ScenarioConfig:
         draw_life_time=float(route_raw["draw_life_time"]),
         auto_reset_on_finish=bool(route_raw["auto_reset_on_finish"]),
         reset_cooldown_seconds=float(route_raw["reset_cooldown_seconds"]),
+        test_spawn_points=[int(x) for x in _get(route_raw, "test_spawn_points", []) or []],
+        test_city_radius_ratio=float(_get(route_raw, "test_city_radius_ratio", 0.35)),
+        test_highway_radius_ratio=float(_get(route_raw, "test_highway_radius_ratio", 0.7)),
+        test_city_density_radius_m=float(_get(route_raw, "test_city_density_radius_m", 60.0)),
+        test_city_density_ratio=float(_get(route_raw, "test_city_density_ratio", 0.7)),
+        test_highway_distance_ratio=float(_get(route_raw, "test_highway_distance_ratio", 0.6)),
     )
 
     mc_raw = raw["manual_control"]

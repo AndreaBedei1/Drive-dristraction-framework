@@ -54,6 +54,13 @@ route:
 
   auto_reset_on_finish: true
   reset_cooldown_seconds: 3.0
+  # Optional explicit test route (spawn point indices). If empty, auto picks city/highway.
+  test_spawn_points: []
+  test_city_radius_ratio: 0.35
+  test_highway_radius_ratio: 0.7
+  test_city_density_radius_m: 60.0
+  test_city_density_ratio: 0.6
+  test_highway_distance_ratio: 0.5
 
 manual_control:
   path: "src/manual_control_steeringwheel.py"
@@ -68,9 +75,9 @@ experiment:
   run_id: 1
   weather_label: "day"
   output_dir: "data"
-  mode: "train"  # train | test
+  mode: "test"  # train | test
   test_map_preference: ["Town04"]
-  test_vehicles: 50
+  test_vehicles: 100
   test_walkers: 120
   test_dataset_suffix: "_test"
 

@@ -109,6 +109,10 @@ except ImportError:
 
 
 USE_G29_PEDALS = False  # True = pedaliera G29, False = tastiera
+SHUTDOWN_FLAG_PATH = os.environ.get(
+    "SIM_SHUTDOWN_FILE",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "shutdown.flag")),
+)
 
 
 def find_weather_presets():
@@ -277,10 +281,13 @@ class DualControl(object):
                     world.hud.help.toggle()
                 elif event.key == K_TAB:
                     world.camera_manager.toggle_camera()
-                elif event.key == K_c and pygame.key.get_mods() & KMOD_SHIFT:
-                    world.next_weather(reverse=True)
                 elif event.key == K_c:
-                    world.next_weather()
+                    try:
+                        with open(SHUTDOWN_FLAG_PATH, "w", encoding="utf-8") as f:
+                            f.write("shutdown\n")
+                    except Exception:
+                        pass
+                    return True
                 elif event.key == K_BACKQUOTE:
                     world.camera_manager.next_sensor()
                 elif event.key > K_0 and event.key <= K_9:
