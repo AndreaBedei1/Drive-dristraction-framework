@@ -91,6 +91,8 @@ class ErrorConfig:
     red_light_distance_m: float
     red_light_pass_distance_m: float
     red_light_pass_buffer_m: float
+    red_light_track_distance_m: float
+    red_light_min_interval_seconds: float
     red_light_cooldown_seconds: float
     stop_sign_min_speed_kmh: float
     stop_sign_zone_half_width_m: float
@@ -235,6 +237,8 @@ def load_config(path: str) -> ScenarioConfig:
         red_light_distance_m=float(_get(err_raw, "red_light_distance_m", 12.0)),
         red_light_pass_distance_m=float(_get(err_raw, "red_light_pass_distance_m", 1.5)),
         red_light_pass_buffer_m=float(_get(err_raw, "red_light_pass_buffer_m", 0.8)),
+        red_light_track_distance_m=float(_get(err_raw, "red_light_track_distance_m", 12.0)),
+        red_light_min_interval_seconds=float(_get(err_raw, "red_light_min_interval_seconds", 2.0)),
         red_light_cooldown_seconds=float(_get(err_raw, "red_light_cooldown_seconds", 5.0)),
         stop_sign_min_speed_kmh=float(_get(err_raw, "stop_sign_min_speed_kmh", 10.0)),
         stop_sign_zone_half_width_m=float(_get(err_raw, "stop_sign_zone_half_width_m", 1.0)),

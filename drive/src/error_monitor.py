@@ -36,8 +36,11 @@ class ErrorMonitor(threading.Thread):
 
         self._last_harsh_brake_time = -1e9
         self._last_red_light_time = -1e9
+        self._last_red_light_wall_time = -1e9
         self._last_red_light_id: Optional[int] = None
         self._last_red_light_along: Dict[int, float] = {}
+        self._tracked_red_light_id: Optional[int] = None
+        self._tracked_red_light_stop_wps: List[carla.Waypoint] = []
         self._last_solid_line_time = -1e9
         self._last_collision_time = -1e9
         self._last_stop_violation_time = -1e9
@@ -347,6 +350,24 @@ class ErrorMonitor(threading.Thread):
         self._lights_stop_wps[traffic_light.id] = stop_wps
         return stop_wps
 
+    def _set_tracked_red_light(self, traffic_light: carla.TrafficLight, stop_wps: List[carla.Waypoint]) -> None:
+        if not stop_wps:
+            return
+        self._tracked_red_light_id = traffic_light.id
+        self._tracked_red_light_stop_wps = stop_wps
+
+    def _clear_tracked_red_light(self) -> None:
+        if self._tracked_red_light_id is not None:
+            self._last_red_light_along.pop(self._tracked_red_light_id, None)
+        self._tracked_red_light_id = None
+        self._tracked_red_light_stop_wps = []
+
+    def _log_red_light_violation(self, hero: carla.Vehicle, traffic_light_id: int, sim_time: float) -> None:
+        self._last_red_light_id = traffic_light_id
+        self._last_red_light_time = sim_time
+        self._last_red_light_wall_time = time.monotonic()
+        self._logger.log(self._world, hero, "Red light violation", details=f"traffic_light_id={traffic_light_id}")
+
     def _along_from_stop(self, stop_wp: carla.Waypoint, location: carla.Location) -> float:
         vec = location - stop_wp.transform.location
         fwd = stop_wp.transform.get_forward_vector()
@@ -424,8 +445,14 @@ class ErrorMonitor(threading.Thread):
     def _check_red_light(self, hero: carla.Vehicle, speed_kmh: float, sim_time: float) -> None:
         if speed_kmh < self._cfg.red_light_min_speed_kmh:
             return
+        min_interval = float(getattr(self._cfg, "red_light_min_interval_seconds", 0.0))
+        if min_interval > 0.0 and time.monotonic() - self._last_red_light_wall_time < min_interval:
+            return
         if sim_time - self._last_red_light_time < self._cfg.red_light_cooldown_seconds:
             return
+
+        pass_threshold = float(self._cfg.red_light_pass_distance_m) + float(self._cfg.red_light_pass_buffer_m)
+        track_distance = float(getattr(self._cfg, "red_light_track_distance_m", self._cfg.red_light_distance_m))
 
         # Use the traffic light that actually affects the vehicle if available.
         try:
@@ -435,34 +462,39 @@ class ErrorMonitor(threading.Thread):
             tl = None
             tl_state = None
 
-        pass_threshold = float(self._cfg.red_light_pass_distance_m) + float(self._cfg.red_light_pass_buffer_m)
+        used_direct_tl = False
         if tl is not None and tl_state == carla.TrafficLightState.Red:
             stop_wps = self._get_stop_waypoints(tl)
-            crossed = False
-            for stop_wp in stop_wps:
-                try:
-                    along = self._along_from_stop(stop_wp, hero.get_location())
-                except Exception:
-                    continue
-                prev = self._last_red_light_along.get(tl.id)
-                self._last_red_light_along[tl.id] = along
-                if prev is None:
-                    continue
-                if prev <= pass_threshold and along > pass_threshold:
-                    crossed = True
-                    break
-            if crossed:
-                if self._last_red_light_id != tl.id or sim_time - self._last_red_light_time >= self._cfg.red_light_cooldown_seconds:
-                    self._last_red_light_id = tl.id
-                    self._last_red_light_time = sim_time
-                    self._logger.log(self._world, hero, "Red light violation", details=f"traffic_light_id={tl.id}")
-            return
+            if stop_wps:
+                used_direct_tl = True
+                self._set_tracked_red_light(tl, stop_wps)
+                crossed = False
+                hero_loc = hero.get_location()
+                for stop_wp in stop_wps:
+                    try:
+                        along = self._along_from_stop(stop_wp, hero_loc)
+                    except Exception:
+                        continue
+                    prev = self._last_red_light_along.get(tl.id)
+                    self._last_red_light_along[tl.id] = along
+                    if prev is None:
+                        continue
+                    if prev <= pass_threshold and along > pass_threshold:
+                        crossed = True
+                        break
+                if crossed:
+                    if self._last_red_light_id != tl.id or sim_time - self._last_red_light_time >= self._cfg.red_light_cooldown_seconds:
+                        self._log_red_light_violation(hero, tl.id, sim_time)
+                    self._clear_tracked_red_light()
+            if used_direct_tl:
+                return
 
         ego_loc = hero.get_location()
         ego_wp = self._world.get_map().get_waypoint(ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
         ego_fwd = hero.get_transform().get_forward_vector()
         max_distance = self._cfg.red_light_distance_m
 
+        used_candidate = False
         for traffic_light in self._lights_list:
             if traffic_light.state != carla.TrafficLightState.Red:
                 continue
@@ -502,10 +534,12 @@ class ErrorMonitor(threading.Thread):
 
             if not matched_lane:
                 continue
+            used_candidate = True
+            self._set_tracked_red_light(traffic_light, stop_wps)
             crossed = False
             for stop_wp in stop_wps:
                 try:
-                    along = self._along_from_stop(stop_wp, hero.get_location())
+                    along = self._along_from_stop(stop_wp, ego_loc)
                 except Exception:
                     continue
                 prev = self._last_red_light_along.get(traffic_light.id)
@@ -521,10 +555,58 @@ class ErrorMonitor(threading.Thread):
             if self._last_red_light_id == traffic_light.id and sim_time - self._last_red_light_time < self._cfg.red_light_cooldown_seconds:
                 continue
 
-            self._last_red_light_id = traffic_light.id
-            self._last_red_light_time = sim_time
-            self._logger.log(self._world, hero, "Red light violation", details=f"traffic_light_id={traffic_light.id}")
+            self._log_red_light_violation(hero, traffic_light.id, sim_time)
+            self._clear_tracked_red_light()
             break
+
+        if used_candidate:
+            return
+
+        if self._tracked_red_light_id is None or not self._tracked_red_light_stop_wps:
+            return
+        try:
+            tracked_light = self._world.get_actor(self._tracked_red_light_id)
+        except Exception:
+            tracked_light = None
+        if tracked_light is None:
+            self._clear_tracked_red_light()
+            return
+        try:
+            if tracked_light.state != carla.TrafficLightState.Red:
+                self._clear_tracked_red_light()
+                return
+        except Exception:
+            return
+
+        crossed = False
+        max_along = None
+        hero_loc = hero.get_location()
+        for stop_wp in self._tracked_red_light_stop_wps:
+            try:
+                along = self._along_from_stop(stop_wp, hero_loc)
+            except Exception:
+                continue
+            if max_along is None or along > max_along:
+                max_along = along
+            prev = self._last_red_light_along.get(self._tracked_red_light_id)
+            self._last_red_light_along[self._tracked_red_light_id] = along
+            if prev is None:
+                continue
+            if prev <= pass_threshold and along > pass_threshold:
+                crossed = True
+                break
+
+        if crossed:
+            if (
+                self._last_red_light_id != self._tracked_red_light_id
+                or sim_time - self._last_red_light_time >= self._cfg.red_light_cooldown_seconds
+            ):
+                self._log_red_light_violation(hero, self._tracked_red_light_id, sim_time)
+            self._clear_tracked_red_light()
+            return
+
+        if max_along is not None and max_along > pass_threshold + track_distance:
+            self._clear_tracked_red_light()
 
     def _check_stop_sign(self, hero: carla.Vehicle, speed_kmh: float, sim_time: float) -> None:
         self._refresh_stop_signs(sim_time)
@@ -692,7 +774,7 @@ class ErrorMonitor(threading.Thread):
             return
 
         try:
-            stop_wps = self._shift_stop_waypoints_forward(self._get_stop_waypoints(tl))
+            stop_wps = self._get_stop_waypoints(tl)
         except Exception:
             stop_wps = []
         if not stop_wps:
