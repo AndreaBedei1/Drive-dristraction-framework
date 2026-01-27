@@ -108,7 +108,7 @@ except ImportError:
 # ==============================================================================
 
 
-USE_G29_PEDALS = False  # True = pedaliera G29, False = tastiera
+USE_G29_PEDALS = True  # True = pedaliera G29, False = tastiera
 SHUTDOWN_FLAG_PATH = os.environ.get(
     "SIM_SHUTDOWN_FILE",
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "shutdown.flag")),
@@ -696,9 +696,11 @@ class CameraManager(object):
         self.hud = hud
         self.recording = False
         self._camera_transforms = [
+            carla.Transform(carla.Location(x=-4.5, z=3.2), carla.Rotation(pitch=-8)),
             carla.Transform(carla.Location(x=-5.5, z=2.8), carla.Rotation(pitch=-15)),
-            carla.Transform(carla.Location(x=1.6, z=1.7))]
-        self.transform_index = 1
+            carla.Transform(carla.Location(x=1.6, z=1.7)),
+        ]
+        self.transform_index = 0
         self.sensors = [
             ['sensor.camera.rgb', cc.Raw, 'Camera RGB'],
             ['sensor.camera.depth', cc.Raw, 'Camera Depth (Raw)'],
@@ -715,6 +717,7 @@ class CameraManager(object):
             if item[0].startswith('sensor.camera'):
                 bp.set_attribute('image_size_x', str(hud.dim[0]))
                 bp.set_attribute('image_size_y', str(hud.dim[1]))
+                bp.set_attribute('fov', '100')
             elif item[0].startswith('sensor.lidar'):
                 bp.set_attribute('range', '50')
             item.append(bp)

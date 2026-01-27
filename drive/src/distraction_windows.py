@@ -4,6 +4,12 @@ import random
 import threading
 import time
 from typing import Callable, Optional, Tuple
+import sys
+
+try:
+    import ctypes
+except Exception:  # pragma: no cover - optional Windows dependency
+    ctypes = None
 
 try:
     import tkinter as tk
@@ -86,6 +92,7 @@ class DistractionWindow(threading.Thread):
         self._beep_stop_event = threading.Event()
         self._alert_start_time = 0.0
         self._flash_interval = self._flash_start_interval
+        self._awaiting_ack = False
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -114,6 +121,7 @@ class DistractionWindow(threading.Thread):
         self._label.pack(expand=True)
 
         self._set_idle()
+        self._start_space_listener()
         self._schedule_next()
         self._root.mainloop()
 
@@ -164,13 +172,20 @@ class DistractionWindow(threading.Thread):
             return
         self._root.configure(bg="#b00020")
         self._label.configure(text="PRESS\nTIME EXPIRED")
+        self._awaiting_ack = True
         self._on_start(self._id)
         self._start_beep()
         self._root.bind("<Button-1>", self._on_click)
 
     def _on_click(self, _event) -> None:
+        self._acknowledge()
+
+    def _acknowledge(self) -> None:
         if self._root is None:
             return
+        if not self._awaiting_ack:
+            return
+        self._awaiting_ack = False
         self._root.unbind("<Button-1>")
         self._beep_stop_event.set()
         self._on_finish(self._id)
@@ -178,6 +193,29 @@ class DistractionWindow(threading.Thread):
         self._set_idle()
         self._focus_callback()
         self._schedule_next()
+
+    def _start_space_listener(self) -> None:
+        if ctypes is None or sys.platform != "win32":
+            return
+
+        def _loop() -> None:
+            last_down = False
+            while not self._stop_event.is_set():
+                try:
+                    down = bool(ctypes.windll.user32.GetAsyncKeyState(0x20) & 0x8000)
+                except Exception:
+                    time.sleep(0.05)
+                    continue
+                if down and not last_down and self._awaiting_ack:
+                    try:
+                        if self._root is not None:
+                            self._root.after(0, self._acknowledge)
+                    except Exception:
+                        pass
+                last_down = down
+                time.sleep(0.03)
+
+        threading.Thread(target=_loop, daemon=True).start()
 
     def _start_beep(self) -> None:
         self._beep_stop_event.clear()
