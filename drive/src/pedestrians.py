@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Pedestrian spawning utilities."""
+
 from typing import List, Tuple
 import random
 
@@ -7,7 +9,10 @@ import carla
 
 
 class PedestrianSpawner:
+    """Spawn walkers and their AI controllers."""
+
     def __init__(self, client: carla.Client, world: carla.World, seed: int) -> None:
+        """Create a spawner with a deterministic RNG."""
         self._client = client
         self._world = world
         self._rng = random.Random(seed)
@@ -20,11 +25,11 @@ class PedestrianSpawner:
         max_speed_walking: float,
         max_speed_running: float,
     ) -> Tuple[List[int], List[int]]:
+        """Spawn walkers and return walker and controller ids."""
         blueprint_library = self._world.get_blueprint_library()
         walker_bps = blueprint_library.filter("walker.pedestrian.*")
         controller_bp = blueprint_library.find("controller.ai.walker")
 
-        # This increases the probability of pedestrians crossing roads (if supported)
         try:
             self._world.set_pedestrians_cross_factor(float(crossing_percentage) / 100.0)
         except Exception:
@@ -40,7 +45,6 @@ class PedestrianSpawner:
         walker_batch = []
         for tr in spawn_transforms:
             bp = self._rng.choice(walker_bps)
-            # Ensure pedestrians are not invincible so collisions affect them.
             if bp.has_attribute("is_invincible"):
                 bp.set_attribute("is_invincible", "false")
             walker_batch.append(carla.command.SpawnActor(bp, tr))
@@ -79,4 +83,3 @@ class PedestrianSpawner:
                 pass
 
         return walker_ids, controller_ids
-

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Distraction window UI and coordination logic."""
+
 import random
 import threading
 import time
@@ -8,23 +10,27 @@ import sys
 
 try:
     import ctypes
-except Exception:  # pragma: no cover - optional Windows dependency
+except Exception:
     ctypes = None
 
 try:
     import tkinter as tk
-except Exception:  # pragma: no cover - optional UI dependency
+except Exception:
     tk = None
 
 
 class DistractionCoordinator:
+    """Ensure only one distraction window is active at a time."""
+
     def __init__(self, min_gap_seconds: float) -> None:
+        """Create a coordinator with a minimum gap between alerts."""
         self._lock = threading.Lock()
         self._active_id: Optional[str] = None
         self._next_allowed_time = 0.0
         self._min_gap = float(min_gap_seconds)
 
     def request_start(self, window_id: str) -> bool:
+        """Request permission to start an alert for a window."""
         with self._lock:
             now = time.monotonic()
             if self._active_id is None and now >= self._next_allowed_time:
@@ -33,6 +39,7 @@ class DistractionCoordinator:
             return False
 
     def finish(self, window_id: str) -> None:
+        """Mark a window as finished and set the next allowed time."""
         with self._lock:
             if self._active_id == window_id:
                 self._active_id = None
@@ -40,6 +47,7 @@ class DistractionCoordinator:
 
 
 def focus_simulation_window(window_title: str) -> None:
+    """Bring the simulation window to the foreground if possible."""
     try:
         import ctypes
 
@@ -51,6 +59,8 @@ def focus_simulation_window(window_title: str) -> None:
 
 
 class DistractionWindow(threading.Thread):
+    """Window that shows visual and audio distraction prompts."""
+
     def __init__(
         self,
         window_id: str,
@@ -69,6 +79,7 @@ class DistractionWindow(threading.Thread):
         size: Tuple[int, int] = (360, 260),
         monitor_rect: Optional[Tuple[int, int, int, int]] = None,
     ) -> None:
+        """Create a distraction window with timing and audio settings."""
         super().__init__(daemon=True)
         self._id = window_id
         self._title = title
@@ -95,6 +106,7 @@ class DistractionWindow(threading.Thread):
         self._awaiting_ack = False
 
     def stop(self) -> None:
+        """Stop the window and any active audio."""
         self._stop_event.set()
         self._beep_stop_event.set()
         if self._root is not None:
@@ -104,6 +116,7 @@ class DistractionWindow(threading.Thread):
                 pass
 
     def run(self) -> None:
+        """Start the Tkinter event loop and schedule alerts."""
         if tk is None:
             return
 
@@ -126,18 +139,21 @@ class DistractionWindow(threading.Thread):
         self._root.mainloop()
 
     def _set_idle(self) -> None:
+        """Reset the window to the idle state."""
         if self._root is None or self._label is None:
             return
         self._root.configure(bg="#1e1e1e")
         self._label.configure(text="")
 
     def _schedule_next(self) -> None:
+        """Schedule the next alert window."""
         if self._stop_event.is_set() or self._root is None:
             return
         delay = random.uniform(self._min_interval, self._max_interval)
         self._root.after(int(delay * 1000), self._try_start_alert)
 
     def _try_start_alert(self) -> None:
+        """Attempt to start an alert if coordination allows it."""
         if self._stop_event.is_set() or self._root is None:
             return
         if not self._coord.request_start(self._id):
@@ -146,6 +162,7 @@ class DistractionWindow(threading.Thread):
         self._start_flashing()
 
     def _start_flashing(self) -> None:
+        """Begin the flashing sequence before the alert expires."""
         if self._root is None or self._label is None:
             return
         self._alert_start_time = time.monotonic()
@@ -154,6 +171,7 @@ class DistractionWindow(threading.Thread):
         self._flash_step()
 
     def _flash_step(self) -> None:
+        """Advance one flash step and reschedule the next."""
         if self._stop_event.is_set() or self._root is None:
             return
         elapsed = time.monotonic() - self._alert_start_time
@@ -168,6 +186,7 @@ class DistractionWindow(threading.Thread):
         self._root.after(int(self._flash_interval * 1000), self._flash_step)
 
     def _expire(self) -> None:
+        """Transition to the alarm state and wait for acknowledgment."""
         if self._root is None or self._label is None:
             return
         self._root.configure(bg="#b00020")
@@ -178,9 +197,11 @@ class DistractionWindow(threading.Thread):
         self._root.bind("<Button-1>", self._on_click)
 
     def _on_click(self, _event) -> None:
+        """Handle a mouse click acknowledgment."""
         self._acknowledge()
 
     def _acknowledge(self) -> None:
+        """Clear the alarm state and schedule the next alert."""
         if self._root is None:
             return
         if not self._awaiting_ack:
@@ -195,6 +216,7 @@ class DistractionWindow(threading.Thread):
         self._schedule_next()
 
     def _start_space_listener(self) -> None:
+        """Listen for the space bar globally on Windows."""
         if ctypes is None or sys.platform != "win32":
             return
 
@@ -218,6 +240,7 @@ class DistractionWindow(threading.Thread):
         threading.Thread(target=_loop, daemon=True).start()
 
     def _start_beep(self) -> None:
+        """Start the repeating beep until the alert is acknowledged."""
         self._beep_stop_event.clear()
 
         def _beep_loop() -> None:

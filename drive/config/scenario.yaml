@@ -63,10 +63,12 @@ route:
   test_highway_distance_ratio: 0.5
 
 manual_control:
-  path: "src/manual_control_steeringwheel.py"
+  path: "src/manual_control.py"
   extra_args:
     - "--filter=vehicle.tesla.model3"
-    - "--res=3840x1080"
+#    - "--res=3840x1080"
+    - "--res=1920x1080"
+
     # optional:
     # - "-a"
 
@@ -97,7 +99,7 @@ errors:
   stop_sign_zone_half_width_m: 1.0
   stop_sign_zone_length_m: 3.0
   stop_sign_dedupe_distance_m: 1.5
-  stop_sign_dedupe_time_s: 0.6
+  stop_sign_dedupe_time_s: 1.0
   debug_stop_visualization: false
   debug_stop_life_time: 6.0
   solid_line_cooldown_seconds: 2.0

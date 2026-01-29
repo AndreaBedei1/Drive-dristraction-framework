@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import List, Tuple
+"""Traffic vehicle spawning and traffic manager configuration."""
+
+from typing import List
 import random
 
 import carla
@@ -10,7 +12,10 @@ from .utils import dist
 
 
 class TrafficSpawner:
+    """Spawn autopilot vehicles and configure traffic manager."""
+
     def __init__(self, client: carla.Client, world: carla.World, tm: carla.TrafficManager, seed: int) -> None:
+        """Create a spawner with a deterministic RNG."""
         self._client = client
         self._world = world
         self._tm = tm
@@ -22,6 +27,7 @@ class TrafficSpawner:
         hybrid_physics_radius: float,
         global_speed_percentage_difference: float,
     ) -> None:
+        """Configure traffic manager behavior."""
         self._tm.set_synchronous_mode(synchronous_mode)
         self._tm.set_hybrid_physics_mode(True)
         self._tm.set_hybrid_physics_radius(float(hybrid_physics_radius))
@@ -40,6 +46,7 @@ class TrafficSpawner:
         random_left_lanechange_percentage: int,
         random_right_lanechange_percentage: int,
     ) -> List[int]:
+        """Spawn vehicles and return their actor ids."""
         blueprints = self._world.get_blueprint_library()
         vehicle_bps = choose_vehicle_blueprints(blueprints)
         spawn_points = list(self._world.get_map().get_spawn_points())
@@ -52,7 +59,6 @@ class TrafficSpawner:
 
         self._rng.shuffle(filtered)
 
-        # Skip spawn points that are too close to existing or newly selected vehicles.
         existing_locs: List[carla.Location] = []
         for v in self._world.get_actors().filter("vehicle.*"):
             try:
@@ -86,7 +92,6 @@ class TrafficSpawner:
             set_random_color(bp, self._rng)
             bp.set_attribute("role_name", "autopilot")
 
-            # Spawn sequentially to avoid overlapping spawns that can cause jumps/falls.
             v = self._world.try_spawn_actor(bp, sp)
             if v is None:
                 continue

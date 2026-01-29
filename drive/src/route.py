@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Route planning helpers."""
+
 from typing import List
 import carla
 
@@ -7,17 +9,16 @@ from src.agents.navigation.global_route_planner import GlobalRoutePlanner
 
 
 class RoutePlanner:
+    """Thin wrapper around CARLA GlobalRoutePlanner."""
+
     def __init__(self, world_map: carla.Map, sampling_resolution: float) -> None:
-        # This GRP builds the graph in __init__, no setup() exists.
+        """Initialize the route planner with sampling resolution."""
         self._grp = GlobalRoutePlanner(world_map, float(sampling_resolution))
 
     def build_route(self, start: carla.Location, end: carla.Location) -> List[carla.Location]:
-        route = self._grp.trace_route(start, end)  # list[(Waypoint, RoadOption)]
+        """Return a list of locations along the route from start to end."""
+        route = self._grp.trace_route(start, end)
         return [wp.transform.location for (wp, _opt) in route]
-
-
-
-
 
 def draw_route(
     world: carla.World,
@@ -25,6 +26,7 @@ def draw_route(
     step: int,
     life_time: float,
 ) -> None:
+    """Draw a route in the world for debugging."""
     if not route:
         return
 

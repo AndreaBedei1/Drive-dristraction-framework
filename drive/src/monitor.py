@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Lap monitoring utilities for looping routes."""
+
 from typing import List, Optional
 import threading
 import time
@@ -10,6 +12,8 @@ from .utils import dist, find_hero_vehicle
 
 
 class LapMonitor(threading.Thread):
+    """Track progress along a route and optionally reset on completion."""
+
     def __init__(
         self,
         world: carla.World,
@@ -20,6 +24,7 @@ class LapMonitor(threading.Thread):
         reset_cooldown_seconds: float,
         preferred_role_name: str = "hero",
     ) -> None:
+        """Create a lap monitor for the hero vehicle."""
         super().__init__(daemon=True)
 
         self._world = world
@@ -30,7 +35,6 @@ class LapMonitor(threading.Thread):
         self._cooldown = float(reset_cooldown_seconds)
         self._role = preferred_role_name
 
-        # DO NOT use Thread internal names like _stop or _initialized
         self._stop_event = threading.Event()
 
         self._lap = 0
@@ -39,9 +43,11 @@ class LapMonitor(threading.Thread):
         self._hero_initialized = False
 
     def stop(self) -> None:
+        """Stop the monitor loop."""
         self._stop_event.set()
 
     def run(self) -> None:
+        """Main loop that tracks route progress."""
         if not self._route:
             return
 
@@ -58,7 +64,6 @@ class LapMonitor(threading.Thread):
                     continue
 
             if not self._hero_initialized:
-                # Force the hero to start at the route start for repeatability
                 try:
                     self._hero.set_transform(self._start_transform)
                     self._hero.set_velocity(carla.Vector3D(0.0, 0.0, 0.0))

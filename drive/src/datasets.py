@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""CSV dataset logging utilities for errors and distractions."""
+
 import csv
 import os
 import threading
@@ -12,6 +14,7 @@ import carla
 
 @dataclass(frozen=True)
 class DatasetContext:
+    """Shared metadata stored with each dataset row."""
     user_id: str
     run_id: int
     weather_label: str
@@ -19,7 +22,10 @@ class DatasetContext:
 
 
 class _CsvWriter:
+    """Thread-safe CSV appender with header creation."""
+
     def __init__(self, path: str, fieldnames: List[str]) -> None:
+        """Create a writer for the target CSV path."""
         self._path = path
         self._fieldnames = fieldnames
         self._lock = threading.Lock()
@@ -30,12 +36,14 @@ class _CsvWriter:
                 writer.writeheader()
 
     def append(self, row: Dict[str, Any]) -> None:
+        """Append a row to the CSV file."""
         with self._lock, open(self._path, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=self._fieldnames)
             writer.writerow(row)
 
 
 def _map_short_name(world: carla.World) -> str:
+    """Return a short map name from the CARLA world."""
     try:
         return world.get_map().name.split("/")[-1]
     except Exception:
@@ -43,6 +51,7 @@ def _map_short_name(world: carla.World) -> str:
 
 
 def _speed_kmh(vehicle: carla.Actor) -> float:
+    """Compute speed in km/h for a CARLA actor."""
     try:
         v = vehicle.get_velocity()
         return 3.6 * (v.x * v.x + v.y * v.y + v.z * v.z) ** 0.5
@@ -51,6 +60,7 @@ def _speed_kmh(vehicle: carla.Actor) -> float:
 
 
 def _location_info(world: carla.World, location: carla.Location) -> Dict[str, Any]:
+    """Return location fields and road/lane ids for a location."""
     data: Dict[str, Any] = {
         "x": float(location.x),
         "y": float(location.y),
@@ -68,6 +78,7 @@ def _location_info(world: carla.World, location: carla.Location) -> Dict[str, An
 
 
 def _snapshot_info(world: carla.World) -> Dict[str, Any]:
+    """Return frame and sim time information from the world snapshot."""
     try:
         snap = world.get_snapshot()
         ts = snap.timestamp
@@ -83,11 +94,15 @@ def _snapshot_info(world: carla.World) -> Dict[str, Any]:
 
 
 def _wall_time_iso() -> str:
+    """Return current UTC timestamp in ISO format."""
     return datetime.datetime.utcnow().isoformat()
 
 
 class ErrorDatasetLogger:
+    """Logger for error events into Dataset Errors CSV."""
+
     def __init__(self, output_dir: str, context: DatasetContext, suffix: str = "") -> None:
+        """Create a logger with a destination folder and context."""
         path = os.path.join(output_dir, f"Dataset Errors{suffix}.csv")
         self._context = context
         self._writer = _CsvWriter(
@@ -118,6 +133,7 @@ class ErrorDatasetLogger:
         error_type: str,
         details: str = "",
     ) -> None:
+        """Append a single error row to the dataset."""
         try:
             location = vehicle.get_location()
         except Exception:
@@ -140,7 +156,10 @@ class ErrorDatasetLogger:
 
 
 class DistractionDatasetLogger:
+    """Logger for distraction windows into Dataset Distractions CSV."""
+
     def __init__(self, output_dir: str, context: DatasetContext, suffix: str = "") -> None:
+        """Create a logger with a destination folder and context."""
         path = os.path.join(output_dir, f"Dataset Distractions{suffix}.csv")
         self._context = context
         self._writer = _CsvWriter(
@@ -175,6 +194,7 @@ class DistractionDatasetLogger:
         self._lock = threading.Lock()
 
     def start(self, window_id: str, world: carla.World, vehicle: carla.Actor) -> None:
+        """Record the start of a distraction window."""
         with self._lock:
             if window_id in self._active:
                 return
@@ -191,6 +211,7 @@ class DistractionDatasetLogger:
             }
 
     def finish(self, window_id: str, world: carla.World, vehicle: carla.Actor) -> None:
+        """Record the end of a distraction window."""
         with self._lock:
             start_info = self._active.pop(window_id, None)
         if start_info is None:

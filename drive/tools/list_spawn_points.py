@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+"""Print available spawn points for the current CARLA map."""
+
 import argparse
 import carla
 
 
 def main() -> int:
+    """Connect to CARLA and list spawn points."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2000)

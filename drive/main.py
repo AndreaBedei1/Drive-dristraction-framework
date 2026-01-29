@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Scenario runner for the driving distraction framework."""
+
 import argparse
 import os
 import subprocess
@@ -16,13 +18,14 @@ from src.traffic import TrafficSpawner
 from src.pedestrians import PedestrianSpawner
 from src.route import RoutePlanner, draw_route
 from src.monitor import LapMonitor
-from src.ticker import WorldTicker  # <<< ADD
+from src.ticker import WorldTicker
 from src.datasets import DatasetContext, ErrorDatasetLogger, DistractionDatasetLogger
 from src.error_monitor import ErrorMonitor
 from src.distraction_windows import DistractionCoordinator, DistractionWindow, focus_simulation_window
 
 
 def _resolve_manual_control_path(path: str) -> str:
+    """Return an absolute manual control path or raise if missing."""
     p = os.path.abspath(path)
     if os.path.isfile(p):
         return p
@@ -36,6 +39,7 @@ def _launch_manual_control(
     extra_args: List[str],
     env: Optional[dict] = None,
 ) -> subprocess.Popen:
+    """Launch the manual control script as a subprocess."""
     cmd = [sys.executable, script_path, f"--host={host}", f"--port={port}"]
     cmd.extend(extra_args)
     print(f"[Runner] Launching manual control: {' '.join(cmd)}")
@@ -43,10 +47,12 @@ def _launch_manual_control(
 
 
 def _resolve_output_dir(path: str) -> str:
+    """Return an absolute output directory path."""
     return path if os.path.isabs(path) else os.path.abspath(path)
 
 
 def _get_monitor_rects() -> List[Tuple[int, int, int, int]]:
+    """Return monitor rectangles ordered from left to right."""
     try:
         import ctypes
         from ctypes import wintypes
@@ -73,6 +79,7 @@ def _get_monitor_rects() -> List[Tuple[int, int, int, int]]:
 
 
 def _pick_monitor_layout(rects: List[Tuple[int, int, int, int]]) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[Tuple[int, int, int, int]], Optional[Tuple[int, int, int, int]]]:
+    """Choose left, center, and right monitor rectangles."""
     if not rects:
         return None, None, None
     if len(rects) == 1:
@@ -84,6 +91,7 @@ def _pick_monitor_layout(rects: List[Tuple[int, int, int, int]]) -> Tuple[Option
 
 
 def _compute_next_run_id(output_dir: str, user_id: str, suffix: str) -> int:
+    """Compute the next run id from existing dataset files."""
     import csv
 
     max_run_id = 0
@@ -109,6 +117,7 @@ def _compute_next_run_id(output_dir: str, user_id: str, suffix: str) -> int:
 
 
 def _safe_destroy_ids(world: carla.World, actor_ids: List[int]) -> None:
+    """Attempt to stop and destroy actors by id."""
     for actor_id in actor_ids:
         try:
             actor = world.get_actor(actor_id)
@@ -133,6 +142,7 @@ def _safe_destroy_ids(world: carla.World, actor_ids: List[int]) -> None:
 
 
 def _configure_traffic_lights(world: carla.World, cfg) -> None:
+    """Apply timing configuration to all traffic lights."""
     try:
         lights = world.get_actors().filter("*traffic_light*")
     except Exception:
@@ -151,7 +161,7 @@ def _pick_far_spawn_point_index(
     avoid_indices: set,
     anchor_locations: List[carla.Location],
 ) -> int:
-    # Pick the spawn point far from multiple anchors to create a longer loop.
+    """Pick the spawn point farthest from multiple anchor locations."""
     best_i = None
     best_score = -1.0
     for i, sp in enumerate(spawn_points):
@@ -172,7 +182,7 @@ def _pick_far_spawn_point_index(
 
 
 def _concat_routes(routes: List[List[carla.Location]]) -> List[carla.Location]:
-    # Merge multiple route legs, avoiding duplicate join points.
+    """Merge multiple route legs while avoiding duplicate join points."""
     combined: List[carla.Location] = []
     for r in routes:
         if not r:
@@ -185,6 +195,7 @@ def _concat_routes(routes: List[List[carla.Location]]) -> List[carla.Location]:
 
 
 def _compute_spawn_points_center(spawn_points: List[carla.Transform]) -> carla.Location:
+    """Compute the centroid of all spawn point locations."""
     if not spawn_points:
         return carla.Location(x=0.0, y=0.0, z=0.0)
     avg_x = sum(sp.location.x for sp in spawn_points) / len(spawn_points)
@@ -194,6 +205,7 @@ def _compute_spawn_points_center(spawn_points: List[carla.Transform]) -> carla.L
 
 
 def _compute_spawn_point_densities(spawn_points: List[carla.Transform], radius_m: float) -> List[int]:
+    """Count nearby spawn points within a given radius for each point."""
     if not spawn_points or radius_m <= 0:
         return [0 for _ in spawn_points]
     r2 = float(radius_m) * float(radius_m)
@@ -212,7 +224,7 @@ def _compute_spawn_point_densities(spawn_points: List[carla.Transform], radius_m
 
 
 def _pick_center_spawn_index(spawn_points: List[carla.Transform]) -> int:
-    # Pick the spawn point closest to the average of all spawn locations.
+    """Pick the spawn point closest to the centroid."""
     if not spawn_points:
         return 0
     center = _compute_spawn_points_center(spawn_points)
@@ -227,6 +239,7 @@ def _pick_center_spawn_index(spawn_points: List[carla.Transform]) -> int:
 
 
 def _pick_farthest_index(spawn_points: List[carla.Transform], from_loc: carla.Location, avoid_indices: set) -> int:
+    """Pick the farthest spawn point from a reference location."""
     best_i = None
     best_d = -1.0
     for i, sp in enumerate(spawn_points):
@@ -247,6 +260,7 @@ def _pick_farthest_index_filtered(
     avoid_indices: set,
     predicate,
 ) -> int:
+    """Pick the farthest spawn point that satisfies a predicate."""
     best_i = None
     best_d = -1.0
     for i, sp in enumerate(spawn_points):
@@ -267,6 +281,7 @@ def _pick_farthest_index_filtered(
 
 
 def main() -> int:
+    """Entry point for running a driving scenario."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="Path to scenario YAML config.")
     ap.add_argument("--no-launch-manual", action="store_true", help="Do not launch manual_control_steeringwheel.py.")
@@ -286,19 +301,16 @@ def main() -> int:
     world = session.load_preferred_map(map_preference)
     original_world_settings = world.get_settings()
 
-    # Configure sync + weather.
     session.configure_sync(world, cfg.carla.sync, cfg.carla.fixed_delta_seconds)
     session.set_weather_preset(world, cfg.weather.preset)
     _configure_traffic_lights(world, cfg.traffic_lights)
 
-    # >>> START TICKER (only in synchronous mode)
     ticker = None
     if cfg.carla.sync:
         hz = 1.0 / float(cfg.carla.fixed_delta_seconds)
         ticker = WorldTicker(world, target_hz=hz)
         ticker.start()
 
-    # Traffic Manager
     tm = session.get_traffic_manager(cfg.carla.traffic_manager.port)
     traffic_spawner = TrafficSpawner(session.client, world, tm, seed=cfg.carla.seed)
     traffic_spawner.configure_tm(
@@ -307,7 +319,6 @@ def main() -> int:
         global_speed_percentage_difference=cfg.carla.traffic_manager.global_speed_percentage_difference,
     )
 
-    # Build route using GlobalRoutePlanner
     spawn_points = list(world.get_map().get_spawn_points())
     planner = RoutePlanner(world.get_map(), sampling_resolution=cfg.route.sampling_resolution)
 
@@ -338,7 +349,6 @@ def main() -> int:
                 legs.append(planner.build_route(spawn_points[idx].location, spawn_points[nxt].location))
             route = _concat_routes(legs)
         else:
-            # Test route: prefer dense (city) spawn points, then far (highway) points.
             city_density_radius = float(getattr(cfg.route, "test_city_density_radius_m", 60.0))
             city_density_ratio = float(getattr(cfg.route, "test_city_density_ratio", 0.7))
             highway_distance_ratio = float(getattr(cfg.route, "test_highway_distance_ratio", 0.6))
@@ -446,7 +456,6 @@ def main() -> int:
     if cfg.route.draw:
         draw_route(world, route, step=cfg.route.draw_step, life_time=cfg.route.draw_life_time)
 
-    # Spawn traffic vehicles (autopilot)
     vehicles_n = cfg.traffic.vehicles
     walkers_n = cfg.pedestrians.walkers
     if mode == "test":
@@ -468,7 +477,6 @@ def main() -> int:
     )
     print(f"[Runner] Spawned vehicles: {len(vehicle_ids)}")
 
-    # Spawn pedestrians
     ped_spawner = PedestrianSpawner(session.client, world, seed=cfg.carla.seed)
     walker_ids, controller_ids = ped_spawner.spawn_walkers(
         n=walkers_n,
@@ -479,7 +487,6 @@ def main() -> int:
     )
     print(f"[Runner] Spawned walkers: {len(walker_ids)} (controllers: {len(controller_ids)})")
 
-    # Start lap monitor
     monitor = LapMonitor(
         world=world,
         route=route,
@@ -491,7 +498,6 @@ def main() -> int:
     )
     monitor.start()
 
-    # Dataset loggers
     map_name = world.get_map().name.split("/")[-1]
     output_dir = _resolve_output_dir(cfg.experiment.output_dir)
     dataset_suffix = ""
@@ -508,11 +514,9 @@ def main() -> int:
     error_logger = ErrorDatasetLogger(output_dir=output_dir, context=context, suffix=dataset_suffix)
     distraction_logger = DistractionDatasetLogger(output_dir=output_dir, context=context, suffix=dataset_suffix)
 
-    # Error monitor
     error_monitor = ErrorMonitor(world=world, logger=error_logger, config=cfg.errors, preferred_role_name="hero")
     error_monitor.start()
 
-    # Distraction windows (two independent windows, coordinated)
     monitor_rects = _get_monitor_rects()
     left_rect, center_rect, right_rect = _pick_monitor_layout(monitor_rects)
     coord = DistractionCoordinator(cfg.distractions.min_gap_between_windows_seconds)
@@ -621,7 +625,6 @@ def main() -> int:
         if ticker is not None:
             ticker.stop()
 
-        # Restore async mode so the server UI remains responsive after exit.
         try:
             tm.set_synchronous_mode(False)
         except Exception:

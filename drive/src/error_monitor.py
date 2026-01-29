@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Error detection and logging for the driving scenario."""
+
 import threading
 import time
 import weakref
@@ -13,6 +15,8 @@ from src.utils import find_hero_vehicle
 
 
 class ErrorMonitor(threading.Thread):
+    """Monitor the hero vehicle for safety violations and log them."""
+
     def __init__(
         self,
         world: carla.World,
@@ -20,6 +24,7 @@ class ErrorMonitor(threading.Thread):
         config,
         preferred_role_name: str = "hero",
     ) -> None:
+        """Create a monitor bound to a CARLA world and logger."""
         super().__init__(daemon=True)
         self._world = world
         self._logger = logger
@@ -56,10 +61,12 @@ class ErrorMonitor(threading.Thread):
         self._last_stop_refresh_time = 0.0
 
     def stop(self) -> None:
+        """Stop the thread and detach sensors."""
         self._stop_event.set()
         self._destroy_sensors()
 
     def _destroy_sensors(self) -> None:
+        """Safely stop and destroy attached sensors."""
         for s in (self._collision_sensor, self._lane_sensor):
             if s is not None:
                 try:
@@ -74,6 +81,7 @@ class ErrorMonitor(threading.Thread):
         self._lane_sensor = None
 
     def _ensure_hero(self) -> Optional[carla.Vehicle]:
+        """Ensure a hero vehicle reference and attach sensors if needed."""
         if self._hero is not None:
             try:
                 if self._hero.is_alive:
@@ -86,6 +94,7 @@ class ErrorMonitor(threading.Thread):
         return self._hero
 
     def _attach_sensors(self, hero: carla.Vehicle) -> None:
+        """Attach collision and lane invasion sensors to the hero."""
         self._destroy_sensors()
         bp_lib = self._world.get_blueprint_library()
 
@@ -100,6 +109,7 @@ class ErrorMonitor(threading.Thread):
 
     @staticmethod
     def _on_collision(weak_self: "weakref.ReferenceType[ErrorMonitor]", event) -> None:
+        """Handle collision events and log them with cooldown."""
         self = weak_self()
         if self is None or self._hero is None:
             return
@@ -127,6 +137,7 @@ class ErrorMonitor(threading.Thread):
 
     @staticmethod
     def _on_lane_invasion(weak_self: "weakref.ReferenceType[ErrorMonitor]", event) -> None:
+        """Handle lane invasion events for solid line crossings."""
         self = weak_self()
         if self is None or self._hero is None:
             return
@@ -147,12 +158,14 @@ class ErrorMonitor(threading.Thread):
                 break
 
     def _safe_sim_time(self) -> float:
+        """Return simulation time, falling back to monotonic time."""
         try:
             return float(self._world.get_snapshot().timestamp.elapsed_seconds)
         except Exception:
             return time.monotonic()
 
     def _landmark_location(self, landmark) -> Optional[carla.Location]:
+        """Extract a location from a map landmark object."""
         try:
             tr = landmark.transform
             return tr.location
@@ -172,6 +185,7 @@ class ErrorMonitor(threading.Thread):
             return None
 
     def _is_stop_landmark(self, landmark) -> bool:
+        """Heuristically determine if a landmark represents a stop sign."""
         tokens = []
         for attr in ("type", "name", "text", "signal_type", "id"):
             try:
@@ -188,12 +202,12 @@ class ErrorMonitor(threading.Thread):
         return "stop" in hay
 
     def _refresh_stop_signs(self, now: float) -> None:
+        """Refresh cached stop sign waypoints from the map."""
         if now - self._last_stop_refresh_time < 5.0:
             return
         self._last_stop_refresh_time = now
         self._stop_signs = []
 
-        # Prefer map landmarks (OpenDRIVE) for robust stop sign detection.
         try:
             world_map = self._world.get_map()
             if hasattr(world_map, "get_all_landmarks"):
@@ -222,7 +236,6 @@ class ErrorMonitor(threading.Thread):
         except Exception:
             self._stop_signs = []
 
-        # Fallback: world actors with stop in type_id.
         if not self._stop_signs:
             try:
                 world_map = self._world.get_map()
@@ -253,6 +266,7 @@ class ErrorMonitor(threading.Thread):
             self._draw_stop_debug()
 
     def _dedupe_stop_signs(self) -> None:
+        """Remove nearby duplicate stop sign entries."""
         if len(self._stop_signs) < 2:
             return
         dedupe_dist = float(self._cfg.stop_sign_dedupe_distance_m)
@@ -284,6 +298,7 @@ class ErrorMonitor(threading.Thread):
         self._stop_signs = unique
 
     def _draw_stop_debug(self) -> None:
+        """Draw stop sign debug geometry in the world."""
         try:
             dbg = self._world.debug
         except Exception:
@@ -313,6 +328,7 @@ class ErrorMonitor(threading.Thread):
                 pass
 
     def _shift_stop_waypoints_forward(self, stop_wps: List[carla.Waypoint]) -> List[carla.Waypoint]:
+        """Shift stop waypoints slightly forward along the lane."""
         if not stop_wps:
             return stop_wps
         adjusted: List[carla.Waypoint] = []
@@ -327,6 +343,7 @@ class ErrorMonitor(threading.Thread):
         return adjusted
 
     def _get_stop_waypoints(self, traffic_light: carla.TrafficLight) -> List[carla.Waypoint]:
+        """Return cached stop line waypoints for a traffic light."""
         cached = self._lights_stop_wps.get(traffic_light.id)
         if cached is not None:
             return cached
@@ -351,29 +368,34 @@ class ErrorMonitor(threading.Thread):
         return stop_wps
 
     def _set_tracked_red_light(self, traffic_light: carla.TrafficLight, stop_wps: List[carla.Waypoint]) -> None:
+        """Track a red light after the trigger volume is left."""
         if not stop_wps:
             return
         self._tracked_red_light_id = traffic_light.id
         self._tracked_red_light_stop_wps = stop_wps
 
     def _clear_tracked_red_light(self) -> None:
+        """Clear the currently tracked red light."""
         if self._tracked_red_light_id is not None:
             self._last_red_light_along.pop(self._tracked_red_light_id, None)
         self._tracked_red_light_id = None
         self._tracked_red_light_stop_wps = []
 
     def _log_red_light_violation(self, hero: carla.Vehicle, traffic_light_id: int, sim_time: float) -> None:
+        """Log a red light violation and update cooldown timers."""
         self._last_red_light_id = traffic_light_id
         self._last_red_light_time = sim_time
         self._last_red_light_wall_time = time.monotonic()
         self._logger.log(self._world, hero, "Red light violation", details=f"traffic_light_id={traffic_light_id}")
 
     def _along_from_stop(self, stop_wp: carla.Waypoint, location: carla.Location) -> float:
+        """Return the signed distance along the lane from the stop waypoint."""
         vec = location - stop_wp.transform.location
         fwd = stop_wp.transform.get_forward_vector()
         return vec.x * fwd.x + vec.y * fwd.y + vec.z * fwd.z
 
     def _lateral_distance(self, wp: carla.Waypoint, location: carla.Location) -> Optional[float]:
+        """Return the lateral distance from a waypoint to a location."""
         try:
             right = wp.transform.get_right_vector()
             diff = location - wp.transform.location
@@ -382,6 +404,7 @@ class ErrorMonitor(threading.Thread):
             return None
 
     def _passed_stop_line(self, hero: carla.Vehicle, stop_wps: List[carla.Waypoint]) -> bool:
+        """Check if the hero has passed the stop line on its current lane."""
         if not stop_wps:
             return False
         ego_loc = hero.get_location()
@@ -415,6 +438,7 @@ class ErrorMonitor(threading.Thread):
         return False
 
     def _check_harsh_brake(self, hero: carla.Vehicle, sim_time: float, dt: float) -> None:
+        """Detect and log harsh braking events."""
         if dt <= 0:
             return
         try:
@@ -443,6 +467,7 @@ class ErrorMonitor(threading.Thread):
         self._logger.log(self._world, hero, "Harsh braking", details=f"decel_mps2={decel:.3f}")
 
     def _check_red_light(self, hero: carla.Vehicle, speed_kmh: float, sim_time: float) -> None:
+        """Detect and log red light violations."""
         if speed_kmh < self._cfg.red_light_min_speed_kmh:
             return
         min_interval = float(getattr(self._cfg, "red_light_min_interval_seconds", 0.0))
@@ -454,7 +479,6 @@ class ErrorMonitor(threading.Thread):
         pass_threshold = float(self._cfg.red_light_pass_distance_m) + float(self._cfg.red_light_pass_buffer_m)
         track_distance = float(getattr(self._cfg, "red_light_track_distance_m", self._cfg.red_light_distance_m))
 
-        # Use the traffic light that actually affects the vehicle if available.
         try:
             tl = hero.get_traffic_light()
             tl_state = hero.get_traffic_light_state()
@@ -609,6 +633,7 @@ class ErrorMonitor(threading.Thread):
             self._clear_tracked_red_light()
 
     def _check_stop_sign(self, hero: carla.Vehicle, speed_kmh: float, sim_time: float) -> None:
+        """Detect and log stop sign violations."""
         self._refresh_stop_signs(sim_time)
         if not self._stop_signs:
             return
@@ -665,24 +690,17 @@ class ErrorMonitor(threading.Thread):
                 self._stop_zone_state.pop(sign_id, None)
 
     def _should_log_stop_violation(self, sim_time: float, ego_loc: carla.Location, sign_id: str) -> bool:
+        """Return True if a stop violation should be logged."""
         dedupe_time = float(self._cfg.stop_sign_dedupe_time_s)
-        dedupe_dist = float(self._cfg.stop_sign_dedupe_distance_m)
         if sim_time - self._last_stop_violation_time < dedupe_time:
-            if self._last_stop_violation_id is not None and sign_id == self._last_stop_violation_id:
-                return False
-            if self._last_stop_violation_loc is None:
-                return False
-            try:
-                if ego_loc.distance(self._last_stop_violation_loc) <= dedupe_dist:
-                    return False
-            except Exception:
-                return False
+            return False
         self._last_stop_violation_time = sim_time
         self._last_stop_violation_loc = ego_loc
         self._last_stop_violation_id = sign_id
         return True
 
     def run(self) -> None:
+        """Main thread loop: read ticks, update sensors, and check errors."""
         while not self._stop_event.is_set():
             try:
                 snapshot = self._world.wait_for_tick()
@@ -716,6 +734,7 @@ class ErrorMonitor(threading.Thread):
                 pass
 
     def _draw_traffic_light_stop_line(self, hero: carla.Vehicle, now: float) -> None:
+        """Draw a debug stop line for the relevant traffic light."""
         if not self._cfg.debug_stop_visualization:
             return
         refresh = max(0.5, min(2.0, float(self._cfg.debug_stop_life_time) * 0.5))

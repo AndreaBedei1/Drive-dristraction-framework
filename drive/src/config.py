@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Configuration loader and typed config models."""
+
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
 import yaml
@@ -7,6 +9,8 @@ import yaml
 
 @dataclass(frozen=True)
 class TrafficManagerConfig:
+    """Traffic manager tuning parameters."""
+
     port: int
     hybrid_physics_radius: float
     global_speed_percentage_difference: float
@@ -19,6 +23,7 @@ class TrafficManagerConfig:
 
 @dataclass(frozen=True)
 class CarlaConfig:
+    """Connection, map, and simulation settings."""
     host: str
     port: int
     timeout: float
@@ -31,17 +36,20 @@ class CarlaConfig:
 
 @dataclass(frozen=True)
 class WeatherConfig:
+    """Weather preset configuration."""
     preset: str
 
 
 @dataclass(frozen=True)
 class TrafficConfig:
+    """Traffic spawning settings."""
     vehicles: int
     safe_radius_from_route_start: float
 
 
 @dataclass(frozen=True)
 class PedestriansConfig:
+    """Pedestrian spawning settings."""
     walkers: int
     running_percentage: int
     crossing_percentage: int
@@ -51,6 +59,7 @@ class PedestriansConfig:
 
 @dataclass(frozen=True)
 class RouteConfig:
+    """Route generation parameters."""
     start_spawn_point: Union[str, int]
     end_spawn_point: Union[str, int]
     sampling_resolution: float
@@ -70,12 +79,14 @@ class RouteConfig:
 
 @dataclass(frozen=True)
 class ManualControlConfig:
+    """Manual control script location and arguments."""
     path: str
     extra_args: List[str]
 
 
 @dataclass(frozen=True)
 class ExperimentConfig:
+    """Experiment metadata and test overrides."""
     user_id: str
     run_id: int
     weather_label: str
@@ -89,6 +100,7 @@ class ExperimentConfig:
 
 @dataclass(frozen=True)
 class ErrorConfig:
+    """Error detection thresholds and timing settings."""
     harsh_brake_threshold_mps2: float
     harsh_brake_min_speed_kmh: float
     harsh_brake_min_brake: float
@@ -113,6 +125,7 @@ class ErrorConfig:
 
 @dataclass(frozen=True)
 class DistractionConfig:
+    """Distraction window timing and audio settings."""
     min_interval_seconds: float
     max_interval_seconds: float
     min_gap_between_windows_seconds: float
@@ -127,6 +140,7 @@ class DistractionConfig:
 
 @dataclass(frozen=True)
 class TrafficLightsConfig:
+    """Traffic light cycle timing."""
     green_time: float
     yellow_time: float
     red_time: float
@@ -134,6 +148,7 @@ class TrafficLightsConfig:
 
 @dataclass(frozen=True)
 class ScenarioConfig:
+    """Root configuration for the scenario runner."""
     carla: CarlaConfig
     weather: WeatherConfig
     traffic: TrafficConfig
@@ -147,10 +162,12 @@ class ScenarioConfig:
 
 
 def _get(d: Dict[str, Any], key: str, default: Any = None) -> Any:
+    """Return a key from a dict with a default."""
     return d[key] if key in d else default
 
 
 def _derive_weather_label(preset: str) -> str:
+    """Derive a short weather label from a preset name."""
     p = preset.lower()
     if "rain" in p or "wet" in p or "storm" in p:
         return "rain"
@@ -160,6 +177,7 @@ def _derive_weather_label(preset: str) -> str:
 
 
 def load_config(path: str) -> ScenarioConfig:
+    """Load a YAML file into typed configuration objects."""
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 

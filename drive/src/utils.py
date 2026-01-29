@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Shared utility helpers."""
+
 from typing import List, Optional, Tuple
 import math
 import random
@@ -8,10 +10,12 @@ import carla
 
 
 def seed_everything(seed: int) -> None:
+    """Seed Python's RNG."""
     random.seed(seed)
 
 
 def dist(a: carla.Location, b: carla.Location) -> float:
+    """Return Euclidean distance between two locations."""
     dx = a.x - b.x
     dy = a.y - b.y
     dz = a.z - b.z
@@ -19,6 +23,7 @@ def dist(a: carla.Location, b: carla.Location) -> float:
 
 
 def find_hero_vehicle(world: carla.World, preferred_role: str = "hero") -> Optional[carla.Vehicle]:
+    """Return the first vehicle with the given role name."""
     vehicles = world.get_actors().filter("vehicle.*")
     for v in vehicles:
         try:
@@ -36,6 +41,7 @@ def pick_spawn_point_indices(
     start_spec: object,
     end_spec: object,
 ) -> Tuple[int, int]:
+    """Pick start/end spawn point indices based on specs."""
     rng = random.Random(seed)
 
     n = len(spawn_points)
@@ -56,11 +62,9 @@ def pick_spawn_point_indices(
         start_idx = rng.randrange(n)
 
     if start_idx is None and str(start_spec) == "auto" and str(end_spec) in ("auto", "auto_far"):
-        # Choose start deterministically
         start_idx = rng.randrange(n)
 
     if end_idx is None and str(end_spec) == "auto":
-        # Independent deterministic end (can be close)
         end_idx = rng.randrange(n)
         if end_idx == start_idx:
             end_idx = (end_idx + 1) % n
