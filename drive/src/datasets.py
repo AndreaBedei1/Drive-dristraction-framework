@@ -7,7 +7,7 @@ import os
 import threading
 from dataclasses import dataclass
 import datetime
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Protocol, Tuple
 
 import carla
 
@@ -19,6 +19,14 @@ class DatasetContext:
     run_id: int
     weather_label: str
     map_name: str
+
+
+class ModelInferenceProvider(Protocol):
+    """Protocol for model inference providers used by dataset loggers."""
+
+    def get_window_summary(self) -> Tuple[str, float]:
+        """Return (label, probability) for the latest inference window."""
+        ...
 
 
 class _CsvWriter:
@@ -101,10 +109,17 @@ def _wall_time_iso() -> str:
 class ErrorDatasetLogger:
     """Logger for error events into Dataset Errors CSV."""
 
-    def __init__(self, output_dir: str, context: DatasetContext, suffix: str = "") -> None:
+    def __init__(
+        self,
+        output_dir: str,
+        context: DatasetContext,
+        suffix: str = "",
+        model_provider: Optional[ModelInferenceProvider] = None,
+    ) -> None:
         """Create a logger with a destination folder and context."""
         path = os.path.join(output_dir, f"Dataset Errors{suffix}.csv")
         self._context = context
+        self._model_provider = model_provider
         self._writer = _CsvWriter(
             path,
             [
@@ -113,6 +128,10 @@ class ErrorDatasetLogger:
                 "weather",
                 "map_name",
                 "error_type",
+                "model_pred_start",
+                "model_prob_start",
+                "model_pred_end",
+                "model_prob_end",
                 "speed_kmh",
                 "timestamp",
                 "frame",
@@ -125,6 +144,16 @@ class ErrorDatasetLogger:
                 "details",
             ],
         )
+
+    def _model_snapshot(self) -> Tuple[str, float]:
+        """Return the latest aggregated model label and probability."""
+        if self._model_provider is None:
+            return "None", 1.0
+        try:
+            label, prob = self._model_provider.get_window_summary()
+            return str(label), float(prob)
+        except Exception:
+            return "None", 1.0
 
     def log(
         self,
@@ -139,12 +168,18 @@ class ErrorDatasetLogger:
         except Exception:
             return
 
+        pred_label, pred_prob = self._model_snapshot()
+
         row: Dict[str, Any] = {
             "user_id": self._context.user_id,
             "run_id": self._context.run_id,
             "weather": self._context.weather_label,
             "map_name": self._context.map_name,
             "error_type": error_type,
+            "model_pred_start": pred_label,
+            "model_prob_start": round(pred_prob, 3),
+            "model_pred_end": pred_label,
+            "model_prob_end": round(pred_prob, 3),
             "speed_kmh": round(_speed_kmh(vehicle), 3),
             "timestamp": _wall_time_iso(),
             "details": details,
@@ -158,10 +193,17 @@ class ErrorDatasetLogger:
 class DistractionDatasetLogger:
     """Logger for distraction windows into Dataset Distractions CSV."""
 
-    def __init__(self, output_dir: str, context: DatasetContext, suffix: str = "") -> None:
+    def __init__(
+        self,
+        output_dir: str,
+        context: DatasetContext,
+        suffix: str = "",
+        model_provider: Optional[ModelInferenceProvider] = None,
+    ) -> None:
         """Create a logger with a destination folder and context."""
         path = os.path.join(output_dir, f"Dataset Distractions{suffix}.csv")
         self._context = context
+        self._model_provider = model_provider
         self._writer = _CsvWriter(
             path,
             [
@@ -193,6 +235,16 @@ class DistractionDatasetLogger:
         self._active: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
+    def _model_snapshot(self) -> Tuple[str, float]:
+        """Return the latest aggregated model label and probability."""
+        if self._model_provider is None:
+            return "None", 1.0
+        try:
+            label, prob = self._model_provider.get_window_summary()
+            return str(label), float(prob)
+        except Exception:
+            return "None", 1.0
+
     def start(self, window_id: str, world: carla.World, vehicle: carla.Actor) -> None:
         """Record the start of a distraction window."""
         with self._lock:
@@ -203,11 +255,14 @@ class DistractionDatasetLogger:
             except Exception:
                 return
             snap = _snapshot_info(world)
+            pred_label, pred_prob = self._model_snapshot()
             self._active[window_id] = {
                 "start_location": location,
                 "frame_start": snap.get("frame", ""),
                 "sim_time_start": snap.get("sim_time_seconds", ""),
                 "timestamp_start": _wall_time_iso(),
+                "model_pred_start": pred_label,
+                "model_prob_start": round(pred_prob, 3),
             }
 
     def finish(self, window_id: str, world: carla.World, vehicle: carla.Actor) -> None:
@@ -221,6 +276,7 @@ class DistractionDatasetLogger:
         except Exception:
             return
         snap = _snapshot_info(world)
+        end_pred_label, end_pred_prob = self._model_snapshot()
 
         start_loc: carla.Location = start_info["start_location"]
         row: Dict[str, Any] = {
@@ -236,10 +292,10 @@ class DistractionDatasetLogger:
             "end_z": float(end_location.z),
             "arousal_start": "",
             "arousal_end": "",
-            "model_pred_start": "",
-            "model_prob_start": "",
-            "model_pred_end": "",
-            "model_prob_end": "",
+            "model_pred_start": start_info.get("model_pred_start", ""),
+            "model_prob_start": start_info.get("model_prob_start", ""),
+            "model_pred_end": end_pred_label,
+            "model_prob_end": round(end_pred_prob, 3),
             "timestamp_start": start_info.get("timestamp_start", ""),
             "timestamp_end": _wall_time_iso(),
             "frame_start": start_info.get("frame_start", ""),

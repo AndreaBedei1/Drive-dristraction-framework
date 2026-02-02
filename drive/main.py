@@ -511,8 +511,29 @@ def main() -> int:
         weather_label=cfg.experiment.weather_label,
         map_name=map_name,
     )
-    error_logger = ErrorDatasetLogger(output_dir=output_dir, context=context, suffix=dataset_suffix)
-    distraction_logger = DistractionDatasetLogger(output_dir=output_dir, context=context, suffix=dataset_suffix)
+    model_inference = None
+    try:
+        from src.model_inference import ModelInferenceService
+
+        model_inference = ModelInferenceService()
+        model_inference.start()
+        print("[Runner] Model inference started (2 Hz, window=3).")
+    except Exception as exc:
+        print(f"[Runner] Model inference unavailable: {exc}")
+        model_inference = None
+
+    error_logger = ErrorDatasetLogger(
+        output_dir=output_dir,
+        context=context,
+        suffix=dataset_suffix,
+        model_provider=model_inference,
+    )
+    distraction_logger = DistractionDatasetLogger(
+        output_dir=output_dir,
+        context=context,
+        suffix=dataset_suffix,
+        model_provider=model_inference,
+    )
 
     error_monitor = ErrorMonitor(world=world, logger=error_logger, config=cfg.errors, preferred_role_name="hero")
     error_monitor.start()
@@ -621,6 +642,13 @@ def main() -> int:
         error_monitor.stop()
         for w in distraction_windows:
             w.stop()
+
+        if model_inference is not None:
+            model_inference.stop()
+            try:
+                model_inference.join(timeout=2.0)
+            except Exception:
+                pass
 
         if ticker is not None:
             ticker.stop()
