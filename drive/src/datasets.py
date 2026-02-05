@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, List, Protocol, Tuple
 
 import carla
 
+from src.arousal_provider import ArousalProvider, ArousalSnapshot
 
 @dataclass(frozen=True)
 class DatasetContext:
@@ -199,11 +200,13 @@ class DistractionDatasetLogger:
         context: DatasetContext,
         suffix: str = "",
         model_provider: Optional[ModelInferenceProvider] = None,
+        arousal_provider: Optional[ArousalProvider] = None,
     ) -> None:
         """Create a logger with a destination folder and context."""
         path = os.path.join(output_dir, f"Dataset Distractions{suffix}.csv")
         self._context = context
         self._model_provider = model_provider
+        self._arousal_provider = arousal_provider
         self._writer = _CsvWriter(
             path,
             [
@@ -245,6 +248,24 @@ class DistractionDatasetLogger:
         except Exception:
             return "None", 1.0
 
+    def _arousal_snapshot(self) -> ArousalSnapshot:
+        """Return the latest arousal snapshot."""
+        if self._arousal_provider is None:
+            return ArousalSnapshot(None, None, None, None)
+        try:
+            return self._arousal_provider.get_snapshot()
+        except Exception:
+            return ArousalSnapshot(None, None, None, None)
+
+    @staticmethod
+    def _format_arousal(value: Optional[float]) -> Any:
+        if value is None:
+            return ""
+        try:
+            return round(float(value), 3)
+        except Exception:
+            return ""
+
     def start(self, window_id: str, world: carla.World, vehicle: carla.Actor) -> None:
         """Record the start of a distraction window."""
         with self._lock:
@@ -256,6 +277,7 @@ class DistractionDatasetLogger:
                 return
             snap = _snapshot_info(world)
             pred_label, pred_prob = self._model_snapshot()
+            arousal = self._arousal_snapshot()
             self._active[window_id] = {
                 "start_location": location,
                 "frame_start": snap.get("frame", ""),
@@ -263,6 +285,7 @@ class DistractionDatasetLogger:
                 "timestamp_start": _wall_time_iso(),
                 "model_pred_start": pred_label,
                 "model_prob_start": round(pred_prob, 3),
+                "arousal_start": self._format_arousal(arousal.value),
             }
 
     def finish(self, window_id: str, world: carla.World, vehicle: carla.Actor) -> None:
@@ -277,6 +300,7 @@ class DistractionDatasetLogger:
             return
         snap = _snapshot_info(world)
         end_pred_label, end_pred_prob = self._model_snapshot()
+        end_arousal = self._arousal_snapshot()
 
         start_loc: carla.Location = start_info["start_location"]
         row: Dict[str, Any] = {
@@ -290,8 +314,8 @@ class DistractionDatasetLogger:
             "end_x": float(end_location.x),
             "end_y": float(end_location.y),
             "end_z": float(end_location.z),
-            "arousal_start": "",
-            "arousal_end": "",
+            "arousal_start": start_info.get("arousal_start", ""),
+            "arousal_end": self._format_arousal(end_arousal.value),
             "model_pred_start": start_info.get("model_pred_start", ""),
             "model_prob_start": start_info.get("model_prob_start", ""),
             "model_pred_end": end_pred_label,

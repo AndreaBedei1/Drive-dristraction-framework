@@ -123,6 +123,8 @@ class ModelInferenceService(threading.Thread):
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._last_error: Optional[str] = None
+        self._frame_lock = threading.Lock()
+        self._last_frame: Optional[np.ndarray] = None
 
     def stop(self) -> None:
         """Signal the worker thread to stop."""
@@ -131,6 +133,13 @@ class ModelInferenceService(threading.Thread):
     def last_error(self) -> Optional[str]:
         """Return the last error message, if any."""
         return self._last_error
+
+    def get_latest_frame(self) -> Optional[np.ndarray]:
+        """Return the latest camera frame (RGB)."""
+        with self._frame_lock:
+            if self._last_frame is None:
+                return None
+            return self._last_frame.copy()
 
     def get_window_summary(self) -> Tuple[str, float]:
         """Return majority label and mean probability over the rolling window."""
@@ -191,12 +200,15 @@ class ModelInferenceService(threading.Thread):
                 if not color_frame:
                     continue
 
+                frame_rgb = np.asanyarray(color_frame.get_data())
+                with self._frame_lock:
+                    self._last_frame = frame_rgb.copy()
+
                 now = time.monotonic()
                 if now - last_infer_t < infer_period:
                     continue
                 last_infer_t = now
 
-                frame_rgb = np.asanyarray(color_frame.get_data())
                 frame_rgb = _maybe_crop_roi(frame_rgb)
 
                 probs = _infer_probs(model, classifier, frame_rgb, preprocess, self._device)

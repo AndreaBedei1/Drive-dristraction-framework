@@ -3,6 +3,7 @@ from __future__ import annotations
 """Distraction window UI and coordination logic."""
 
 import random
+import string
 import threading
 import time
 from typing import Callable, Optional, Tuple
@@ -104,6 +105,8 @@ class DistractionWindow(threading.Thread):
         self._alert_start_time = 0.0
         self._flash_interval = self._flash_start_interval
         self._awaiting_ack = False
+        self._expected_letter = None
+        self._expected_vk = None
 
     def stop(self) -> None:
         """Stop the window and any active audio."""
@@ -134,7 +137,7 @@ class DistractionWindow(threading.Thread):
         self._label.pack(expand=True)
 
         self._set_idle()
-        self._start_space_listener()
+        self._start_key_listener()
         self._schedule_next()
         self._root.mainloop()
 
@@ -143,7 +146,9 @@ class DistractionWindow(threading.Thread):
         if self._root is None or self._label is None:
             return
         self._root.configure(bg="#1e1e1e")
-        self._label.configure(text="")
+        self._expected_letter = None
+        self._expected_vk = None
+        self._label.configure(text="", font=("Arial", 18, "bold"))
 
     def _schedule_next(self) -> None:
         """Schedule the next alert window."""
@@ -159,46 +164,37 @@ class DistractionWindow(threading.Thread):
         if not self._coord.request_start(self._id):
             self._root.after(500, self._try_start_alert)
             return
-        self._start_flashing()
+        self._start_alert()
 
-    def _start_flashing(self) -> None:
-        """Begin the flashing sequence before the alert expires."""
-        if self._root is None or self._label is None:
-            return
-        self._alert_start_time = time.monotonic()
-        self._flash_interval = self._flash_start_interval
-        self._label.configure(text="")
-        self._flash_step()
-
-    def _flash_step(self) -> None:
-        """Advance one flash step and reschedule the next."""
-        if self._stop_event.is_set() or self._root is None:
-            return
-        elapsed = time.monotonic() - self._alert_start_time
-        if elapsed >= self._flash_duration:
-            self._expire()
-            return
-
-        color = f"#{random.randint(0, 255):02x}{random.randint(0, 255):02x}{random.randint(0, 255):02x}"
-        self._root.configure(bg=color)
-
-        self._flash_interval = max(self._flash_min_interval, self._flash_interval * 0.85)
-        self._root.after(int(self._flash_interval * 1000), self._flash_step)
-
-    def _expire(self) -> None:
-        """Transition to the alarm state and wait for acknowledgment."""
+    def _start_alert(self) -> None:
+        """Start the alert immediately and wait for acknowledgment."""
         if self._root is None or self._label is None:
             return
         self._root.configure(bg="#b00020")
-        self._label.configure(text="PRESS\nTIME EXPIRED")
+        self._expected_letter = random.choice(string.ascii_uppercase)
+        self._expected_vk = ord(self._expected_letter)
+        self._label.configure(text=self._expected_letter, font=("Arial", 96, "bold"))
         self._awaiting_ack = True
         self._on_start(self._id)
         self._start_beep()
-        self._root.bind("<Button-1>", self._on_click)
+        try:
+            self._root.focus_force()
+        except Exception:
+            pass
+        self._root.bind("<Key>", self._on_key)
 
-    def _on_click(self, _event) -> None:
-        """Handle a mouse click acknowledgment."""
-        self._acknowledge()
+    def _on_key(self, event) -> None:
+        """Handle a keyboard acknowledgment."""
+        if not self._awaiting_ack:
+            return
+        if not self._expected_letter:
+            return
+        try:
+            pressed = event.char.upper() if event.char else ""
+        except Exception:
+            pressed = ""
+        if pressed == self._expected_letter:
+            self._acknowledge()
 
     def _acknowledge(self) -> None:
         """Clear the alarm state and schedule the next alert."""
@@ -207,7 +203,7 @@ class DistractionWindow(threading.Thread):
         if not self._awaiting_ack:
             return
         self._awaiting_ack = False
-        self._root.unbind("<Button-1>")
+        self._root.unbind("<Key>")
         self._beep_stop_event.set()
         self._on_finish(self._id)
         self._coord.finish(self._id)
@@ -215,16 +211,24 @@ class DistractionWindow(threading.Thread):
         self._focus_callback()
         self._schedule_next()
 
-    def _start_space_listener(self) -> None:
-        """Listen for the space bar globally on Windows."""
+    def _start_key_listener(self) -> None:
+        """Listen for the expected key globally on Windows."""
         if ctypes is None or sys.platform != "win32":
             return
 
         def _loop() -> None:
             last_down = False
+            last_vk = None
             while not self._stop_event.is_set():
+                vk = self._expected_vk if self._awaiting_ack else None
+                if vk != last_vk:
+                    last_down = False
+                    last_vk = vk
+                if vk is None:
+                    time.sleep(0.05)
+                    continue
                 try:
-                    down = bool(ctypes.windll.user32.GetAsyncKeyState(0x20) & 0x8000)
+                    down = bool(ctypes.windll.user32.GetAsyncKeyState(int(vk)) & 0x8000)
                 except Exception:
                     time.sleep(0.05)
                     continue

@@ -22,6 +22,8 @@ from src.ticker import WorldTicker
 from src.datasets import DatasetContext, ErrorDatasetLogger, DistractionDatasetLogger
 from src.error_monitor import ErrorMonitor
 from src.distraction_windows import DistractionCoordinator, DistractionWindow, focus_simulation_window
+from src.arousal_provider import MqttArousalClient
+from src.camera_preview import CameraPreviewWindow, preview_available
 
 
 def _resolve_manual_control_path(path: str) -> str:
@@ -522,6 +524,19 @@ def main() -> int:
         print(f"[Runner] Model inference unavailable: {exc}")
         model_inference = None
 
+    arousal_client = None
+    mqtt_url = os.environ.get("AROUSAL_MQTT_URL", "").strip()
+    mqtt_topic = os.environ.get("AROUSAL_MQTT_TOPIC", "").strip()
+    if mqtt_url:
+        arousal_client = MqttArousalClient(mqtt_url, topic=mqtt_topic or None)
+        if arousal_client.start():
+            print("[Runner] Arousal MQTT subscriber started.")
+        else:
+            print(f"[Runner] Arousal MQTT unavailable: {arousal_client.last_error()}")
+            arousal_client = None
+    else:
+        print("[Runner] Arousal MQTT disabled (set AROUSAL_MQTT_URL to enable).")
+
     error_logger = ErrorDatasetLogger(
         output_dir=output_dir,
         context=context,
@@ -533,6 +548,7 @@ def main() -> int:
         context=context,
         suffix=dataset_suffix,
         model_provider=model_inference,
+        arousal_provider=arousal_client,
     )
 
     error_monitor = ErrorMonitor(world=world, logger=error_logger, config=cfg.errors, preferred_role_name="hero")
@@ -540,6 +556,19 @@ def main() -> int:
 
     monitor_rects = _get_monitor_rects()
     left_rect, center_rect, right_rect = _pick_monitor_layout(monitor_rects)
+    preview_window = None
+    if model_inference is not None:
+        if preview_available():
+            try:
+                preview_window = CameraPreviewWindow(
+                    model_provider=model_inference,
+                    arousal_provider=arousal_client,
+                )
+                preview_window.start()
+            except Exception as exc:
+                print(f"[Runner] Camera preview unavailable: {exc}")
+        else:
+            print("[Runner] Camera preview unavailable (opencv-python not installed).")
     coord = DistractionCoordinator(cfg.distractions.min_gap_between_windows_seconds)
     window_titles = list(cfg.distractions.window_titles)
     while len(window_titles) < 2:
@@ -642,6 +671,10 @@ def main() -> int:
         error_monitor.stop()
         for w in distraction_windows:
             w.stop()
+        if preview_window is not None:
+            preview_window.stop()
+        if arousal_client is not None:
+            arousal_client.stop()
 
         if model_inference is not None:
             model_inference.stop()
