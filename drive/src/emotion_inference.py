@@ -53,6 +53,26 @@ def _import_deepface():
         return DeepFace
 
 
+def _log_runtime_env(detector_backend: str) -> None:
+    print(f"[Emotion] detector_backend={detector_backend}")
+    try:
+        import tensorflow as tf  # type: ignore
+
+        gpus = tf.config.list_physical_devices("GPU")
+        print(f"[Emotion] tensorflow={tf.__version__} gpus={len(gpus)} {gpus}")
+    except Exception as exc:
+        print(f"[Emotion] tensorflow_unavailable: {exc}")
+
+    try:
+        import torch  # type: ignore
+
+        print(f"[Emotion] torch={torch.__version__} cuda_available={torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            print(f"[Emotion] torch_cuda_device={torch.cuda.get_device_name(0)}")
+    except Exception as exc:
+        print(f"[Emotion] torch_unavailable: {exc}")
+
+
 def _normalize_results(raw: Any) -> List[Dict[str, Any]]:
     if isinstance(raw, dict):
         return [raw]
@@ -156,6 +176,7 @@ class EmotionInferenceService(threading.Thread, EmotionProvider):
         except Exception as exc:
             self._last_error = f"deepface_import_failed: {exc}"
             return
+        _log_runtime_env(self._detector_backend)
 
         infer_period = 1.0 / max(0.1, self._target_hz)
         last_infer_t = 0.0

@@ -285,7 +285,12 @@ def _pick_farthest_index_filtered(
 def main() -> int:
     """Entry point for running a driving scenario."""
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True, help="Path to scenario YAML config.")
+    default_config = os.path.abspath(os.path.join(os.path.dirname(__file__), "config", "scenario.yaml"))
+    ap.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to scenario YAML config. (default: {default_config})",
+    )
     ap.add_argument("--no-launch-manual", action="store_true", help="Do not launch manual_control_steeringwheel.py.")
     args = ap.parse_args()
 

@@ -8,7 +8,7 @@ carla:
   map_preference: ["Town10HD", "Town04"]
 
   sync: true
-  fixed_delta_seconds: 0.055
+  fixed_delta_seconds: 0.040
 
   traffic_manager:
     port: 8000
