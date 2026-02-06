@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, List, Protocol, Tuple
 import carla
 
 from src.arousal_provider import ArousalProvider, ArousalSnapshot
+from src.emotion_provider import EmotionProvider, EmotionSnapshot
 
 @dataclass(frozen=True)
 class DatasetContext:
@@ -107,6 +108,25 @@ def _wall_time_iso() -> str:
     return datetime.datetime.utcnow().isoformat()
 
 
+def _format_emotion_label(value: Optional[str]) -> str:
+    if value is None:
+        return "None"
+    try:
+        text = str(value).strip()
+    except Exception:
+        return "None"
+    return text or "None"
+
+
+def _format_emotion_prob(value: Optional[float]) -> Any:
+    if value is None:
+        return ""
+    try:
+        return round(float(value), 3)
+    except Exception:
+        return ""
+
+
 class ErrorDatasetLogger:
     """Logger for error events into Dataset Errors CSV."""
 
@@ -116,11 +136,13 @@ class ErrorDatasetLogger:
         context: DatasetContext,
         suffix: str = "",
         model_provider: Optional[ModelInferenceProvider] = None,
+        emotion_provider: Optional[EmotionProvider] = None,
     ) -> None:
         """Create a logger with a destination folder and context."""
         path = os.path.join(output_dir, f"Dataset Errors{suffix}.csv")
         self._context = context
         self._model_provider = model_provider
+        self._emotion_provider = emotion_provider
         self._writer = _CsvWriter(
             path,
             [
@@ -133,6 +155,8 @@ class ErrorDatasetLogger:
                 "model_prob_start",
                 "model_pred_end",
                 "model_prob_end",
+                "emotion_label",
+                "emotion_prob",
                 "speed_kmh",
                 "timestamp",
                 "frame",
@@ -156,6 +180,15 @@ class ErrorDatasetLogger:
         except Exception:
             return "None", 1.0
 
+    def _emotion_snapshot(self) -> EmotionSnapshot:
+        """Return the latest emotion snapshot."""
+        if self._emotion_provider is None:
+            return EmotionSnapshot(None, None, None)
+        try:
+            return self._emotion_provider.get_snapshot()
+        except Exception:
+            return EmotionSnapshot(None, None, None)
+
     def log(
         self,
         world: carla.World,
@@ -170,6 +203,7 @@ class ErrorDatasetLogger:
             return
 
         pred_label, pred_prob = self._model_snapshot()
+        emotion = self._emotion_snapshot()
 
         row: Dict[str, Any] = {
             "user_id": self._context.user_id,
@@ -181,6 +215,8 @@ class ErrorDatasetLogger:
             "model_prob_start": round(pred_prob, 3),
             "model_pred_end": pred_label,
             "model_prob_end": round(pred_prob, 3),
+            "emotion_label": _format_emotion_label(emotion.label),
+            "emotion_prob": _format_emotion_prob(emotion.prob),
             "speed_kmh": round(_speed_kmh(vehicle), 3),
             "timestamp": _wall_time_iso(),
             "details": details,
@@ -201,12 +237,14 @@ class DistractionDatasetLogger:
         suffix: str = "",
         model_provider: Optional[ModelInferenceProvider] = None,
         arousal_provider: Optional[ArousalProvider] = None,
+        emotion_provider: Optional[EmotionProvider] = None,
     ) -> None:
         """Create a logger with a destination folder and context."""
         path = os.path.join(output_dir, f"Dataset Distractions{suffix}.csv")
         self._context = context
         self._model_provider = model_provider
         self._arousal_provider = arousal_provider
+        self._emotion_provider = emotion_provider
         self._writer = _CsvWriter(
             path,
             [
@@ -226,6 +264,10 @@ class DistractionDatasetLogger:
                 "model_prob_start",
                 "model_pred_end",
                 "model_prob_end",
+                "emotion_label_start",
+                "emotion_prob_start",
+                "emotion_label_end",
+                "emotion_prob_end",
                 "timestamp_start",
                 "timestamp_end",
                 "frame_start",
@@ -257,6 +299,15 @@ class DistractionDatasetLogger:
         except Exception:
             return ArousalSnapshot(None, None, None, None)
 
+    def _emotion_snapshot(self) -> EmotionSnapshot:
+        """Return the latest emotion snapshot."""
+        if self._emotion_provider is None:
+            return EmotionSnapshot(None, None, None)
+        try:
+            return self._emotion_provider.get_snapshot()
+        except Exception:
+            return EmotionSnapshot(None, None, None)
+
     @staticmethod
     def _format_arousal(value: Optional[float]) -> Any:
         if value is None:
@@ -278,6 +329,7 @@ class DistractionDatasetLogger:
             snap = _snapshot_info(world)
             pred_label, pred_prob = self._model_snapshot()
             arousal = self._arousal_snapshot()
+            emotion = self._emotion_snapshot()
             self._active[window_id] = {
                 "start_location": location,
                 "frame_start": snap.get("frame", ""),
@@ -286,6 +338,8 @@ class DistractionDatasetLogger:
                 "model_pred_start": pred_label,
                 "model_prob_start": round(pred_prob, 3),
                 "arousal_start": self._format_arousal(arousal.value),
+                "emotion_label_start": _format_emotion_label(emotion.label),
+                "emotion_prob_start": _format_emotion_prob(emotion.prob),
             }
 
     def finish(self, window_id: str, world: carla.World, vehicle: carla.Actor) -> None:
@@ -301,6 +355,7 @@ class DistractionDatasetLogger:
         snap = _snapshot_info(world)
         end_pred_label, end_pred_prob = self._model_snapshot()
         end_arousal = self._arousal_snapshot()
+        end_emotion = self._emotion_snapshot()
 
         start_loc: carla.Location = start_info["start_location"]
         row: Dict[str, Any] = {
@@ -320,6 +375,10 @@ class DistractionDatasetLogger:
             "model_prob_start": start_info.get("model_prob_start", ""),
             "model_pred_end": end_pred_label,
             "model_prob_end": round(end_pred_prob, 3),
+            "emotion_label_start": start_info.get("emotion_label_start", ""),
+            "emotion_prob_start": start_info.get("emotion_prob_start", ""),
+            "emotion_label_end": _format_emotion_label(end_emotion.label),
+            "emotion_prob_end": _format_emotion_prob(end_emotion.prob),
             "timestamp_start": start_info.get("timestamp_start", ""),
             "timestamp_end": _wall_time_iso(),
             "frame_start": start_info.get("frame_start", ""),

@@ -12,6 +12,7 @@ except Exception:  # pragma: no cover - handled at runtime
     cv2 = None
 
 from src.arousal_provider import ArousalProvider
+from src.emotion_provider import EmotionProvider
 
 
 class ModelInferenceProvider(Protocol):
@@ -37,11 +38,13 @@ class CameraPreviewWindow(threading.Thread):
         self,
         model_provider: Optional[ModelInferenceProvider],
         arousal_provider: Optional[ArousalProvider],
+        emotion_provider: Optional[EmotionProvider] = None,
         title: str = "Driver Camera",
     ) -> None:
         super().__init__(daemon=True)
         self._model_provider = model_provider
         self._arousal_provider = arousal_provider
+        self._emotion_provider = emotion_provider
         self._title = title
         self._stop_event = threading.Event()
 
@@ -76,6 +79,19 @@ class CameraPreviewWindow(threading.Thread):
             return "Class: None", "Prob: --"
         return f"Class: {label}", f"Prob: {prob:.2f}"
 
+    def _emotion_text(self) -> str:
+        if self._emotion_provider is None:
+            return "Emotion: --"
+        try:
+            snap = self._emotion_provider.get_snapshot()
+        except Exception:
+            return "Emotion: --"
+        if snap.label is None:
+            return "Emotion: --"
+        if snap.prob is None:
+            return f"Emotion: {snap.label}"
+        return f"Emotion: {snap.label} ({snap.prob:.2f})"
+
     def run(self) -> None:
         """Start the OpenCV preview loop."""
         if cv2 is None:
@@ -101,10 +117,12 @@ class CameraPreviewWindow(threading.Thread):
 
             class_text, prob_text = self._model_text()
             arousal_text = self._arousal_text()
+            emotion_text = self._emotion_text()
 
             cv2.putText(frame_bgr, class_text, (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             cv2.putText(frame_bgr, prob_text, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             cv2.putText(frame_bgr, arousal_text, (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
+            cv2.putText(frame_bgr, emotion_text, (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 0), 2)
 
             cv2.imshow(self._title, frame_bgr)
             key = cv2.waitKey(1) & 0xFF

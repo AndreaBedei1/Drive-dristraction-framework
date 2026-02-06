@@ -524,6 +524,20 @@ def main() -> int:
         print(f"[Runner] Model inference unavailable: {exc}")
         model_inference = None
 
+    emotion_inference = None
+    try:
+        from src.emotion_inference import EmotionInferenceService
+
+        if model_inference is not None:
+            emotion_inference = EmotionInferenceService(frame_provider=model_inference)
+            emotion_inference.start()
+            print("[Runner] Emotion inference started (1 Hz).")
+        else:
+            print("[Runner] Emotion inference disabled (model inference unavailable).")
+    except Exception as exc:
+        print(f"[Runner] Emotion inference unavailable: {exc}")
+        emotion_inference = None
+
     arousal_client = None
     mqtt_url = os.environ.get("AROUSAL_MQTT_URL", "").strip()
     mqtt_topic = os.environ.get("AROUSAL_MQTT_TOPIC", "").strip()
@@ -542,6 +556,7 @@ def main() -> int:
         context=context,
         suffix=dataset_suffix,
         model_provider=model_inference,
+        emotion_provider=emotion_inference,
     )
     distraction_logger = DistractionDatasetLogger(
         output_dir=output_dir,
@@ -549,6 +564,7 @@ def main() -> int:
         suffix=dataset_suffix,
         model_provider=model_inference,
         arousal_provider=arousal_client,
+        emotion_provider=emotion_inference,
     )
 
     error_monitor = ErrorMonitor(world=world, logger=error_logger, config=cfg.errors, preferred_role_name="hero")
@@ -563,6 +579,7 @@ def main() -> int:
                 preview_window = CameraPreviewWindow(
                     model_provider=model_inference,
                     arousal_provider=arousal_client,
+                    emotion_provider=emotion_inference,
                 )
                 preview_window.start()
             except Exception as exc:
@@ -675,6 +692,13 @@ def main() -> int:
             preview_window.stop()
         if arousal_client is not None:
             arousal_client.stop()
+
+        if emotion_inference is not None:
+            emotion_inference.stop()
+            try:
+                emotion_inference.join(timeout=2.0)
+            except Exception:
+                pass
 
         if model_inference is not None:
             model_inference.stop()
