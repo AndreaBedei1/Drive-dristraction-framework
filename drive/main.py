@@ -502,6 +502,7 @@ def main() -> int:
         auto_reset_on_finish=cfg.route.auto_reset_on_finish,
         reset_cooldown_seconds=cfg.route.reset_cooldown_seconds,
         preferred_role_name="hero",
+        tick_source=ticker,
     )
     monitor.start()
 
@@ -519,21 +520,31 @@ def main() -> int:
         map_name=map_name,
     )
     model_inference = None
-    try:
-        from src.model_inference import ModelInferenceService
-
-        model_inference = ModelInferenceService()
-        model_inference.start()
-        print("[Runner] Model inference started (2 Hz, window=3).")
-    except Exception as exc:
-        print(f"[Runner] Model inference unavailable: {exc}")
-        model_inference = None
+    if cfg.inference.enable_model:
+        try:
+            if cfg.inference.use_process:
+                from src.model_inference import ModelInferenceProcess as ModelInferenceProvider
+                model_inference = ModelInferenceProvider()
+                model_inference.start()
+                print("[Runner] Model inference started (process, 2 Hz, window=3).")
+            else:
+                from src.model_inference import ModelInferenceService as ModelInferenceProvider
+                model_inference = ModelInferenceProvider()
+                model_inference.start()
+                print("[Runner] Model inference started (thread, 2 Hz, window=3).")
+        except Exception as exc:
+            print(f"[Runner] Model inference unavailable: {exc}")
+            model_inference = None
+    else:
+        print("[Runner] Model inference disabled by config.")
 
     emotion_inference = None
     try:
         from src.emotion_inference import EmotionInferenceService
 
-        if model_inference is not None:
+        if not cfg.inference.enable_emotion:
+            print("[Runner] Emotion inference disabled by config.")
+        elif model_inference is not None:
             emotion_inference = EmotionInferenceService(frame_provider=model_inference)
             emotion_inference.start()
             print("[Runner] Emotion inference started (1 Hz).")
@@ -572,81 +583,102 @@ def main() -> int:
         emotion_provider=emotion_inference,
     )
 
-    error_monitor = ErrorMonitor(world=world, logger=error_logger, config=cfg.errors, preferred_role_name="hero")
+    error_monitor = ErrorMonitor(
+        world=world,
+        logger=error_logger,
+        config=cfg.errors,
+        preferred_role_name="hero",
+        tick_source=ticker,
+    )
     error_monitor.start()
 
     monitor_rects = _get_monitor_rects()
     left_rect, center_rect, right_rect = _pick_monitor_layout(monitor_rects)
     preview_window = None
-    if model_inference is not None:
+    if cfg.inference.enable_preview and model_inference is not None:
         if preview_available():
             try:
                 preview_window = CameraPreviewWindow(
                     model_provider=model_inference,
                     arousal_provider=arousal_client,
                     emotion_provider=emotion_inference,
+                    target_hz=cfg.inference.preview_hz,
                 )
                 preview_window.start()
             except Exception as exc:
                 print(f"[Runner] Camera preview unavailable: {exc}")
         else:
             print("[Runner] Camera preview unavailable (opencv-python not installed).")
-    coord = DistractionCoordinator(cfg.distractions.min_gap_between_windows_seconds)
-    window_titles = list(cfg.distractions.window_titles)
-    while len(window_titles) < 2:
-        window_titles.append(f"Distrazione {len(window_titles) + 1}")
+    elif not cfg.inference.enable_preview:
+        print("[Runner] Camera preview disabled by config.")
+    distraction_windows = []
+    if cfg.distractions.enabled:
+        coord = DistractionCoordinator(cfg.distractions.min_gap_between_windows_seconds)
+        window_titles = list(cfg.distractions.window_titles)
+        while len(window_titles) < 2:
+            window_titles.append(f"Distrazione {len(window_titles) + 1}")
 
-    def _with_hero(fn) -> None:
-        hero = find_hero_vehicle(world, preferred_role="hero")
-        if hero is None:
-            return
-        fn(hero)
+        def _with_hero(fn) -> None:
+            hero = find_hero_vehicle(world, preferred_role="hero")
+            if hero is None:
+                return
+            fn(hero)
 
-    def _on_distraction_start(window_id: str) -> None:
-        _with_hero(lambda hero: distraction_logger.start(window_id, world, hero))
+        def _on_distraction_start(window_id: str) -> None:
+            _with_hero(lambda hero: distraction_logger.start(window_id, world, hero))
 
-    def _on_distraction_finish(window_id: str) -> None:
-        _with_hero(lambda hero: distraction_logger.finish(window_id, world, hero))
+        def _on_distraction_finish(window_id: str) -> None:
+            _with_hero(lambda hero: distraction_logger.finish(window_id, world, hero))
 
-    def _refocus_sim() -> None:
-        focus_simulation_window(cfg.distractions.simulation_window_title)
+        def _refocus_sim() -> None:
+            focus_simulation_window(cfg.distractions.simulation_window_title)
 
-    distraction_windows = [
-        DistractionWindow(
-            window_id="window_1",
-            title=window_titles[0],
-            coordinator=coord,
-            min_interval_seconds=cfg.distractions.min_interval_seconds,
-            max_interval_seconds=cfg.distractions.max_interval_seconds,
-            flash_duration_seconds=cfg.distractions.flash_duration_seconds,
-            flash_start_interval_seconds=cfg.distractions.flash_start_interval_seconds,
-            flash_min_interval_seconds=cfg.distractions.flash_min_interval_seconds,
-            beep_frequency_hz=cfg.distractions.beep_frequency_hz,
-            beep_duration_ms=cfg.distractions.beep_duration_ms,
-            on_start=_on_distraction_start,
-            on_finish=_on_distraction_finish,
-            focus_callback=_refocus_sim,
-            monitor_rect=left_rect,
-        ),
-        DistractionWindow(
-            window_id="window_2",
-            title=window_titles[1],
-            coordinator=coord,
-            min_interval_seconds=cfg.distractions.min_interval_seconds,
-            max_interval_seconds=cfg.distractions.max_interval_seconds,
-            flash_duration_seconds=cfg.distractions.flash_duration_seconds,
-            flash_start_interval_seconds=cfg.distractions.flash_start_interval_seconds,
-            flash_min_interval_seconds=cfg.distractions.flash_min_interval_seconds,
-            beep_frequency_hz=cfg.distractions.beep_frequency_hz,
-            beep_duration_ms=cfg.distractions.beep_duration_ms,
-            on_start=_on_distraction_start,
-            on_finish=_on_distraction_finish,
-            focus_callback=_refocus_sim,
-            monitor_rect=right_rect,
-        ),
-    ]
-    for w in distraction_windows:
-        w.start()
+        distraction_windows = [
+            DistractionWindow(
+                window_id="window_1",
+                title=window_titles[0],
+                coordinator=coord,
+                min_interval_seconds=cfg.distractions.min_interval_seconds,
+                max_interval_seconds=cfg.distractions.max_interval_seconds,
+                flash_duration_seconds=cfg.distractions.flash_duration_seconds,
+                flash_start_interval_seconds=cfg.distractions.flash_start_interval_seconds,
+                flash_min_interval_seconds=cfg.distractions.flash_min_interval_seconds,
+                beep_frequency_hz=cfg.distractions.beep_frequency_hz,
+                beep_duration_ms=cfg.distractions.beep_duration_ms,
+                on_start=_on_distraction_start,
+                on_finish=_on_distraction_finish,
+                focus_callback=_refocus_sim,
+                monitor_rect=left_rect,
+                fullscreen=cfg.distractions.fullscreen,
+                steal_focus=cfg.distractions.steal_focus,
+                anchor="top_left",
+                excluded_letters=tuple(cfg.distractions.excluded_letters),
+            ),
+            DistractionWindow(
+                window_id="window_2",
+                title=window_titles[1],
+                coordinator=coord,
+                min_interval_seconds=cfg.distractions.min_interval_seconds,
+                max_interval_seconds=cfg.distractions.max_interval_seconds,
+                flash_duration_seconds=cfg.distractions.flash_duration_seconds,
+                flash_start_interval_seconds=cfg.distractions.flash_start_interval_seconds,
+                flash_min_interval_seconds=cfg.distractions.flash_min_interval_seconds,
+                beep_frequency_hz=cfg.distractions.beep_frequency_hz,
+                beep_duration_ms=cfg.distractions.beep_duration_ms,
+                on_start=_on_distraction_start,
+                on_finish=_on_distraction_finish,
+                focus_callback=_refocus_sim,
+                monitor_rect=right_rect,
+                fullscreen=cfg.distractions.fullscreen,
+                steal_focus=cfg.distractions.steal_focus,
+                anchor="top_right",
+                excluded_letters=tuple(cfg.distractions.excluded_letters),
+            ),
+        ]
+        for w in distraction_windows:
+            w.start()
+    else:
+        print("[Runner] Distraction windows disabled by config.")
 
     proc = None
     mc_env = os.environ.copy()

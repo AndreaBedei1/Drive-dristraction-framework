@@ -40,12 +40,14 @@ class CameraPreviewWindow(threading.Thread):
         arousal_provider: Optional[ArousalProvider],
         emotion_provider: Optional[EmotionProvider] = None,
         title: str = "Driver Camera",
+        target_hz: float = 15.0,
     ) -> None:
         super().__init__(daemon=True)
         self._model_provider = model_provider
         self._arousal_provider = arousal_provider
         self._emotion_provider = emotion_provider
         self._title = title
+        self._period = 1.0 / max(0.1, float(target_hz))
         self._stop_event = threading.Event()
 
     def stop(self) -> None:
@@ -98,6 +100,7 @@ class CameraPreviewWindow(threading.Thread):
             return
 
         while not self._stop_event.is_set():
+            loop_start = time.perf_counter()
             frame = None
             if self._model_provider is not None:
                 try:
@@ -129,3 +132,8 @@ class CameraPreviewWindow(threading.Thread):
             if key in (ord("q"), ord("Q")):
                 self.stop()
                 break
+
+            elapsed = time.perf_counter() - loop_start
+            remaining = self._period - elapsed
+            if remaining > 0:
+                time.sleep(remaining)

@@ -126,6 +126,10 @@ class ErrorConfig:
 @dataclass(frozen=True)
 class DistractionConfig:
     """Distraction window timing and audio settings."""
+    enabled: bool
+    fullscreen: bool
+    steal_focus: bool
+    excluded_letters: List[str]
     min_interval_seconds: float
     max_interval_seconds: float
     min_gap_between_windows_seconds: float
@@ -147,6 +151,16 @@ class TrafficLightsConfig:
 
 
 @dataclass(frozen=True)
+class InferenceConfig:
+    """Model/emotion inference toggles."""
+    enable_model: bool
+    enable_emotion: bool
+    enable_preview: bool
+    use_process: bool
+    preview_hz: float
+
+
+@dataclass(frozen=True)
 class ScenarioConfig:
     """Root configuration for the scenario runner."""
     carla: CarlaConfig
@@ -159,6 +173,7 @@ class ScenarioConfig:
     errors: ErrorConfig
     distractions: DistractionConfig
     traffic_lights: TrafficLightsConfig
+    inference: InferenceConfig
 
 
 def _get(d: Dict[str, Any], key: str, default: Any = None) -> Any:
@@ -283,6 +298,10 @@ def load_config(path: str) -> ScenarioConfig:
 
     dis_raw = _get(raw, "distractions", {})
     dis_cfg = DistractionConfig(
+        enabled=bool(_get(dis_raw, "enabled", True)),
+        fullscreen=bool(_get(dis_raw, "fullscreen", False)),
+        steal_focus=bool(_get(dis_raw, "steal_focus", False)),
+        excluded_letters=[str(x) for x in _get(dis_raw, "excluded_letters", []) or []],
         min_interval_seconds=float(_get(dis_raw, "min_interval_seconds", 25.0)),
         max_interval_seconds=float(_get(dis_raw, "max_interval_seconds", 35.0)),
         min_gap_between_windows_seconds=float(_get(dis_raw, "min_gap_between_windows_seconds", 5.0)),
@@ -302,6 +321,15 @@ def load_config(path: str) -> ScenarioConfig:
         red_time=float(_get(tl_raw, "red_time", 8.0)),
     )
 
+    inf_raw = _get(raw, "inference", {})
+    inf_cfg = InferenceConfig(
+        enable_model=bool(_get(inf_raw, "enable_model", True)),
+        enable_emotion=bool(_get(inf_raw, "enable_emotion", True)),
+        enable_preview=bool(_get(inf_raw, "enable_preview", True)),
+        use_process=bool(_get(inf_raw, "use_process", False)),
+        preview_hz=float(_get(inf_raw, "preview_hz", 15.0)),
+    )
+
     return ScenarioConfig(
         carla=carla_cfg,
         weather=weather_cfg,
@@ -313,4 +341,5 @@ def load_config(path: str) -> ScenarioConfig:
         errors=err_cfg,
         distractions=dis_cfg,
         traffic_lights=tl_cfg,
+        inference=inf_cfg,
     )

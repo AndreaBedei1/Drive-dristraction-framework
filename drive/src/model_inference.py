@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import time
 import threading
+import multiprocessing as mp
+import queue as pyqueue
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional, Tuple
@@ -225,3 +227,209 @@ class ModelInferenceService(threading.Thread):
                     pipeline.stop()
                 except Exception:
                     pass
+
+
+def _queue_put_latest(q: mp.Queue, item) -> None:
+    """Put item in a queue, dropping the oldest on overflow."""
+    try:
+        q.put_nowait(item)
+        return
+    except pyqueue.Full:
+        pass
+    try:
+        q.get_nowait()
+    except pyqueue.Empty:
+        pass
+    try:
+        q.put_nowait(item)
+    except pyqueue.Full:
+        pass
+
+
+def _inference_worker(
+    stop_event: mp.Event,
+    result_queue: mp.Queue,
+    frame_queue: mp.Queue,
+    classifier_path: str,
+    device: str,
+    target_hz: float,
+    threshold: float,
+) -> None:
+    """Process worker: run inference and send results to queues."""
+    pipeline = None
+    try:
+        classifier = joblib.load(classifier_path)
+        model, preprocess = clip.load("ViT-L/14", device=device)
+        model.eval()
+
+        width, height, cam_fps = 640, 480, 15
+        pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.color, width, height, rs.format.rgb8, cam_fps)
+        pipeline.start(config)
+        time.sleep(0.5)
+
+        dummy = np.zeros((height, width, 3), dtype=np.uint8)
+        _ = _infer_probs(model, classifier, dummy, preprocess, device)
+
+        infer_period = 1.0 / max(0.1, float(target_hz))
+        last_infer_t = 0.0
+
+        while not stop_event.is_set():
+            try:
+                frames = pipeline.wait_for_frames(timeout_ms=1000)
+            except Exception:
+                frames = None
+            if not frames:
+                continue
+            color_frame = frames.get_color_frame()
+            if not color_frame:
+                continue
+
+            frame_rgb = np.asanyarray(color_frame.get_data())
+            _queue_put_latest(frame_queue, frame_rgb)
+
+            now = time.monotonic()
+            if now - last_infer_t < infer_period:
+                continue
+            last_infer_t = now
+
+            frame_rgb = _maybe_crop_roi(frame_rgb)
+
+            probs = _infer_probs(model, classifier, frame_rgb, preprocess, device)
+            label, prob = _postprocess_probs(probs, threshold)
+            _queue_put_latest(result_queue, InferenceResult(label=label, prob=float(prob), timestamp=now))
+
+    except Exception as exc:
+        _queue_put_latest(result_queue, ("error", str(exc)))
+    finally:
+        if pipeline is not None:
+            try:
+                pipeline.stop()
+            except Exception:
+                pass
+
+
+class ModelInferenceProcess:
+    """Run model inference in a separate process."""
+
+    def __init__(
+        self,
+        classifier_path: Optional[str] = None,
+        device: Optional[str] = None,
+        target_hz: float = TARGET_INFER_HZ,
+        window_size: int = WINDOW_SIZE,
+        threshold: float = RAW_THRESHOLD,
+    ) -> None:
+        self._classifier_path = classifier_path or _default_classifier_path()
+        self._device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self._target_hz = float(target_hz)
+        self._window_size = int(window_size)
+        self._threshold = float(threshold)
+
+        self._history: Deque[InferenceResult] = deque(maxlen=self._window_size)
+        self._last_frame: Optional[np.ndarray] = None
+        self._last_error: Optional[str] = None
+
+        self._stop_event = mp.Event()
+        self._result_queue: mp.Queue = mp.Queue(maxsize=max(2, self._window_size * 3))
+        self._frame_queue: mp.Queue = mp.Queue(maxsize=1)
+        self._proc: Optional[mp.Process] = None
+
+    def start(self) -> None:
+        """Start the subprocess."""
+        if self._proc is not None:
+            return
+        self._proc = mp.Process(
+            target=_inference_worker,
+            args=(
+                self._stop_event,
+                self._result_queue,
+                self._frame_queue,
+                self._classifier_path,
+                self._device,
+                self._target_hz,
+                self._threshold,
+            ),
+            daemon=True,
+        )
+        self._proc.start()
+
+    def stop(self) -> None:
+        """Signal the subprocess to stop."""
+        self._stop_event.set()
+
+    def join(self, timeout: Optional[float] = None) -> None:
+        """Wait for the subprocess to terminate."""
+        if self._proc is None:
+            return
+        self._proc.join(timeout=timeout)
+
+    def last_error(self) -> Optional[str]:
+        """Return the last error message, if any."""
+        self._drain_queues()
+        return self._last_error
+
+    def _drain_queues(self) -> None:
+        while True:
+            try:
+                item = self._result_queue.get_nowait()
+            except pyqueue.Empty:
+                break
+            if isinstance(item, InferenceResult):
+                self._history.append(item)
+            elif isinstance(item, tuple) and len(item) >= 2 and item[0] == "error":
+                self._last_error = str(item[1])
+            else:
+                try:
+                    self._history.append(item)
+                except Exception:
+                    pass
+
+        latest_frame = None
+        while True:
+            try:
+                latest_frame = self._frame_queue.get_nowait()
+            except pyqueue.Empty:
+                break
+        if latest_frame is not None:
+            self._last_frame = latest_frame
+
+    def get_latest_frame(self) -> Optional[np.ndarray]:
+        """Return the latest camera frame (RGB)."""
+        self._drain_queues()
+        if self._last_frame is None:
+            return None
+        return self._last_frame.copy()
+
+    def get_window_summary(self) -> Tuple[str, float]:
+        """Return majority label and mean probability over the rolling window."""
+        self._drain_queues()
+        if not self._history:
+            return NONE_LABEL, 1.0
+
+        buckets: Dict[str, List[InferenceResult]] = {}
+        for item in self._history:
+            buckets.setdefault(item.label, []).append(item)
+
+        best_label = None
+        best_count = -1
+        best_avg = -1.0
+        best_ts = -1.0
+        for label, items in buckets.items():
+            count = len(items)
+            avg = sum(x.prob for x in items) / count
+            ts = max(x.timestamp for x in items)
+            if (
+                count > best_count
+                or (count == best_count and avg > best_avg)
+                or (count == best_count and avg == best_avg and ts > best_ts)
+            ):
+                best_label = label
+                best_count = count
+                best_avg = avg
+                best_ts = ts
+
+        if best_label is None:
+            return NONE_LABEL, 1.0
+        return best_label, float(best_avg)

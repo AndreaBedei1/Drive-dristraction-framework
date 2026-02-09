@@ -23,6 +23,7 @@ class LapMonitor(threading.Thread):
         auto_reset_on_finish: bool,
         reset_cooldown_seconds: float,
         preferred_role_name: str = "hero",
+        tick_source: Optional[object] = None,
     ) -> None:
         """Create a lap monitor for the hero vehicle."""
         super().__init__(daemon=True)
@@ -34,6 +35,7 @@ class LapMonitor(threading.Thread):
         self._auto_reset = bool(auto_reset_on_finish)
         self._cooldown = float(reset_cooldown_seconds)
         self._role = preferred_role_name
+        self._tick_source = tick_source
 
         self._stop_event = threading.Event()
 
@@ -53,7 +55,12 @@ class LapMonitor(threading.Thread):
 
         while not self._stop_event.is_set():
             try:
-                self._world.wait_for_tick()
+                if self._tick_source is None:
+                    self._world.wait_for_tick()
+                else:
+                    snap = self._tick_source.wait_for_tick(timeout=1.0)
+                    if snap is None:
+                        continue
             except Exception:
                 time.sleep(0.1)
                 continue

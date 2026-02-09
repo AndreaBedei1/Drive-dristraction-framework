@@ -79,6 +79,10 @@ class DistractionWindow(threading.Thread):
         focus_callback: Callable[[], None],
         size: Tuple[int, int] = (360, 260),
         monitor_rect: Optional[Tuple[int, int, int, int]] = None,
+        fullscreen: bool = False,
+        steal_focus: bool = False,
+        anchor: str = "center",
+        excluded_letters: Optional[Tuple[str, ...]] = None,
     ) -> None:
         """Create a distraction window with timing and audio settings."""
         super().__init__(daemon=True)
@@ -97,6 +101,13 @@ class DistractionWindow(threading.Thread):
         self._focus_callback = focus_callback
         self._size = size
         self._monitor_rect = monitor_rect
+        self._fullscreen = bool(fullscreen)
+        self._steal_focus = bool(steal_focus)
+        self._anchor = str(anchor or "center").lower()
+        self._excluded_letters = {str(x).upper() for x in (excluded_letters or ())}
+        self._allowed_letters = [c for c in string.ascii_uppercase if c not in self._excluded_letters]
+        if not self._allowed_letters:
+            self._allowed_letters = list(string.ascii_uppercase)
 
         self._root = None
         self._label = None
@@ -107,11 +118,18 @@ class DistractionWindow(threading.Thread):
         self._awaiting_ack = False
         self._expected_letter = None
         self._expected_vk = None
+        self._beep_wav: Optional[bytes] = None
 
     def stop(self) -> None:
         """Stop the window and any active audio."""
         self._stop_event.set()
         self._beep_stop_event.set()
+        try:
+            import winsound
+
+            winsound.PlaySound(None, winsound.SND_ASYNC)
+        except Exception:
+            pass
         if self._root is not None:
             try:
                 self._root.after(0, self._root.destroy)
@@ -127,11 +145,35 @@ class DistractionWindow(threading.Thread):
         self._root.title(self._title)
         if self._monitor_rect is not None:
             x, y, w, h = self._monitor_rect
-            self._root.geometry(f"{w}x{h}+{x}+{y}")
-            self._root.overrideredirect(True)
+            if self._fullscreen:
+                self._root.geometry(f"{w}x{h}+{x}+{y}")
+                self._root.overrideredirect(True)
+            else:
+                win_w, win_h = self._size
+                margin = 24
+                if self._anchor == "top_left":
+                    px = x + margin
+                    py = y + margin
+                elif self._anchor == "top_right":
+                    px = x + max(margin, w - win_w - margin)
+                    py = y + margin
+                elif self._anchor == "bottom_left":
+                    px = x + margin
+                    py = y + max(margin, h - win_h - margin)
+                elif self._anchor == "bottom_right":
+                    px = x + max(margin, w - win_w - margin)
+                    py = y + max(margin, h - win_h - margin)
+                else:
+                    px = x + max(0, (w - win_w) // 2)
+                    py = y + max(0, (h - win_h) // 2)
+                self._root.geometry(f"{win_w}x{win_h}+{int(px)}+{int(py)}")
         else:
             self._root.geometry(f"{self._size[0]}x{self._size[1]}")
         self._root.protocol("WM_DELETE_WINDOW", self.stop)
+        try:
+            self._root.attributes("-topmost", True)
+        except Exception:
+            pass
 
         self._label = tk.Label(self._root, text="", font=("Arial", 18, "bold"))
         self._label.pack(expand=True)
@@ -171,16 +213,17 @@ class DistractionWindow(threading.Thread):
         if self._root is None or self._label is None:
             return
         self._root.configure(bg="#b00020")
-        self._expected_letter = random.choice(string.ascii_uppercase)
+        self._expected_letter = random.choice(self._allowed_letters)
         self._expected_vk = ord(self._expected_letter)
         self._label.configure(text=self._expected_letter, font=("Arial", 96, "bold"))
         self._awaiting_ack = True
         self._on_start(self._id)
         self._start_beep()
-        try:
-            self._root.focus_force()
-        except Exception:
-            pass
+        if self._steal_focus:
+            try:
+                self._root.focus_force()
+            except Exception:
+                pass
         self._root.bind("<Key>", self._on_key)
 
     def _on_key(self, event) -> None:
@@ -205,6 +248,12 @@ class DistractionWindow(threading.Thread):
         self._awaiting_ack = False
         self._root.unbind("<Key>")
         self._beep_stop_event.set()
+        try:
+            import winsound
+
+            winsound.PlaySound(None, winsound.SND_ASYNC)
+        except Exception:
+            pass
         self._on_finish(self._id)
         self._coord.finish(self._id)
         self._set_idle()
@@ -252,8 +301,63 @@ class DistractionWindow(threading.Thread):
                 try:
                     import winsound
 
-                    winsound.Beep(self._beep_frequency, self._beep_duration)
+                    if self._beep_wav is None:
+                        self._beep_wav = _build_beep_wav(
+                            self._beep_frequency,
+                            self._beep_duration,
+                        )
+                    if self._beep_wav is not None:
+                        winsound.PlaySound(self._beep_wav, winsound.SND_MEMORY | winsound.SND_ASYNC)
+                    else:
+                        winsound.MessageBeep()
                 except Exception:
-                    time.sleep(self._beep_duration / 1000.0)
+                    pass
+                time.sleep(self._beep_duration / 1000.0)
 
         threading.Thread(target=_beep_loop, daemon=True).start()
+
+
+def _build_beep_wav(freq_hz: int, duration_ms: int, volume: float = 0.25, sample_rate: int = 22050) -> Optional[bytes]:
+    """Build a small WAV tone for async playback."""
+    try:
+        import math
+        import struct
+
+        freq = max(50, min(5000, int(freq_hz)))
+        duration = max(20, int(duration_ms))
+        n_samples = int(sample_rate * (duration / 1000.0))
+        if n_samples <= 0:
+            return None
+
+        max_amp = int(32767 * max(0.05, min(1.0, float(volume))))
+        frames = bytearray()
+        for i in range(n_samples):
+            t = i / sample_rate
+            sample = int(max_amp * math.sin(2.0 * math.pi * freq * t))
+            frames.extend(struct.pack("<h", sample))
+
+        data = bytes(frames)
+        byte_rate = sample_rate * 2
+        block_align = 2
+        subchunk2 = len(data)
+        chunk_size = 36 + subchunk2
+
+        header = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF",
+            chunk_size,
+            b"WAVE",
+            b"fmt ",
+            16,
+            1,
+            1,
+            sample_rate,
+            byte_rate,
+            block_align,
+            16,
+            b"data",
+            subchunk2,
+        )
+        return header + data
+    except Exception:
+        return None

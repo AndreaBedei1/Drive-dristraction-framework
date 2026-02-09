@@ -23,6 +23,7 @@ class ErrorMonitor(threading.Thread):
         logger: ErrorDatasetLogger,
         config,
         preferred_role_name: str = "hero",
+        tick_source: Optional[object] = None,
     ) -> None:
         """Create a monitor bound to a CARLA world and logger."""
         super().__init__(daemon=True)
@@ -30,6 +31,7 @@ class ErrorMonitor(threading.Thread):
         self._logger = logger
         self._cfg = config
         self._role = preferred_role_name
+        self._tick_source = tick_source
         self._stop_event = threading.Event()
 
         self._hero: Optional[carla.Vehicle] = None
@@ -38,6 +40,8 @@ class ErrorMonitor(threading.Thread):
 
         self._last_speed_mps: Optional[float] = None
         self._last_time: Optional[float] = None
+        self._last_sim_time: Optional[float] = None
+        self._last_snapshot: Optional[carla.WorldSnapshot] = None
 
         self._last_harsh_brake_time = -1e9
         self._last_red_light_time = -1e9
@@ -59,6 +63,10 @@ class ErrorMonitor(threading.Thread):
         self._stop_signs: List[Tuple[str, carla.Waypoint, Optional[int], Optional[int]]] = []
         self._stop_zone_state: Dict[str, Dict[str, bool]] = {}
         self._last_stop_refresh_time = 0.0
+        try:
+            self._world_map = self._world.get_map()
+        except Exception:
+            self._world_map = None
 
     def stop(self) -> None:
         """Stop the thread and detach sensors."""
@@ -159,10 +167,21 @@ class ErrorMonitor(threading.Thread):
 
     def _safe_sim_time(self) -> float:
         """Return simulation time, falling back to monotonic time."""
+        if self._last_sim_time is not None:
+            return self._last_sim_time
         try:
             return float(self._world.get_snapshot().timestamp.elapsed_seconds)
         except Exception:
             return time.monotonic()
+
+    def _get_map(self) -> Optional[carla.Map]:
+        """Return cached map object if available."""
+        if self._world_map is None:
+            try:
+                self._world_map = self._world.get_map()
+            except Exception:
+                return None
+        return self._world_map
 
     def _landmark_location(self, landmark) -> Optional[carla.Location]:
         """Extract a location from a map landmark object."""
@@ -209,8 +228,8 @@ class ErrorMonitor(threading.Thread):
         self._stop_signs = []
 
         try:
-            world_map = self._world.get_map()
-            if hasattr(world_map, "get_all_landmarks"):
+            world_map = self._get_map()
+            if world_map is not None and hasattr(world_map, "get_all_landmarks"):
                 for lm in world_map.get_all_landmarks():
                     if not self._is_stop_landmark(lm):
                         continue
@@ -238,7 +257,9 @@ class ErrorMonitor(threading.Thread):
 
         if not self._stop_signs:
             try:
-                world_map = self._world.get_map()
+                world_map = self._get_map()
+                if world_map is None:
+                    return
                 actors = self._world.get_actors().filter("*stop*")
                 for a in actors:
                     if "stop" not in a.type_id:
@@ -357,10 +378,12 @@ class ErrorMonitor(threading.Thread):
         if not stop_wps:
             try:
                 trigger_loc = get_trafficlight_trigger_location(traffic_light)
-                wp = self._world.get_map().get_waypoint(
-                    trigger_loc, project_to_road=True, lane_type=carla.LaneType.Driving
-                )
-                stop_wps = [wp]
+                world_map = self._get_map()
+                if world_map is not None:
+                    wp = world_map.get_waypoint(
+                        trigger_loc, project_to_road=True, lane_type=carla.LaneType.Driving
+                    )
+                    stop_wps = [wp]
             except Exception:
                 stop_wps = []
 
@@ -408,8 +431,11 @@ class ErrorMonitor(threading.Thread):
         if not stop_wps:
             return False
         ego_loc = hero.get_location()
+        world_map = self._get_map()
+        if world_map is None:
+            return False
         try:
-            ego_wp = self._world.get_map().get_waypoint(
+            ego_wp = world_map.get_waypoint(
                 ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving
             )
             ego_road_id = int(ego_wp.road_id)
@@ -514,7 +540,15 @@ class ErrorMonitor(threading.Thread):
                 return
 
         ego_loc = hero.get_location()
-        ego_wp = self._world.get_map().get_waypoint(ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+        world_map = self._get_map()
+        if world_map is None:
+            return
+        try:
+            ego_wp = world_map.get_waypoint(
+                ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving
+            )
+        except Exception:
+            return
         ego_fwd = hero.get_transform().get_forward_vector()
         max_distance = self._cfg.red_light_distance_m
 
@@ -531,7 +565,7 @@ class ErrorMonitor(threading.Thread):
                 trigger_wp = self._lights_map[traffic_light.id]
             else:
                 trigger_loc = get_trafficlight_trigger_location(traffic_light)
-                trigger_wp = self._world.get_map().get_waypoint(
+                trigger_wp = world_map.get_waypoint(
                     trigger_loc, project_to_road=True, lane_type=carla.LaneType.Driving
                 )
                 self._lights_map[traffic_light.id] = trigger_wp
@@ -642,8 +676,13 @@ class ErrorMonitor(threading.Thread):
         min_speed = float(self._cfg.stop_sign_min_speed_kmh)
         zone_half_width = float(self._cfg.stop_sign_zone_half_width_m)
         zone_length = float(self._cfg.stop_sign_zone_length_m)
+        world_map = self._get_map()
         try:
-            ego_wp = self._world.get_map().get_waypoint(ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+            if world_map is None:
+                raise RuntimeError("map unavailable")
+            ego_wp = world_map.get_waypoint(
+                ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving
+            )
             ego_road_id = int(ego_wp.road_id)
             ego_lane_id = int(ego_wp.lane_id)
         except Exception:
@@ -703,16 +742,23 @@ class ErrorMonitor(threading.Thread):
         """Main thread loop: read ticks, update sensors, and check errors."""
         while not self._stop_event.is_set():
             try:
-                snapshot = self._world.wait_for_tick()
+                if self._tick_source is None:
+                    snapshot = self._world.wait_for_tick()
+                else:
+                    snapshot = self._tick_source.wait_for_tick(timeout=1.0)
+                    if snapshot is None:
+                        continue
             except Exception:
                 time.sleep(0.05)
                 continue
 
+            self._last_snapshot = snapshot
             hero = self._ensure_hero()
             if hero is None:
                 continue
 
             sim_time = float(snapshot.timestamp.elapsed_seconds)
+            self._last_sim_time = sim_time
             if self._last_time is None:
                 self._last_time = sim_time
                 continue
@@ -758,7 +804,10 @@ class ErrorMonitor(threading.Thread):
         if tl is None:
             try:
                 hero_loc = hero.get_location()
-                hero_wp = self._world.get_map().get_waypoint(
+                world_map = self._get_map()
+                if world_map is None:
+                    raise RuntimeError("map unavailable")
+                hero_wp = world_map.get_waypoint(
                     hero_loc, project_to_road=True, lane_type=carla.LaneType.Driving
                 )
                 hero_fwd = hero.get_transform().get_forward_vector()
