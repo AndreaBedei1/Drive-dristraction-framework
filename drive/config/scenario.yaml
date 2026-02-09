@@ -8,7 +8,7 @@ carla:
   map_preference: ["Town10HD", "Town04"]
 
   sync: true
-  fixed_delta_seconds: 0.043
+  fixed_delta_seconds: 0.035
 
   traffic_manager:
     port: 8000
@@ -27,6 +27,16 @@ traffic_lights:
   green_time: 6.0
   yellow_time: 2.0
   red_time: 4.0
+
+arousal_sensor:
+  enabled: false
+  device_name: "Coospo"
+  mqtt_url: ""
+  mqtt_topic: ""
+  baseline_seconds: 60
+  smoothing_window: 10
+  reconnect_seconds: 5.0
+  placeholder_value: -1.0
 
 inference:
   enable_model: true
@@ -115,7 +125,8 @@ errors:
 
 distractions:
   enabled: true
-  fullscreen: true
+  fullscreen: false
+  fill_monitor: true
   steal_focus: false
   excluded_letters:
     - W

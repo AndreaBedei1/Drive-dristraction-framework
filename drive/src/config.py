@@ -128,6 +128,7 @@ class DistractionConfig:
     """Distraction window timing and audio settings."""
     enabled: bool
     fullscreen: bool
+    fill_monitor: bool
     steal_focus: bool
     excluded_letters: List[str]
     min_interval_seconds: float
@@ -148,6 +149,19 @@ class TrafficLightsConfig:
     green_time: float
     yellow_time: float
     red_time: float
+
+
+@dataclass(frozen=True)
+class ArousalSensorConfig:
+    """Bluetooth arousal sensor settings."""
+    enabled: bool
+    device_name: str
+    mqtt_url: str
+    mqtt_topic: str
+    baseline_seconds: int
+    smoothing_window: int
+    reconnect_seconds: float
+    placeholder_value: float
 
 
 @dataclass(frozen=True)
@@ -173,6 +187,7 @@ class ScenarioConfig:
     errors: ErrorConfig
     distractions: DistractionConfig
     traffic_lights: TrafficLightsConfig
+    arousal_sensor: ArousalSensorConfig
     inference: InferenceConfig
 
 
@@ -300,6 +315,7 @@ def load_config(path: str) -> ScenarioConfig:
     dis_cfg = DistractionConfig(
         enabled=bool(_get(dis_raw, "enabled", True)),
         fullscreen=bool(_get(dis_raw, "fullscreen", False)),
+        fill_monitor=bool(_get(dis_raw, "fill_monitor", False)),
         steal_focus=bool(_get(dis_raw, "steal_focus", False)),
         excluded_letters=[str(x) for x in _get(dis_raw, "excluded_letters", []) or []],
         min_interval_seconds=float(_get(dis_raw, "min_interval_seconds", 25.0)),
@@ -319,6 +335,18 @@ def load_config(path: str) -> ScenarioConfig:
         green_time=float(_get(tl_raw, "green_time", 20.0)),
         yellow_time=float(_get(tl_raw, "yellow_time", 3.0)),
         red_time=float(_get(tl_raw, "red_time", 8.0)),
+    )
+
+    ar_raw = _get(raw, "arousal_sensor", {})
+    ar_cfg = ArousalSensorConfig(
+        enabled=bool(_get(ar_raw, "enabled", False)),
+        device_name=str(_get(ar_raw, "device_name", "Coospo")),
+        mqtt_url=str(_get(ar_raw, "mqtt_url", "")),
+        mqtt_topic=str(_get(ar_raw, "mqtt_topic", "")),
+        baseline_seconds=int(_get(ar_raw, "baseline_seconds", 60)),
+        smoothing_window=int(_get(ar_raw, "smoothing_window", 10)),
+        reconnect_seconds=float(_get(ar_raw, "reconnect_seconds", 5.0)),
+        placeholder_value=float(_get(ar_raw, "placeholder_value", -1.0)),
     )
 
     inf_raw = _get(raw, "inference", {})
@@ -341,5 +369,6 @@ def load_config(path: str) -> ScenarioConfig:
         errors=err_cfg,
         distractions=dis_cfg,
         traffic_lights=tl_cfg,
+        arousal_sensor=ar_cfg,
         inference=inf_cfg,
     )

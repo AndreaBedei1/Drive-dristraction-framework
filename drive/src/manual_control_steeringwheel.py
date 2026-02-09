@@ -756,7 +756,11 @@ class CameraManager(object):
 
     def render(self, display):
         if self.surface is not None:
-            display.blit(self.surface, (0, 0))
+            if self.surface.get_size() != display.get_size():
+                scaled = pygame.transform.scale(self.surface, display.get_size())
+                display.blit(scaled, (0, 0))
+            else:
+                display.blit(self.surface, (0, 0))
 
     @staticmethod
     def _parse_image(weak_self, image):
@@ -812,14 +816,18 @@ def game_loop(args):
         win_h_env = os.environ.get("SIM_WINDOW_H")
 
         flags = pygame.RESIZABLE
-        if win_x and win_y and win_w_env and win_h_env:
+        if win_w_env and win_h_env:
             try:
                 win_w = int(win_w_env)
                 win_h = int(win_h_env)
-                os.environ["SDL_VIDEO_WINDOW_POS"] = f"{int(win_x)},{int(win_y)}"
-                flags = pygame.NOFRAME
             except Exception:
-                flags = pygame.RESIZABLE
+                win_w = args.width
+                win_h = args.height
+        if win_x and win_y:
+            try:
+                os.environ["SDL_VIDEO_WINDOW_POS"] = f"{int(win_x)},{int(win_y)}"
+            except Exception:
+                pass
 
         display = pygame.display.set_mode((win_w, win_h), flags)
         pygame.display.set_caption("CARLA Manual Control")

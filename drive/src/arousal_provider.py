@@ -34,6 +34,25 @@ class ArousalProvider(Protocol):
         ...
 
 
+class StaticArousalProvider:
+    """Return a fixed arousal snapshot (placeholder)."""
+
+    def __init__(
+        self,
+        value: Optional[float],
+        method: Optional[str] = None,
+        quality: Optional[str] = None,
+    ) -> None:
+        self._snapshot = ArousalSnapshot(value=value, method=method, timestamp_ms=None, quality=quality)
+
+    def get_snapshot(self) -> ArousalSnapshot:
+        return self._snapshot
+
+    def stop(self) -> None:
+        """No-op stop for compatibility."""
+        return None
+
+
 def _parse_mqtt_url(url: str) -> Tuple[str, int, str]:
     """Parse mqtt://host:port/base into host, port, base_topic."""
     raw = url.strip()

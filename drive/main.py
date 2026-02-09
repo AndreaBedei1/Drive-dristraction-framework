@@ -555,17 +555,48 @@ def main() -> int:
         emotion_inference = None
 
     arousal_client = None
-    mqtt_url = os.environ.get("AROUSAL_MQTT_URL", "").strip()
-    mqtt_topic = os.environ.get("AROUSAL_MQTT_TOPIC", "").strip()
-    if mqtt_url:
-        arousal_client = MqttArousalClient(mqtt_url, topic=mqtt_topic or None)
-        if arousal_client.start():
-            print("[Runner] Arousal MQTT subscriber started.")
+    arousal_publisher = None
+    mqtt_url = (cfg.arousal_sensor.mqtt_url or os.environ.get("AROUSAL_MQTT_URL", "")).strip()
+    mqtt_topic = (cfg.arousal_sensor.mqtt_topic or os.environ.get("AROUSAL_MQTT_TOPIC", "")).strip()
+    if cfg.arousal_sensor.enabled:
+        if mqtt_url:
+            try:
+                from src.arousal_ble import BleArousalPublisher
+
+                arousal_publisher = BleArousalPublisher(
+                    device_name=cfg.arousal_sensor.device_name,
+                    mqtt_url=mqtt_url,
+                    mqtt_topic=mqtt_topic,
+                    baseline_seconds=cfg.arousal_sensor.baseline_seconds,
+                    smoothing_window=cfg.arousal_sensor.smoothing_window,
+                    reconnect_seconds=cfg.arousal_sensor.reconnect_seconds,
+                )
+                arousal_publisher.start()
+                print("[Runner] Arousal BLE publisher started.")
+            except Exception as exc:
+                print(f"[Runner] Arousal BLE publisher unavailable: {exc}")
+                arousal_publisher = None
         else:
-            print(f"[Runner] Arousal MQTT unavailable: {arousal_client.last_error()}")
-            arousal_client = None
+            print("[Runner] Arousal BLE publisher disabled (missing MQTT URL).")
+
+        if mqtt_url:
+            arousal_client = MqttArousalClient(mqtt_url, topic=mqtt_topic or None)
+            if arousal_client.start():
+                print("[Runner] Arousal MQTT subscriber started.")
+            else:
+                print(f"[Runner] Arousal MQTT unavailable: {arousal_client.last_error()}")
+                arousal_client = None
+        else:
+            print("[Runner] Arousal MQTT disabled (missing MQTT URL).")
     else:
-        print("[Runner] Arousal MQTT disabled (set AROUSAL_MQTT_URL to enable).")
+        from src.arousal_provider import StaticArousalProvider
+
+        arousal_client = StaticArousalProvider(
+            value=cfg.arousal_sensor.placeholder_value,
+            method="disabled",
+            quality="disabled",
+        )
+        print("[Runner] Arousal pipeline disabled by config.")
 
     error_logger = ErrorDatasetLogger(
         output_dir=output_dir,
@@ -650,6 +681,7 @@ def main() -> int:
                 focus_callback=_refocus_sim,
                 monitor_rect=left_rect,
                 fullscreen=cfg.distractions.fullscreen,
+                fill_monitor=cfg.distractions.fill_monitor,
                 steal_focus=cfg.distractions.steal_focus,
                 anchor="top_left",
                 excluded_letters=tuple(cfg.distractions.excluded_letters),
@@ -670,6 +702,7 @@ def main() -> int:
                 focus_callback=_refocus_sim,
                 monitor_rect=right_rect,
                 fullscreen=cfg.distractions.fullscreen,
+                fill_monitor=cfg.distractions.fill_monitor,
                 steal_focus=cfg.distractions.steal_focus,
                 anchor="top_right",
                 excluded_letters=tuple(cfg.distractions.excluded_letters),
@@ -729,6 +762,12 @@ def main() -> int:
             preview_window.stop()
         if arousal_client is not None:
             arousal_client.stop()
+        if arousal_publisher is not None:
+            arousal_publisher.stop()
+            try:
+                arousal_publisher.join(timeout=2.0)
+            except Exception:
+                pass
 
         if emotion_inference is not None:
             emotion_inference.stop()

@@ -80,6 +80,7 @@ class DistractionWindow(threading.Thread):
         size: Tuple[int, int] = (360, 260),
         monitor_rect: Optional[Tuple[int, int, int, int]] = None,
         fullscreen: bool = False,
+        fill_monitor: bool = False,
         steal_focus: bool = False,
         anchor: str = "center",
         excluded_letters: Optional[Tuple[str, ...]] = None,
@@ -102,6 +103,7 @@ class DistractionWindow(threading.Thread):
         self._size = size
         self._monitor_rect = monitor_rect
         self._fullscreen = bool(fullscreen)
+        self._fill_monitor = bool(fill_monitor)
         self._steal_focus = bool(steal_focus)
         self._anchor = str(anchor or "center").lower()
         self._excluded_letters = {str(x).upper() for x in (excluded_letters or ())}
@@ -148,6 +150,8 @@ class DistractionWindow(threading.Thread):
             if self._fullscreen:
                 self._root.geometry(f"{w}x{h}+{x}+{y}")
                 self._root.overrideredirect(True)
+            elif self._fill_monitor:
+                self._root.geometry(f"{w}x{h}+{x}+{y}")
             else:
                 win_w, win_h = self._size
                 margin = 24
