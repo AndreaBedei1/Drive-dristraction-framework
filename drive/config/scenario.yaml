@@ -46,15 +46,15 @@ inference:
   preview_hz: 15.0
 
 traffic:
-  vehicles: 30
+  vehicles: 20
   safe_radius_from_route_start: 35.0
 
 pedestrians:
-  walkers: 150
-  running_percentage: 40
-  crossing_percentage: 50
-  max_speed_walking: 2.0
-  max_speed_running: 3.8
+  walkers: 200
+  running_percentage: 20
+  crossing_percentage: 100
+  max_speed_walking: 2.5
+  max_speed_running: 4.0
 
 route:
   # "auto" = deterministic pick using seed
@@ -93,7 +93,7 @@ manual_control:
 
 experiment:
   user_id: "participant_01"
-  run_id: 1
+  run_id: 2
   weather_label: "day"
   output_dir: "data"
   mode: "train"  # train | test

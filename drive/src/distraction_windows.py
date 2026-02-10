@@ -118,6 +118,8 @@ class DistractionWindow(threading.Thread):
         self._alert_start_time = 0.0
         self._flash_interval = self._flash_start_interval
         self._awaiting_ack = False
+        self._expected_letters = []
+        self._expected_index = 0
         self._expected_letter = None
         self._expected_vk = None
         self._beep_wav: Optional[bytes] = None
@@ -205,6 +207,8 @@ class DistractionWindow(threading.Thread):
         if self._root is None or self._label is None:
             return
         self._root.configure(bg="#1e1e1e")
+        self._expected_letters = []
+        self._expected_index = 0
         self._expected_letter = None
         self._expected_vk = None
         self._label.configure(text="", font=("Arial", 18, "bold"))
@@ -230,9 +234,20 @@ class DistractionWindow(threading.Thread):
         if self._root is None or self._label is None:
             return
         self._root.configure(bg="#b00020")
-        self._expected_letter = random.choice(self._allowed_letters)
-        self._expected_vk = ord(self._expected_letter)
-        self._label.configure(text=self._expected_letter, font=("Arial", 96, "bold"))
+        count = random.randint(1, 3)
+        if len(self._allowed_letters) >= count:
+            self._expected_letters = random.sample(self._allowed_letters, k=count)
+        else:
+            self._expected_letters = [random.choice(self._allowed_letters) for _ in range(count)]
+        self._expected_index = 0
+        self._expected_letter = self._expected_letters[0] if self._expected_letters else None
+        self._expected_vk = ord(self._expected_letter) if self._expected_letter else None
+        font_size = 96
+        if count == 2:
+            font_size = 84
+        elif count >= 3:
+            font_size = 72
+        self._label.configure(text=self._format_prompt(), font=("Arial", font_size, "bold"))
         self._awaiting_ack = True
         self._on_start(self._id)
         self._start_beep()
@@ -254,7 +269,30 @@ class DistractionWindow(threading.Thread):
         except Exception:
             pressed = ""
         if pressed == self._expected_letter:
+            self._advance_expected()
+
+    def _advance_expected(self) -> None:
+        if not self._awaiting_ack:
+            return
+        self._expected_index += 1
+        if self._expected_index >= len(self._expected_letters):
             self._acknowledge()
+            return
+        self._expected_letter = self._expected_letters[self._expected_index]
+        self._expected_vk = ord(self._expected_letter)
+        if self._label is not None:
+            self._label.configure(text=self._format_prompt())
+
+    def _format_prompt(self) -> str:
+        if not self._expected_letters:
+            return ""
+        parts = []
+        for i, ch in enumerate(self._expected_letters):
+            if i == self._expected_index:
+                parts.append(f"[{ch}]")
+            else:
+                parts.append(ch)
+        return " ".join(parts)
 
     def _acknowledge(self) -> None:
         """Clear the alarm state and schedule the next alert."""
@@ -301,7 +339,7 @@ class DistractionWindow(threading.Thread):
                 if down and not last_down and self._awaiting_ack:
                     try:
                         if self._root is not None:
-                            self._root.after(0, self._acknowledge)
+                            self._root.after(0, self._advance_expected)
                     except Exception:
                         pass
                 last_down = down
