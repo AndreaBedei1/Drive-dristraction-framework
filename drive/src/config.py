@@ -3,7 +3,7 @@ from __future__ import annotations
 """Configuration loader and typed config models."""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 import yaml
 
 
@@ -82,6 +82,7 @@ class ManualControlConfig:
     """Manual control script location and arguments."""
     path: str
     extra_args: List[str]
+    max_speed_kmh: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -269,9 +270,19 @@ def load_config(path: str) -> ScenarioConfig:
     )
 
     mc_raw = raw["manual_control"]
+    max_speed_raw = _get(mc_raw, "max_speed_kmh", None)
+    max_speed_kmh: Optional[float]
+    if max_speed_raw is None:
+        max_speed_kmh = None
+    else:
+        try:
+            max_speed_kmh = float(max_speed_raw)
+        except Exception:
+            max_speed_kmh = None
     mc_cfg = ManualControlConfig(
         path=str(mc_raw["path"]),
         extra_args=list(mc_raw.get("extra_args", [])),
+        max_speed_kmh=max_speed_kmh,
     )
 
     exp_raw = _get(raw, "experiment", {})

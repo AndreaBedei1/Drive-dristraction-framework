@@ -726,11 +726,16 @@ def main() -> int:
     try:
         if not args.no_launch_manual:
             mc_path = _resolve_manual_control_path(cfg.manual_control.path)
+            mc_args = list(cfg.manual_control.extra_args)
+            max_speed_kmh = cfg.manual_control.max_speed_kmh
+            if max_speed_kmh is not None and max_speed_kmh > 0:
+                if not any(str(arg).startswith("--max-speed-kmh") for arg in mc_args):
+                    mc_args.append(f"--max-speed-kmh={max_speed_kmh}")
             proc = _launch_manual_control(
                 mc_path,
                 cfg.carla.host,
                 cfg.carla.port,
-                cfg.manual_control.extra_args,
+                mc_args,
                 env=mc_env,
             )
 

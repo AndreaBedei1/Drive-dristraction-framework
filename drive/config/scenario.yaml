@@ -24,9 +24,9 @@ weather:
   preset: "ClearNoon"  # try also: CloudyNoon, WetNoon, HardRainNoon, ClearSunset
 
 traffic_lights:
-  green_time: 6.0
-  yellow_time: 2.0
-  red_time: 4.0
+  green_time: 3.0
+  yellow_time: 1.0
+  red_time: 2.0
 
 arousal_sensor:
   enabled: false
@@ -41,20 +41,20 @@ arousal_sensor:
 inference:
   enable_model: true
   enable_emotion: true
-  enable_preview: true
+  enable_preview: false
   use_process: true
   preview_hz: 15.0
 
 traffic:
-  vehicles: 40
+  vehicles: 30
   safe_radius_from_route_start: 35.0
 
 pedestrians:
-  walkers: 50
-  running_percentage: 10
-  crossing_percentage: 35
-  max_speed_walking: 1.4
-  max_speed_running: 3.2
+  walkers: 150
+  running_percentage: 40
+  crossing_percentage: 50
+  max_speed_walking: 2.0
+  max_speed_running: 3.8
 
 route:
   # "auto" = deterministic pick using seed
@@ -82,6 +82,7 @@ route:
 manual_control:
   # path: "src/manual_control.py"
   path: "src/manual_control_steeringwheel.py"
+  max_speed_kmh: 50.0  # 0 = disabled
   extra_args:
     - "--filter=vehicle.tesla.model3"
     - "--res=3840x1080"

@@ -300,22 +300,39 @@ class DistractionWindow(threading.Thread):
         """Start the repeating beep until the alert is acknowledged."""
         self._beep_stop_event.clear()
 
-        def _beep_loop() -> None:
-            while not self._beep_stop_event.is_set():
-                try:
-                    import winsound
+        def _beep_once() -> None:
+            played = False
+            try:
+                import winsound
 
-                    if self._beep_wav is None:
-                        self._beep_wav = _build_beep_wav(
-                            self._beep_frequency,
-                            self._beep_duration,
-                        )
-                    if self._beep_wav is not None:
+                if self._beep_wav is None:
+                    self._beep_wav = _build_beep_wav(
+                        self._beep_frequency,
+                        self._beep_duration,
+                    )
+                if self._beep_wav is not None:
+                    try:
                         winsound.PlaySound(self._beep_wav, winsound.SND_MEMORY | winsound.SND_ASYNC)
-                    else:
+                        played = True
+                    except Exception:
+                        played = False
+                if not played:
+                    try:
                         winsound.MessageBeep()
+                        played = True
+                    except Exception:
+                        played = False
+            except Exception:
+                played = False
+            if not played and self._root is not None:
+                try:
+                    self._root.after(0, self._root.bell)
                 except Exception:
                     pass
+
+        def _beep_loop() -> None:
+            while not self._beep_stop_event.is_set():
+                _beep_once()
                 time.sleep(self._beep_duration / 1000.0)
 
         threading.Thread(target=_beep_loop, daemon=True).start()

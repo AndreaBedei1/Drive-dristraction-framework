@@ -212,8 +212,12 @@ class World(object):
 
 
 class DualControl(object):
-    def __init__(self, world, start_in_autopilot):
+    def __init__(self, world, start_in_autopilot, max_speed_kmh=0.0):
         self._autopilot_enabled = start_in_autopilot
+        try:
+            self._max_speed_kmh = float(max_speed_kmh or 0.0)
+        except Exception:
+            self._max_speed_kmh = 0.0
         self._use_g29 = USE_G29_PEDALS
         if isinstance(world.player, carla.Vehicle):
             self._control = carla.VehicleControl()
@@ -319,7 +323,22 @@ class DualControl(object):
                 self._control.reverse = self._control.gear < 0
             elif isinstance(self._control, carla.WalkerControl):
                 self._parse_walker_keys(pygame.key.get_pressed(), clock.get_time())
+            if isinstance(self._control, carla.VehicleControl):
+                self._apply_speed_limit(world)
             world.player.apply_control(self._control)
+
+    def _apply_speed_limit(self, world):
+        if self._max_speed_kmh <= 0:
+            return
+        v = world.player.get_velocity()
+        speed_kmh = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
+        if speed_kmh <= self._max_speed_kmh + 0.5:
+            return
+        if self._control.throttle > 0.0:
+            self._control.throttle = 0.0
+        over = speed_kmh - self._max_speed_kmh
+        if over > 1.0:
+            self._control.brake = max(self._control.brake, min(1.0, over / 10.0))
 
     def _parse_vehicle_keys(self, keys, milliseconds):
         self._control.throttle = 1.0 if keys[K_UP] or keys[K_w] else 0.0
@@ -410,6 +429,11 @@ class HUD(object):
         mono = default_font if default_font in fonts else fonts[0]
         mono = pygame.font.match_font(mono)
         self._font_mono = pygame.font.Font(mono, 12 if os.name == 'nt' else 14)
+        speed_font_size = max(36, int(height * 0.08))
+        speed_font_size = min(speed_font_size, 120)
+        self._font_speed = pygame.font.Font(mono, speed_font_size)
+        self._font_speed_unit = pygame.font.Font(mono, max(14, int(speed_font_size * 0.35)))
+        self._speed_kmh = 0.0
         self._notifications = FadingText(font, (width, 40), (0, height - 40))
         self.help = HelpText(pygame.font.Font(mono, 24), width, height)
         self.server_fps = 0
@@ -441,6 +465,8 @@ class HUD(object):
         max_col = max(1.0, max(collision))
         collision = [x / max_col for x in collision]
         vehicles = world.world.get_actors().filter('vehicle.*')
+        speed_kmh = 3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)
+        self._speed_kmh = speed_kmh
         self._info_text = [
             'Server:  % 16.0f FPS' % self.server_fps,
             'Client:  % 16.0f FPS' % clock.get_fps(),
@@ -449,7 +475,7 @@ class HUD(object):
             'Map:     % 20s' % world.world.get_map().name.split('/')[-1],
             'Simulation time: % 12s' % datetime.timedelta(seconds=int(self.simulation_time)),
             '',
-            'Speed:   % 15.0f km/h' % (3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)),
+            'Speed:   % 15.0f km/h' % speed_kmh,
             u'Heading:% 16.0f\N{DEGREE SIGN} % 2s' % (t.rotation.yaw, heading),
             'Location:% 20s' % ('(% 5.1f, % 5.1f)' % (t.location.x, t.location.y)),
             'GNSS:% 24s' % ('(% 2.6f, % 3.6f)' % (world.gnss_sensor.lat, world.gnss_sensor.lon)),
@@ -528,6 +554,22 @@ class HUD(object):
                     surface = self._font_mono.render(item, True, (255, 255, 255))
                     display.blit(surface, (8, v_offset))
                 v_offset += 18
+        speed_value = f"{self._speed_kmh:0.0f}"
+        value_surface = self._font_speed.render(speed_value, True, (255, 255, 255))
+        unit_surface = self._font_speed_unit.render("km/h", True, (255, 255, 255))
+        pad = 10
+        gap = 8
+        total_w = value_surface.get_width() + gap + unit_surface.get_width()
+        total_h = max(value_surface.get_height(), unit_surface.get_height())
+        x = (self.dim[0] - total_w) // 2
+        y = 20
+        bg = pygame.Surface((total_w + pad * 2, total_h + pad * 2))
+        bg.set_alpha(160)
+        bg.fill((0, 0, 0))
+        display.blit(bg, (x - pad, y - pad))
+        display.blit(value_surface, (x, y))
+        unit_y = y + value_surface.get_height() - unit_surface.get_height()
+        display.blit(unit_surface, (x + value_surface.get_width() + gap, unit_y))
         self._notifications.render(display)
         self.help.render(display)
 
@@ -834,7 +876,7 @@ def game_loop(args):
 
         hud = HUD(args.width, args.height)
         world = World(client.get_world(), hud, args.filter)
-        controller = DualControl(world, args.autopilot)
+        controller = DualControl(world, args.autopilot, max_speed_kmh=args.max_speed_kmh)
 
         clock = pygame.time.Clock()
         while True:
@@ -891,6 +933,11 @@ def main():
         metavar='PATTERN',
         default='vehicle.*',
         help='actor filter (default: "vehicle.*")')
+    argparser.add_argument(
+        '--max-speed-kmh',
+        type=float,
+        default=0.0,
+        help='limit player speed in km/h (0 = disabled)')
     args = argparser.parse_args()
 
     args.width, args.height = [int(x) for x in args.res.split('x')]
