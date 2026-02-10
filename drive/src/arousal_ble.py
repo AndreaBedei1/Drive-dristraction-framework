@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-"""BLE heart-rate -> arousal MQTT publisher (headless)."""
+"""BLE heart-rate -> arousal provider (headless)."""
 
 import asyncio
-import json
 import math
 import threading
 import time
@@ -16,12 +15,7 @@ except Exception:  # pragma: no cover - handled at runtime
     BleakScanner = None
     BleakClient = None
 
-try:
-    import paho.mqtt.client as mqtt
-except Exception:  # pragma: no cover - handled at runtime
-    mqtt = None
-
-from src.arousal_provider import _parse_mqtt_url, _build_arousal_topic
+from src.arousal_provider import ArousalSnapshot
 
 
 SERVICE_UUID = "0000180d-0000-1000-8000-00805f9b34fb"
@@ -81,45 +75,56 @@ def _parse_hrm_packet(data: bytearray) -> Tuple[Optional[int], List[float]]:
             rr_ms = (rr_raw / 1024.0) * 1000.0
             rr_list.append(rr_ms)
             idx += 2
+    elif len(data) > idx + 1:
+        # Fallback: some devices omit the RR flag but still append RR intervals.
+        while idx + 1 < len(data):
+            rr_raw = int.from_bytes(data[idx:idx + 2], "little")
+            rr_ms = (rr_raw / 1024.0) * 1000.0
+            rr_list.append(rr_ms)
+            idx += 2
     return hr, rr_list
 
 
-class BleArousalPublisher(threading.Thread):
-    """Connect to BLE HR sensor, compute arousal, publish to MQTT."""
+class BleArousalProvider(threading.Thread):
+    """Connect to BLE HR sensor and compute arousal in-process."""
 
     def __init__(
         self,
         device_name: str,
-        mqtt_url: str,
-        mqtt_topic: str = "",
         baseline_seconds: int = 60,
         smoothing_window: int = 10,
         reconnect_seconds: float = 5.0,
         arousal_zmax: float = AROUSAL_ZMAX,
+        debug: bool = False,
+        debug_interval_seconds: float = 1.0,
     ) -> None:
         super().__init__(daemon=True)
         self._device_name = str(device_name or "Coospo")
-        self._mqtt_url = str(mqtt_url or "").strip()
-        self._mqtt_topic_override = str(mqtt_topic or "").strip()
+        self._device_tokens = [t.strip() for t in self._device_name.replace(";", ",").split(",") if t.strip()]
+        if not self._device_tokens:
+            self._device_tokens = ["HW9", "Coospo"]
         self._baseline_seconds = max(10, int(baseline_seconds))
         self._smoothing_window = max(3, int(smoothing_window))
         self._reconnect_seconds = max(1.0, float(reconnect_seconds))
         self._arousal_zmax = float(arousal_zmax)
+        self._debug = bool(debug)
+        self._debug_interval = max(0.1, float(debug_interval_seconds))
+        self._last_debug_ts = 0.0
+        self._last_sample_ts = 0.0
+        self._baseline_done = threading.Event()
 
         self._stop_event = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._lock = threading.Lock()
         self._last_error: Optional[str] = None
-
-        self._mqtt_client = None
-        self._mqtt_topic = ""
+        self._snapshot = ArousalSnapshot(None, None, None, None, None)
 
         self._rr_buffer: Deque[Tuple[float, float]] = deque()
         self._last_rr_quality = "N/A"
         self._smoothing: Deque[float] = deque(maxlen=self._smoothing_window)
 
         self._calibrating = True
-        self._baseline_start = time.monotonic()
+        self._baseline_start: Optional[float] = None
         self._hr_baseline_vals: List[float] = []
         self._rmssd_baseline_vals: List[float] = []
         self._hr_mean: Optional[float] = None
@@ -138,6 +143,13 @@ class BleArousalPublisher(threading.Thread):
             except Exception:
                 pass
 
+    def get_snapshot(self) -> ArousalSnapshot:
+        with self._lock:
+            return self._snapshot
+
+    def wait_for_baseline(self, timeout: Optional[float] = None) -> bool:
+        return self._baseline_done.wait(timeout=timeout)
+
     def run(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
@@ -149,29 +161,35 @@ class BleArousalPublisher(threading.Thread):
     async def _run_async(self) -> None:
         if BleakScanner is None or BleakClient is None:
             self._last_error = "bleak_not_available"
-            return
-        if mqtt is None:
-            self._last_error = "paho-mqtt not available"
-            return
-        if not self._mqtt_url:
-            self._last_error = "empty_mqtt_url"
-            return
-
-        if not self._setup_mqtt():
+            if self._debug:
+                print("[Arousal] BLE not available (bleak missing)")
             return
 
         while not self._stop_event.is_set():
             device = None
             try:
-                device = await BleakScanner.find_device_by_filter(self._device_filter, timeout=10.0)
+                if self._debug:
+                    joined = ", ".join(self._device_tokens)
+                    print(f"[Arousal] Scanning for BLE devices: {joined}")
+                devices = await BleakScanner.discover(timeout=10.0)
+                device = self._select_device(devices)
             except Exception as exc:
                 self._last_error = f"ble_scan_failed: {exc}"
+                if self._debug:
+                    print(f"[Arousal] BLE scan failed: {exc}")
 
             if device is None:
+                if self._debug:
+                    names = sorted({d.name for d in (devices or []) if d.name})
+                    if names:
+                        print(f"[Arousal] BLE devices seen: {', '.join(names)}")
+                    print(f"[Arousal] BLE device not found. Retrying in {self._reconnect_seconds:.1f}s")
                 await asyncio.sleep(self._reconnect_seconds)
                 continue
 
             try:
+                if self._debug:
+                    print(f"[Arousal] Connecting to BLE device: {device.name}")
                 async with BleakClient(device.address) as client:
                     await client.start_notify(CHAR_UUID, self._on_hrm)
                     await self._wait_stop()
@@ -181,48 +199,44 @@ class BleArousalPublisher(threading.Thread):
                         pass
             except Exception as exc:
                 self._last_error = f"ble_connect_failed: {exc}"
+                if self._debug:
+                    print(f"[Arousal] BLE connection failed: {exc}")
 
             if not self._stop_event.is_set():
                 await asyncio.sleep(self._reconnect_seconds)
 
-        self._teardown_mqtt()
-
     def _device_filter(self, device, _adv) -> bool:
+        # Unused with discover(), kept for compatibility.
         try:
             name = device.name or ""
         except Exception:
             name = ""
-        return self._device_name.lower() in name.lower()
+        return any(token.lower() in name.lower() for token in self._device_tokens)
+
+    def _select_device(self, devices) -> Optional[object]:
+        if not devices:
+            return None
+        for d in devices:
+            try:
+                name = d.name or ""
+            except Exception:
+                name = ""
+            if any(token.lower() in name.lower() for token in self._device_tokens):
+                return d
+        # Fallback to common names if tokens didn't match.
+        fallback = ["HW9", "Coospo"]
+        for d in devices:
+            try:
+                name = d.name or ""
+            except Exception:
+                name = ""
+            if any(token.lower() in name.lower() for token in fallback):
+                return d
+        return None
 
     async def _wait_stop(self) -> None:
         while not self._stop_event.is_set():
             await asyncio.sleep(0.5)
-
-    def _setup_mqtt(self) -> bool:
-        try:
-            host, port, base_topic = _parse_mqtt_url(self._mqtt_url)
-            self._mqtt_topic = self._mqtt_topic_override or _build_arousal_topic(base_topic)
-            self._mqtt_client = mqtt.Client()
-            self._mqtt_client.connect(host, port, 60)
-            self._mqtt_client.loop_start()
-            return True
-        except Exception as exc:
-            self._last_error = f"mqtt_connect_failed: {exc}"
-            self._mqtt_client = None
-            return False
-
-    def _teardown_mqtt(self) -> None:
-        if self._mqtt_client is None:
-            return
-        try:
-            self._mqtt_client.loop_stop()
-        except Exception:
-            pass
-        try:
-            self._mqtt_client.disconnect()
-        except Exception:
-            pass
-        self._mqtt_client = None
 
     def _on_hrm(self, _sender, data: bytearray) -> None:
         hr, rr_list = _parse_hrm_packet(data)
@@ -233,6 +247,8 @@ class BleArousalPublisher(threading.Thread):
 
     def _handle_sample(self, hr: int, rr_list: List[float]) -> None:
         now = time.time()
+        mono_now = time.monotonic()
+        self._last_sample_ts = mono_now
         if rr_list:
             self._update_rr_buffer(rr_list)
 
@@ -240,11 +256,29 @@ class BleArousalPublisher(threading.Thread):
         rmssd_log = math.log(rmssd_raw) if rmssd_raw and rmssd_raw > 0 else None
 
         if self._calibrating:
+            if self._baseline_start is None:
+                self._baseline_start = mono_now
+                if self._debug:
+                    print("[Arousal] Baseline calibration started")
             self._hr_baseline_vals.append(float(hr))
             if rmssd_log is not None:
                 self._rmssd_baseline_vals.append(float(rmssd_log))
-            if time.monotonic() - self._baseline_start >= self._baseline_seconds:
+            if self._baseline_start is not None and time.monotonic() - self._baseline_start >= self._baseline_seconds:
                 self._finish_baseline()
+            self._update_snapshot(
+                value=None,
+                method="calibrating",
+                timestamp_ms=int(now * 1000),
+                quality=self._last_rr_quality,
+                hr_bpm=hr,
+            )
+            self._maybe_debug_print(
+                mono_now=mono_now,
+                hr_bpm=hr,
+                arousal=None,
+                method="calibrating",
+                quality=self._last_rr_quality,
+            )
             return
 
         arousal = None
@@ -263,16 +297,20 @@ class BleArousalPublisher(threading.Thread):
 
         smooth = self._smooth_arousal(float(arousal))
         normalized = max(0.0, min(1.0, (smooth + self._arousal_zmax) / (2.0 * self._arousal_zmax)))
-
-        payload = {
-            "arousal": float(normalized),
-            "timestamp": int(now * 1000),
-            "hr": int(hr),
-            "rmssd": float(rmssd_raw) if rmssd_raw else None,
-            "method": method,
-            "quality": self._last_rr_quality,
-        }
-        self._publish(payload)
+        self._update_snapshot(
+            value=float(normalized),
+            method=method,
+            timestamp_ms=int(now * 1000),
+            quality=self._last_rr_quality,
+            hr_bpm=hr,
+        )
+        self._maybe_debug_print(
+            mono_now=mono_now,
+            hr_bpm=hr,
+            arousal=float(normalized),
+            method=method,
+            quality=self._last_rr_quality,
+        )
 
     def _finish_baseline(self) -> None:
         self._calibrating = False
@@ -282,6 +320,9 @@ class BleArousalPublisher(threading.Thread):
         stats_rmssd = _robust_stats(self._rmssd_baseline_vals, MIN_LOG_RMSSD_STD)
         if stats_rmssd is not None:
             self._rmssd_mean, self._rmssd_std = stats_rmssd
+        self._baseline_done.set()
+        if self._debug:
+            print("[Arousal] Baseline calibration completed")
 
     def _update_rr_buffer(self, rr_list: List[float]) -> None:
         now = time.time()
@@ -319,10 +360,47 @@ class BleArousalPublisher(threading.Thread):
             return value
         return float(sum(self._smoothing) / len(self._smoothing))
 
-    def _publish(self, payload: dict) -> None:
-        if self._mqtt_client is None or not self._mqtt_topic:
+    def _update_snapshot(
+        self,
+        value: Optional[float],
+        method: Optional[str],
+        timestamp_ms: Optional[int],
+        quality: Optional[str],
+        hr_bpm: Optional[int],
+    ) -> None:
+        self._snapshot = ArousalSnapshot(
+            value=value,
+            method=method,
+            timestamp_ms=timestamp_ms,
+            quality=quality,
+            hr_bpm=hr_bpm,
+        )
+
+    def _maybe_debug_print(
+        self,
+        mono_now: float,
+        hr_bpm: int,
+        arousal: Optional[float],
+        method: Optional[str],
+        quality: str,
+    ) -> None:
+        if not self._debug:
             return
-        try:
-            self._mqtt_client.publish(self._mqtt_topic, json.dumps(payload))
-        except Exception:
-            pass
+        if self._calibrating:
+            if mono_now - self._last_debug_ts < self._debug_interval:
+                return
+            self._last_debug_ts = mono_now
+            remaining = ""
+            if self._baseline_start is not None:
+                remaining_s = max(0.0, self._baseline_seconds - (mono_now - self._baseline_start))
+                remaining = f" baseline_remaining={remaining_s:.0f}s"
+            print(f"[Arousal] calibrating hr={hr_bpm} bpm quality={quality}{remaining}")
+            return
+        # After baseline: print every sample (no throttling) to show all sensor data.
+        if arousal is None:
+            print(f"[Arousal] hr={hr_bpm} bpm quality={quality}")
+        else:
+            print(f"[Arousal] hr={hr_bpm} bpm arousal={arousal:.3f} method={method} quality={quality}")
+
+
+BleArousalPublisher = BleArousalProvider

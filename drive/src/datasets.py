@@ -40,7 +40,13 @@ class _CsvWriter:
         self._fieldnames = fieldnames
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        if not os.path.exists(path):
+        write_header = not os.path.exists(path)
+        if not write_header:
+            try:
+                write_header = os.path.getsize(path) == 0
+            except Exception:
+                write_header = False
+        if write_header:
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=self._fieldnames)
                 writer.writeheader()
@@ -260,6 +266,8 @@ class DistractionDatasetLogger:
                 "end_z",
                 "arousal_start",
                 "arousal_end",
+                "hr_bpm_start",
+                "hr_bpm_end",
                 "model_pred_start",
                 "model_prob_start",
                 "model_pred_end",
@@ -293,11 +301,11 @@ class DistractionDatasetLogger:
     def _arousal_snapshot(self) -> ArousalSnapshot:
         """Return the latest arousal snapshot."""
         if self._arousal_provider is None:
-            return ArousalSnapshot(None, None, None, None)
+            return ArousalSnapshot(None, None, None, None, None)
         try:
             return self._arousal_provider.get_snapshot()
         except Exception:
-            return ArousalSnapshot(None, None, None, None)
+            return ArousalSnapshot(None, None, None, None, None)
 
     def _emotion_snapshot(self) -> EmotionSnapshot:
         """Return the latest emotion snapshot."""
@@ -314,6 +322,15 @@ class DistractionDatasetLogger:
             return ""
         try:
             return round(float(value), 3)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _format_hr(value: Optional[int]) -> Any:
+        if value is None:
+            return ""
+        try:
+            return int(value)
         except Exception:
             return ""
 
@@ -338,6 +355,7 @@ class DistractionDatasetLogger:
                 "model_pred_start": pred_label,
                 "model_prob_start": round(pred_prob, 3),
                 "arousal_start": self._format_arousal(arousal.value),
+                "hr_bpm_start": self._format_hr(arousal.hr_bpm),
                 "emotion_label_start": _format_emotion_label(emotion.label),
                 "emotion_prob_start": _format_emotion_prob(emotion.prob),
             }
@@ -371,6 +389,8 @@ class DistractionDatasetLogger:
             "end_z": float(end_location.z),
             "arousal_start": start_info.get("arousal_start", ""),
             "arousal_end": self._format_arousal(end_arousal.value),
+            "hr_bpm_start": start_info.get("hr_bpm_start", ""),
+            "hr_bpm_end": self._format_hr(end_arousal.hr_bpm),
             "model_pred_start": start_info.get("model_pred_start", ""),
             "model_prob_start": start_info.get("model_prob_start", ""),
             "model_pred_end": end_pred_label,

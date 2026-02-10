@@ -29,14 +29,14 @@ traffic_lights:
   red_time: 2.0
 
 arousal_sensor:
-  enabled: false
-  device_name: "Coospo"
-  mqtt_url: ""
-  mqtt_topic: ""
+  enabled: true
+  device_name: "HW9"
   baseline_seconds: 60
   smoothing_window: 10
   reconnect_seconds: 5.0
   placeholder_value: -1.0
+  debug: true
+  debug_interval_seconds: 1.0
 
 inference:
   enable_model: true

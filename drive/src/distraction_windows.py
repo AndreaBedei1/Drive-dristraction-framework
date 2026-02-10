@@ -132,11 +132,8 @@ class DistractionWindow(threading.Thread):
             winsound.PlaySound(None, winsound.SND_ASYNC)
         except Exception:
             pass
-        if self._root is not None:
-            try:
-                self._root.after(0, self._root.destroy)
-            except Exception:
-                pass
+        # NOTE: Do not touch Tk objects from other threads. The UI thread
+        # will observe _stop_event and destroy the root safely.
 
     def run(self) -> None:
         """Start the Tkinter event loop and schedule alerts."""
@@ -184,8 +181,24 @@ class DistractionWindow(threading.Thread):
 
         self._set_idle()
         self._start_key_listener()
+        self._root.after(100, self._poll_stop)
         self._schedule_next()
         self._root.mainloop()
+
+    def _poll_stop(self) -> None:
+        """Periodically check for stop requests from other threads."""
+        if self._root is None:
+            return
+        if self._stop_event.is_set():
+            try:
+                self._root.destroy()
+            except Exception:
+                pass
+            return
+        try:
+            self._root.after(100, self._poll_stop)
+        except Exception:
+            pass
 
     def _set_idle(self) -> None:
         """Reset the window to the idle state."""

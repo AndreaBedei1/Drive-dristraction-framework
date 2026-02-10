@@ -157,12 +157,12 @@ class ArousalSensorConfig:
     """Bluetooth arousal sensor settings."""
     enabled: bool
     device_name: str
-    mqtt_url: str
-    mqtt_topic: str
     baseline_seconds: int
     smoothing_window: int
     reconnect_seconds: float
     placeholder_value: float
+    debug: bool
+    debug_interval_seconds: float
 
 
 @dataclass(frozen=True)
@@ -352,12 +352,12 @@ def load_config(path: str) -> ScenarioConfig:
     ar_cfg = ArousalSensorConfig(
         enabled=bool(_get(ar_raw, "enabled", False)),
         device_name=str(_get(ar_raw, "device_name", "Coospo")),
-        mqtt_url=str(_get(ar_raw, "mqtt_url", "")),
-        mqtt_topic=str(_get(ar_raw, "mqtt_topic", "")),
         baseline_seconds=int(_get(ar_raw, "baseline_seconds", 60)),
         smoothing_window=int(_get(ar_raw, "smoothing_window", 10)),
         reconnect_seconds=float(_get(ar_raw, "reconnect_seconds", 5.0)),
         placeholder_value=float(_get(ar_raw, "placeholder_value", -1.0)),
+        debug=bool(_get(ar_raw, "debug", False)),
+        debug_interval_seconds=float(_get(ar_raw, "debug_interval_seconds", 1.0)),
     )
 
     inf_raw = _get(raw, "inference", {})

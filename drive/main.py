@@ -22,7 +22,6 @@ from src.ticker import WorldTicker
 from src.datasets import DatasetContext, ErrorDatasetLogger, DistractionDatasetLogger
 from src.error_monitor import ErrorMonitor
 from src.distraction_windows import DistractionCoordinator, DistractionWindow, focus_simulation_window
-from src.arousal_provider import MqttArousalClient
 from src.camera_preview import CameraPreviewWindow, preview_available
 
 
@@ -555,39 +554,23 @@ def main() -> int:
         emotion_inference = None
 
     arousal_client = None
-    arousal_publisher = None
-    mqtt_url = (cfg.arousal_sensor.mqtt_url or os.environ.get("AROUSAL_MQTT_URL", "")).strip()
-    mqtt_topic = (cfg.arousal_sensor.mqtt_topic or os.environ.get("AROUSAL_MQTT_TOPIC", "")).strip()
     if cfg.arousal_sensor.enabled:
-        if mqtt_url:
-            try:
-                from src.arousal_ble import BleArousalPublisher
+        try:
+            from src.arousal_ble import BleArousalProvider
 
-                arousal_publisher = BleArousalPublisher(
-                    device_name=cfg.arousal_sensor.device_name,
-                    mqtt_url=mqtt_url,
-                    mqtt_topic=mqtt_topic,
-                    baseline_seconds=cfg.arousal_sensor.baseline_seconds,
-                    smoothing_window=cfg.arousal_sensor.smoothing_window,
-                    reconnect_seconds=cfg.arousal_sensor.reconnect_seconds,
-                )
-                arousal_publisher.start()
-                print("[Runner] Arousal BLE publisher started.")
-            except Exception as exc:
-                print(f"[Runner] Arousal BLE publisher unavailable: {exc}")
-                arousal_publisher = None
-        else:
-            print("[Runner] Arousal BLE publisher disabled (missing MQTT URL).")
-
-        if mqtt_url:
-            arousal_client = MqttArousalClient(mqtt_url, topic=mqtt_topic or None)
-            if arousal_client.start():
-                print("[Runner] Arousal MQTT subscriber started.")
-            else:
-                print(f"[Runner] Arousal MQTT unavailable: {arousal_client.last_error()}")
-                arousal_client = None
-        else:
-            print("[Runner] Arousal MQTT disabled (missing MQTT URL).")
+            arousal_client = BleArousalProvider(
+                device_name=cfg.arousal_sensor.device_name,
+                baseline_seconds=cfg.arousal_sensor.baseline_seconds,
+                smoothing_window=cfg.arousal_sensor.smoothing_window,
+                reconnect_seconds=cfg.arousal_sensor.reconnect_seconds,
+                debug=cfg.arousal_sensor.debug,
+                debug_interval_seconds=cfg.arousal_sensor.debug_interval_seconds,
+            )
+            arousal_client.start()
+            print("[Runner] Arousal BLE provider started.")
+        except Exception as exc:
+            print(f"[Runner] Arousal BLE provider unavailable: {exc}")
+            arousal_client = None
     else:
         from src.arousal_provider import StaticArousalProvider
 
@@ -597,6 +580,16 @@ def main() -> int:
             quality="disabled",
         )
         print("[Runner] Arousal pipeline disabled by config.")
+
+    if cfg.arousal_sensor.enabled and arousal_client is not None:
+        baseline_wait = float(cfg.arousal_sensor.baseline_seconds)
+        if baseline_wait > 0:
+            print(f"[Runner] Waiting {baseline_wait:.0f}s for arousal baseline calibration...")
+            try:
+                if not arousal_client.wait_for_baseline(timeout=baseline_wait):
+                    print("[Runner] Baseline not completed yet (no data or still calibrating).")
+            except Exception:
+                time.sleep(baseline_wait)
 
     error_logger = ErrorDatasetLogger(
         output_dir=output_dir,
@@ -763,14 +756,20 @@ def main() -> int:
         error_monitor.stop()
         for w in distraction_windows:
             w.stop()
+        for w in distraction_windows:
+            try:
+                w.join(timeout=1.0)
+            except Exception:
+                pass
         if preview_window is not None:
             preview_window.stop()
         if arousal_client is not None:
-            arousal_client.stop()
-        if arousal_publisher is not None:
-            arousal_publisher.stop()
             try:
-                arousal_publisher.join(timeout=2.0)
+                arousal_client.stop()
+            except Exception:
+                pass
+            try:
+                arousal_client.join(timeout=2.0)
             except Exception:
                 pass
 
