@@ -24,9 +24,9 @@ weather:
   preset: "ClearNoon"  # try also: CloudyNoon, WetNoon, HardRainNoon, ClearSunset
 
 traffic_lights:
-  green_time: 3.0
+  green_time: 5.0
   yellow_time: 1.0
-  red_time: 2.0
+  red_time: 1.0
 
 arousal_sensor:
   enabled: true
@@ -46,7 +46,7 @@ inference:
   preview_hz: 15.0
 
 traffic:
-  vehicles: 20
+  vehicles: 10
   safe_radius_from_route_start: 35.0
 
 pedestrians:
@@ -92,8 +92,8 @@ manual_control:
     # - "-a"
 
 experiment:
-  user_id: "participant_01"
-  run_id: 2
+  user_id: "participant_03"
+  run_id: 3
   weather_label: "day"
   output_dir: "data"
   mode: "train"  # train | test

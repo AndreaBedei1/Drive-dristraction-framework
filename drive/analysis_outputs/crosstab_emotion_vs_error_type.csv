@@ -1,0 +1,6 @@
+emotion_label,Harsh braking,Red light violation,Solid line crossing,Stop sign violation,Vehicle collision
+angry,1,0,0,0,2
+fear,6,6,0,5,7
+happy,0,0,25,0,0
+neutral,4,7,22,3,0
+sad,6,5,0,4,1

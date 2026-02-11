@@ -1,0 +1,5 @@
+distraction_emotion_label_end,Harsh braking,Red light violation,Solid line crossing,Stop sign violation,Vehicle collision
+fear,1,0,1,0,0
+happy,0,1,1,0,0
+neutral,1,0,3,1,1
+sad,0,1,2,0,1

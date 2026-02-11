@@ -271,6 +271,19 @@ class DistractionWindow(threading.Thread):
         if pressed == self._expected_letter:
             self._advance_expected()
 
+    def _on_global_vk(self, vk: int) -> None:
+        """Advance only if the global key still matches the expected key."""
+        if not self._awaiting_ack:
+            return
+        if self._expected_vk is None:
+            return
+        try:
+            if int(vk) != int(self._expected_vk):
+                return
+        except Exception:
+            return
+        self._advance_expected()
+
     def _advance_expected(self) -> None:
         if not self._awaiting_ack:
             return
@@ -339,7 +352,7 @@ class DistractionWindow(threading.Thread):
                 if down and not last_down and self._awaiting_ack:
                     try:
                         if self._root is not None:
-                            self._root.after(0, self._advance_expected)
+                            self._root.after(0, lambda _vk=vk: self._on_global_vk(_vk))
                     except Exception:
                         pass
                 last_down = down

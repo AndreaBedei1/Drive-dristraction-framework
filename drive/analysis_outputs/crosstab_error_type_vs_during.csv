@@ -1,0 +1,6 @@
+error_type,False,True
+Harsh braking,15,2
+Red light violation,16,2
+Solid line crossing,40,7
+Stop sign violation,11,1
+Vehicle collision,8,2
