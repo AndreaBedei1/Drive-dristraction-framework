@@ -21,3 +21,6 @@ qasync==0.27.1
 setuptools==80.9.0
 shiboken6==6.9.0
 six==1.17.0
+matplotlib
+pandas
+scipy

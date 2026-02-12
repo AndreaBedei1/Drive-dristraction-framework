@@ -1,8 +1,0 @@
-{
-  "total_errors": 104,
-  "errors_during_distraction": 14,
-  "errors_outside_distraction": 90,
-  "total_distraction_windows": 138,
-  "avg_errors_per_window": 0.10144927536231885,
-  "median_errors_per_window": 0.0
-}
