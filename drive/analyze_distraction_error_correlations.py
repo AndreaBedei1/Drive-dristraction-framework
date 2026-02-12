@@ -21,6 +21,19 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+POST_DISTRACTION_GRACE_SECONDS = 2.0
+POST_DISTRACTION_GRACE = pd.to_timedelta(POST_DISTRACTION_GRACE_SECONDS, unit="s")
+PEDESTRIAN_COLLISION_MARKERS = (
+    "walker.pedestrian",
+    "controller.ai.walker",
+    "pedestrian",
+    "walker.",
+)
+VEHICLE_COLLISION_ERROR_TYPES = {
+    "Vehicle collision",
+    "Vehicle-pedestrian collision",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -54,6 +67,23 @@ def clean_text(value: object) -> str:
     if not text or text.lower() in {"nan", "none", "null"}:
         return "None"
     return text
+
+
+def normalize_error_type(error_type: object, details: object) -> str:
+    """Normalize collision labels and recover pedestrian collisions from details."""
+    normalized = clean_text(error_type)
+    normalized_lower = normalized.lower()
+    details_text = clean_text(details).lower()
+
+    if "pedestrian" in normalized_lower or "walker" in normalized_lower:
+        return "Vehicle-pedestrian collision"
+    if any(marker in details_text for marker in PEDESTRIAN_COLLISION_MARKERS):
+        return "Vehicle-pedestrian collision"
+    if normalized == "Collision" and details_text.startswith("vehicle."):
+        return "Vehicle collision"
+    if normalized in {"Vehicle collision", "Collision"}:
+        return normalized
+    return normalized
 
 
 def read_and_clean_distractions(path: Path) -> pd.DataFrame:
@@ -134,9 +164,15 @@ def read_and_clean_errors(path: Path) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].map(clean_text)
 
-    # Normalize known label variants.
-    if "error_type" in df.columns:
-        df["error_type"] = df["error_type"].replace({"Collision": "Vehicle collision"})
+    # Normalize known label variants and recover pedestrian collisions from details.
+    if "error_type" not in df.columns:
+        df["error_type"] = "None"
+    if "details" not in df.columns:
+        df["details"] = "None"
+    df["error_type"] = [
+        normalize_error_type(error_type, details)
+        for error_type, details in zip(df["error_type"], df["details"])
+    ]
 
     numeric_cols = [
         "model_prob",
@@ -272,13 +308,14 @@ def enrich_errors_with_distractions(
         d_grp = grouped_distractions[key]
         starts = d_grp["timestamp_start"]
         ends = d_grp["timestamp_end"]
+        effective_ends = ends + POST_DISTRACTION_GRACE
 
         for error_idx in error_group.index:
             ts = merged.at[error_idx, "timestamp"]
             if pd.isna(ts):
                 continue
 
-            overlaps = (starts <= ts) & (ts <= ends)
+            overlaps = (starts <= ts) & (ts <= effective_ends)
             overlap_count = int(overlaps.sum())
             merged.at[error_idx, "overlapping_distraction_count"] = overlap_count
 
@@ -292,7 +329,7 @@ def enrich_errors_with_distractions(
                     ts - matched["timestamp_start"]
                 ).total_seconds()
                 merged.at[error_idx, "seconds_to_distraction_end"] = (
-                    matched["timestamp_end"] - ts
+                    matched["timestamp_end"] + POST_DISTRACTION_GRACE - ts
                 ).total_seconds()
                 merged.at[error_idx, "seconds_to_nearest_distraction"] = 0.0
                 for col in matched_cols:
@@ -300,7 +337,7 @@ def enrich_errors_with_distractions(
             else:
                 # Distance to nearest distraction interval boundary.
                 delta_to_start = (ts - starts).abs().dt.total_seconds()
-                delta_to_end = (ends - ts).abs().dt.total_seconds()
+                delta_to_end = (effective_ends - ts).abs().dt.total_seconds()
                 nearest_dist = np.minimum(delta_to_start, delta_to_end)
                 nearest_pos = nearest_dist.idxmin()
                 nearest = d_grp.loc[nearest_pos]
@@ -336,12 +373,17 @@ def compute_errors_per_window(
             end = windows.at[idx, "timestamp_end"]
             if pd.isna(start) or pd.isna(end):
                 continue
-            count = ((e_ts >= start) & (e_ts <= end)).sum()
+            effective_end = end + POST_DISTRACTION_GRACE
+            count = ((e_ts >= start) & (e_ts <= effective_end)).sum()
             windows.at[idx, "errors_in_window"] = int(count)
 
+    windows["analysis_window_duration_s"] = (
+        pd.to_numeric(windows["distraction_duration_s"], errors="coerce")
+        + POST_DISTRACTION_GRACE_SECONDS
+    )
     windows["errors_per_minute_window"] = np.where(
-        windows["distraction_duration_s"] > 0,
-        windows["errors_in_window"] / (windows["distraction_duration_s"] / 60.0),
+        windows["analysis_window_duration_s"] > 0,
+        windows["errors_in_window"] / (windows["analysis_window_duration_s"] / 60.0),
         np.nan,
     )
     return windows
@@ -392,10 +434,10 @@ def plot_heatmap(
 
 def plot_bar_counts(merged: pd.DataFrame, out_path: Path) -> None:
     counts = merged["during_distraction"].value_counts().reindex([True, False], fill_value=0)
-    labels = ["During distraction", "Outside distraction"]
+    labels = [f"During distraction (+{POST_DISTRACTION_GRACE_SECONDS:g}s)", "Outside distraction"]
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.bar(labels, counts.values, color=["#E76F51", "#264653"])
-    ax.set_title("Errors During vs Outside Distraction")
+    ax.set_title(f"Errors During (+{POST_DISTRACTION_GRACE_SECONDS:g}s) vs Outside Distraction")
     ax.set_ylabel("Number of errors")
     for i, value in enumerate(counts.values):
         ax.text(i, value + 0.5, str(int(value)), ha="center")
@@ -613,7 +655,9 @@ def generate_report(
     lines.append("")
     lines.append("## Core counts")
     lines.append(f"- Total errors: {total_errors}")
-    lines.append(f"- Errors during distraction: {during} ({during_pct:.2f}%)")
+    lines.append(
+        f"- Errors during distraction (+{POST_DISTRACTION_GRACE_SECONDS:g}s): {during} ({during_pct:.2f}%)"
+    )
     lines.append(f"- Errors outside distraction: {outside} ({100.0 - during_pct:.2f}%)")
     lines.append(f"- Total distraction windows: {len(windows)}")
     by_user = merged.groupby("user_id")["during_distraction"].agg(["sum", "count"])
@@ -622,7 +666,7 @@ def generate_report(
         user_total = int(row["count"])
         user_pct = (user_during / user_total * 100.0) if user_total else 0.0
         lines.append(
-            f"- {user_id}: {user_during}/{user_total} errors during distraction ({user_pct:.2f}%)"
+            f"- {user_id}: {user_during}/{user_total} errors during distraction (+{POST_DISTRACTION_GRACE_SECONDS:g}s) ({user_pct:.2f}%)"
         )
     lines.append("")
 
@@ -638,13 +682,13 @@ def generate_report(
     lines.append("")
 
     lines.append("## Designed correlation checks")
-    vc_mask = merged["error_type"].eq("Vehicle collision")
+    vc_mask = merged["error_type"].isin(VEHICLE_COLLISION_ERROR_TYPES)
     vc_target = merged["emotion_label"].isin(["fear", "angry"])
     vc_total = int(vc_mask.sum())
     vc_match = int((vc_mask & vc_target).sum())
     vc_pct = (vc_match / vc_total * 100.0) if vc_total else 0.0
     lines.append(
-        f"- Vehicle collision with fear/angry: {vc_match}/{vc_total} ({vc_pct:.2f}%)"
+        f"- Vehicle-related collisions with fear/angry: {vc_match}/{vc_total} ({vc_pct:.2f}%)"
     )
 
     sl_mask = merged["error_type"].eq("Solid line crossing")
@@ -676,7 +720,9 @@ def generate_report(
     lines.append("")
 
     lines.append("## Statistical tests")
-    lines.append("- Note: tests on \"during distraction\" subsets use a small sample (n=14) and should be interpreted carefully.")
+    lines.append(
+        f"- Note: tests on \"during distraction (+{POST_DISTRACTION_GRACE_SECONDS:g}s)\" subsets use a small sample (n=14) and should be interpreted carefully."
+    )
     if len(statistical_tests) == 0:
         lines.append("- No valid test computed.")
     else:
@@ -765,8 +811,8 @@ def main() -> None:
     )
 
     t_vehicle_collision_vs_target_emotion = pd.crosstab(
-        merged["error_type"].eq("Vehicle collision").map(
-            {True: "Vehicle collision", False: "Other errors"}
+        merged["error_type"].isin(VEHICLE_COLLISION_ERROR_TYPES).map(
+            {True: "Vehicle-related collision", False: "Other errors"}
         ),
         merged["emotion_label"].isin(["fear", "angry"]).map(
             {True: "fear_or_angry", False: "other_emotions"}
@@ -782,7 +828,7 @@ def main() -> None:
             "p_value": stats_vehicle_collision_vs_target_emotion["p_value"],
             "dof": stats_vehicle_collision_vs_target_emotion["dof"],
             "cramers_v": stats_vehicle_collision_vs_target_emotion["cramers_v"],
-            "notes": "Targeted check: vehicle collisions should skew toward fear/angry.",
+            "notes": "Targeted check: vehicle-related collisions should skew toward fear/angry.",
         }
     )
 
@@ -1160,7 +1206,7 @@ def main() -> None:
     during = int(merged["during_distraction"].sum())
     outside = total_errors - during
     print(f"[done] Total errors: {total_errors}")
-    print(f"[done] During distraction: {during}")
+    print(f"[done] During distraction (+{POST_DISTRACTION_GRACE_SECONDS:g}s): {during}")
     print(f"[done] Outside distraction: {outside}")
     print(f"[done] Outputs written to: {out_dir}")
 

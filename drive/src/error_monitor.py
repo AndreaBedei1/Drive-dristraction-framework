@@ -134,14 +134,26 @@ class ErrorMonitor(threading.Thread):
             except Exception:
                 pass
 
-        if other_type.startswith("walker.pedestrian"):
+        other_type_norm = str(other_type).strip().lower()
+
+        if (
+            other_type_norm.startswith("walker.pedestrian")
+            or other_type_norm.startswith("controller.ai.walker")
+            or other_type_norm.startswith("walker.")
+            or "pedestrian" in other_type_norm
+        ):
             error_type = "Vehicle-pedestrian collision"
-        elif other_type.startswith("vehicle."):
+        elif other_type_norm.startswith("vehicle."):
             error_type = "Vehicle collision"
         else:
             error_type = "Collision"
 
-        self._logger.log(self._world, self._hero, error_type, details=other_type)
+        self._logger.log(
+            self._world,
+            self._hero,
+            error_type,
+            details=other_type or "unknown_actor",
+        )
 
     @staticmethod
     def _on_lane_invasion(weak_self: "weakref.ReferenceType[ErrorMonitor]", event) -> None:
