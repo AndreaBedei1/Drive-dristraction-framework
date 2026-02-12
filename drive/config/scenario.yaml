@@ -96,6 +96,10 @@ experiment:
   run_id: 3
   weather_label: "day"
   output_dir: "data"
+  # baseline | distraction
+  dataset_profile: "distraction"
+  baseline_dataset_suffix: "_baseline"
+  distraction_dataset_suffix: "_distraction"
   mode: "train"  # train | test
   test_map_preference: ["Town04"]
   test_vehicles: 100

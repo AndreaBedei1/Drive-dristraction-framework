@@ -507,11 +507,22 @@ def main() -> int:
 
     map_name = world.get_map().name.split("/")[-1]
     output_dir = _resolve_output_dir(cfg.experiment.output_dir)
+    dataset_profile = (cfg.experiment.dataset_profile or "distraction").strip().lower()
     dataset_suffix = ""
     if mode == "test":
         dataset_suffix = cfg.experiment.test_dataset_suffix or "_test"
+    elif dataset_profile == "baseline":
+        dataset_suffix = cfg.experiment.baseline_dataset_suffix or "_baseline"
+    elif dataset_profile == "distraction":
+        dataset_suffix = cfg.experiment.distraction_dataset_suffix or "_distraction"
+    print(f"[Runner] Dataset profile: {dataset_profile} (suffix='{dataset_suffix}')")
 
-    run_id = _compute_next_run_id(output_dir, cfg.experiment.user_id, dataset_suffix)
+    configured_run_id = int(cfg.experiment.run_id)
+    if configured_run_id > 0:
+        run_id = configured_run_id
+    else:
+        run_id = _compute_next_run_id(output_dir, cfg.experiment.user_id, dataset_suffix)
+    print(f"[Runner] Using run_id={run_id}")
     context = DatasetContext(
         user_id=cfg.experiment.user_id,
         run_id=run_id,
@@ -636,7 +647,11 @@ def main() -> int:
     elif not cfg.inference.enable_preview:
         print("[Runner] Camera preview disabled by config.")
     distraction_windows = []
-    if cfg.distractions.enabled:
+    distractions_enabled = bool(cfg.distractions.enabled)
+    if dataset_profile == "baseline":
+        distractions_enabled = False
+
+    if distractions_enabled:
         coord = DistractionCoordinator(cfg.distractions.min_gap_between_windows_seconds)
         window_titles = list(cfg.distractions.window_titles)
         while len(window_titles) < 2:
@@ -704,7 +719,10 @@ def main() -> int:
         for w in distraction_windows:
             w.start()
     else:
-        print("[Runner] Distraction windows disabled by config.")
+        if dataset_profile == "baseline":
+            print("[Runner] Distraction windows disabled (baseline dataset profile).")
+        else:
+            print("[Runner] Distraction windows disabled by config.")
 
     proc = None
     mc_env = os.environ.copy()

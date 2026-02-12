@@ -720,8 +720,9 @@ def generate_report(
     lines.append("")
 
     lines.append("## Statistical tests")
+    during_n = int(merged["during_distraction"].sum())
     lines.append(
-        f"- Note: tests on \"during distraction (+{POST_DISTRACTION_GRACE_SECONDS:g}s)\" subsets use a small sample (n=14) and should be interpreted carefully."
+        f"- Note: tests on \"during distraction (+{POST_DISTRACTION_GRACE_SECONDS:g}s)\" subsets use n={during_n} events; interpret sparse crosstabs with caution."
     )
     if len(statistical_tests) == 0:
         lines.append("- No valid test computed.")
@@ -1209,53 +1210,5 @@ def main() -> None:
     print(f"[done] During distraction (+{POST_DISTRACTION_GRACE_SECONDS:g}s): {during}")
     print(f"[done] Outside distraction: {outside}")
     print(f"[done] Outputs written to: {out_dir}")
-    # --- IMPAIRMENT RECOVERY CURVE (CORRECTED) ---
-
-    # Only consider errors with valid seconds_from_distraction_start
-    recovery_df = merged[merged["seconds_from_distraction_start"].notna()].copy()
-
-    if not recovery_df.empty:
-        max_seconds = 30  # maximum seconds to track after distraction
-        bin_size = 1      # 1-second bins
-        bins = np.arange(0, max_seconds + bin_size, bin_size)
-
-        # Compute probability of error in each bin: fraction of errors occurring in that bin
-        curve_probs = []
-        for start in bins[:-1]:
-            end = start + bin_size
-            mask = (recovery_df["seconds_from_distraction_start"] >= start) & (
-                recovery_df["seconds_from_distraction_start"] < end
-            )
-            curve_probs.append(mask.sum() / len(recovery_df))
-
-        curve_probs = np.array(curve_probs)
-
-        # Baseline probability: fraction of all errors outside any distraction window
-        baseline_prob = (~merged["during_distraction"]).sum() / len(merged)
-
-        # Recovery time: first bin where curve_prob <= baseline
-        recovered_idx = np.where(curve_probs <= baseline_prob)[0]
-        recovery_time = bins[recovered_idx[0]] if len(recovered_idx) > 0 else np.nan
-
-        # Plot
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(bins[:-1] + bin_size/2, curve_probs, marker="o", label="P(error | t after distraction)")
-        ax.axhline(baseline_prob, color="red", linestyle="--", label="Baseline P(error)")
-        if not np.isnan(recovery_time):
-            ax.axvline(recovery_time, color="green", linestyle="--", label=f"Recovery ≈ {recovery_time:.1f}s")
-        ax.set_xlabel("Seconds after distraction start")
-        ax.set_ylabel("Error probability")
-        ax.set_title("Driver Impairment Recovery Curve")
-        ax.legend()
-        fig.tight_layout()
-        fig.savefig(plots_dir / "impairment_recovery_curve.png", dpi=180)
-        plt.close(fig)
-
-        print(f"[info] Estimated impairment recovery time: {recovery_time:.2f}s (first bin reaching baseline)")
-    else:
-        print("[warn] No valid distraction errors with seconds_from_distraction_start to compute recovery curve.")
-
-
-
 if __name__ == "__main__":
     main()

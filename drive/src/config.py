@@ -92,6 +92,9 @@ class ExperimentConfig:
     run_id: int
     weather_label: str
     output_dir: str
+    dataset_profile: str
+    baseline_dataset_suffix: str
+    distraction_dataset_suffix: str
     mode: str
     test_map_preference: List[str]
     test_vehicles: int
@@ -291,6 +294,9 @@ def load_config(path: str) -> ScenarioConfig:
         run_id=int(_get(exp_raw, "run_id", 1)),
         weather_label=str(_get(exp_raw, "weather_label", _derive_weather_label(weather_cfg.preset))),
         output_dir=str(_get(exp_raw, "output_dir", "data")),
+        dataset_profile=str(_get(exp_raw, "dataset_profile", "distraction")),
+        baseline_dataset_suffix=str(_get(exp_raw, "baseline_dataset_suffix", "_baseline")),
+        distraction_dataset_suffix=str(_get(exp_raw, "distraction_dataset_suffix", "_distraction")),
         mode=str(_get(exp_raw, "mode", "train")),
         test_map_preference=list(_get(exp_raw, "test_map_preference", ["Town04"])),
         test_vehicles=int(_get(exp_raw, "test_vehicles", 0)),
