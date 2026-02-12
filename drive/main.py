@@ -574,6 +574,7 @@ def main() -> int:
                 baseline_seconds=cfg.arousal_sensor.baseline_seconds,
                 smoothing_window=cfg.arousal_sensor.smoothing_window,
                 reconnect_seconds=cfg.arousal_sensor.reconnect_seconds,
+                no_sample_timeout_seconds=cfg.arousal_sensor.no_sample_timeout_seconds,
                 debug=cfg.arousal_sensor.debug,
                 debug_interval_seconds=cfg.arousal_sensor.debug_interval_seconds,
             )
@@ -602,6 +603,10 @@ def main() -> int:
             except Exception:
                 time.sleep(baseline_wait)
 
+    distractions_enabled = bool(cfg.distractions.enabled)
+    if dataset_profile == "baseline":
+        distractions_enabled = False
+
     error_logger = ErrorDatasetLogger(
         output_dir=output_dir,
         context=context,
@@ -609,14 +614,16 @@ def main() -> int:
         model_provider=model_inference,
         emotion_provider=emotion_inference,
     )
-    distraction_logger = DistractionDatasetLogger(
-        output_dir=output_dir,
-        context=context,
-        suffix=dataset_suffix,
-        model_provider=model_inference,
-        arousal_provider=arousal_client,
-        emotion_provider=emotion_inference,
-    )
+    distraction_logger = None
+    if distractions_enabled:
+        distraction_logger = DistractionDatasetLogger(
+            output_dir=output_dir,
+            context=context,
+            suffix=dataset_suffix,
+            model_provider=model_inference,
+            arousal_provider=arousal_client,
+            emotion_provider=emotion_inference,
+        )
 
     error_monitor = ErrorMonitor(
         world=world,
@@ -647,11 +654,10 @@ def main() -> int:
     elif not cfg.inference.enable_preview:
         print("[Runner] Camera preview disabled by config.")
     distraction_windows = []
-    distractions_enabled = bool(cfg.distractions.enabled)
-    if dataset_profile == "baseline":
-        distractions_enabled = False
 
     if distractions_enabled:
+        if distraction_logger is None:
+            raise RuntimeError("Distraction logger is required when distractions are enabled.")
         coord = DistractionCoordinator(cfg.distractions.min_gap_between_windows_seconds)
         window_titles = list(cfg.distractions.window_titles)
         while len(window_titles) < 2:
