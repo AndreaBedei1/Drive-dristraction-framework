@@ -34,6 +34,7 @@ arousal_sensor:
   baseline_seconds: 60
   smoothing_window: 10
   reconnect_seconds: 5.0
+  no_sample_timeout_seconds: 12.0
   placeholder_value: -1.0
   debug: true
   debug_interval_seconds: 1.0
@@ -97,7 +98,7 @@ experiment:
   weather_label: "day"
   output_dir: "data"
   # baseline | distraction
-  dataset_profile: "distraction"
+  dataset_profile: "baseline"
   baseline_dataset_suffix: "_baseline"
   distraction_dataset_suffix: "_distraction"
   mode: "train"  # train | test

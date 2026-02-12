@@ -94,6 +94,7 @@ class BleArousalProvider(threading.Thread):
         baseline_seconds: int = 60,
         smoothing_window: int = 10,
         reconnect_seconds: float = 5.0,
+        no_sample_timeout_seconds: float = 12.0,
         arousal_zmax: float = AROUSAL_ZMAX,
         debug: bool = False,
         debug_interval_seconds: float = 1.0,
@@ -106,6 +107,7 @@ class BleArousalProvider(threading.Thread):
         self._baseline_seconds = max(10, int(baseline_seconds))
         self._smoothing_window = max(3, int(smoothing_window))
         self._reconnect_seconds = max(1.0, float(reconnect_seconds))
+        self._no_sample_timeout = max(2.0, float(no_sample_timeout_seconds))
         self._arousal_zmax = float(arousal_zmax)
         self._debug = bool(debug)
         self._debug_interval = max(0.1, float(debug_interval_seconds))
@@ -192,11 +194,17 @@ class BleArousalProvider(threading.Thread):
                     print(f"[Arousal] Connecting to BLE device: {device.name}")
                 async with BleakClient(device.address) as client:
                     await client.start_notify(CHAR_UUID, self._on_hrm)
-                    await self._wait_stop()
+                    # Start no-data watchdog from connection time.
+                    self._last_sample_ts = time.monotonic()
+                    timed_out = await self._wait_stop()
                     try:
                         await client.stop_notify(CHAR_UUID)
                     except Exception:
                         pass
+                    if timed_out:
+                        print(
+                            f"[Arousal] No HR data for {self._no_sample_timeout:.1f}s, forcing reconnect."
+                        )
             except Exception as exc:
                 self._last_error = f"ble_connect_failed: {exc}"
                 if self._debug:
@@ -234,9 +242,14 @@ class BleArousalProvider(threading.Thread):
                 return d
         return None
 
-    async def _wait_stop(self) -> None:
+    async def _wait_stop(self) -> bool:
         while not self._stop_event.is_set():
+            elapsed_no_data = time.monotonic() - self._last_sample_ts
+            if elapsed_no_data >= self._no_sample_timeout:
+                self._last_error = f"ble_no_data_timeout: {elapsed_no_data:.1f}s"
+                return True
             await asyncio.sleep(0.5)
+        return False
 
     def _on_hrm(self, _sender, data: bytearray) -> None:
         hr, rr_list = _parse_hrm_packet(data)
