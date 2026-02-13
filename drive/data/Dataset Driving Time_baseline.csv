@@ -1,0 +1,4 @@
+user_id,run_id,weather,map_name,run_duration_seconds,run_duration_minutes,total_duration_seconds,total_duration_minutes,timestamp
+participant_01,1,day,Town10HD,483.703,10.062,604.0,10.067,2026-02-13T14:40:37.556822
+participant_01,2,day,Town10HD,600.203,10.003,1204.203,20.07,2026-02-13T15:01:41.977478
+participant_01,3,day,Town10HD,600.422,10.007,1684.328,28.072,2026-02-13T15:18:01.385841

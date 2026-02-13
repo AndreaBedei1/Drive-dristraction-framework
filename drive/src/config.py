@@ -92,6 +92,7 @@ class ExperimentConfig:
     run_id: int
     weather_label: str
     output_dir: str
+    max_duration_seconds: float
     dataset_profile: str
     baseline_dataset_suffix: str
     distraction_dataset_suffix: str
@@ -295,6 +296,7 @@ def load_config(path: str) -> ScenarioConfig:
         run_id=int(_get(exp_raw, "run_id", 1)),
         weather_label=str(_get(exp_raw, "weather_label", _derive_weather_label(weather_cfg.preset))),
         output_dir=str(_get(exp_raw, "output_dir", "data")),
+        max_duration_seconds=float(_get(exp_raw, "max_duration_seconds", 600.0)),
         dataset_profile=str(_get(exp_raw, "dataset_profile", "distraction")),
         baseline_dataset_suffix=str(_get(exp_raw, "baseline_dataset_suffix", "_baseline")),
         distraction_dataset_suffix=str(_get(exp_raw, "distraction_dataset_suffix", "_distraction")),

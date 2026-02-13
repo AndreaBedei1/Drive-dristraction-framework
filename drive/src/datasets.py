@@ -133,6 +133,73 @@ def _format_emotion_prob(value: Optional[float]) -> Any:
         return ""
 
 
+class BaselineDrivingTimeLogger:
+    """Logger for baseline driving time and cumulative user totals."""
+
+    def __init__(
+        self,
+        output_dir: str,
+        context: DatasetContext,
+        suffix: str = "",
+    ) -> None:
+        """Create a logger for baseline driving time rows."""
+        self._context = context
+        self._path = os.path.join(output_dir, f"Dataset Driving Time{suffix}.csv")
+        self._writer = _CsvWriter(
+            self._path,
+            [
+                "user_id",
+                "run_id",
+                "weather",
+                "map_name",
+                "run_duration_seconds",
+                "run_duration_minutes",
+                "total_duration_seconds",
+                "total_duration_minutes",
+                "timestamp",
+            ],
+        )
+        self._lock = threading.Lock()
+
+    def _existing_total_for_user_seconds(self, user_id: str) -> float:
+        """Return cumulative driving time already stored for the user."""
+        total = 0.0
+        if not os.path.exists(self._path):
+            return total
+        try:
+            with open(self._path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if str(row.get("user_id", "")).strip() != user_id:
+                        continue
+                    try:
+                        total += float(row.get("run_duration_seconds", 0.0))
+                    except Exception:
+                        continue
+        except Exception:
+            return 0.0
+        return total
+
+    def log_run_duration(self, run_duration_seconds: float) -> float:
+        """Append run duration and return updated cumulative user total."""
+        run_seconds = max(0.0, float(run_duration_seconds))
+        with self._lock:
+            total_seconds = self._existing_total_for_user_seconds(self._context.user_id) + run_seconds
+            row: Dict[str, Any] = {
+                "user_id": self._context.user_id,
+                "run_id": self._context.run_id,
+                "weather": self._context.weather_label,
+                "map_name": self._context.map_name,
+                "run_duration_seconds": round(run_seconds, 3),
+                "run_duration_minutes": round(run_seconds / 60.0, 3),
+                "total_duration_seconds": round(total_seconds, 3),
+                "total_duration_minutes": round(total_seconds / 60.0, 3),
+                "timestamp": _wall_time_iso(),
+            }
+            self._writer.append(row)
+            return total_seconds
+
+
 class ErrorDatasetLogger:
     """Logger for error events into Dataset Errors CSV."""
 

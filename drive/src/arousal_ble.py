@@ -201,7 +201,7 @@ class BleArousalProvider(threading.Thread):
                         await client.stop_notify(CHAR_UUID)
                     except Exception:
                         pass
-                    if timed_out:
+                    if timed_out and self._debug:
                         print(
                             f"[Arousal] No HR data for {self._no_sample_timeout:.1f}s, forcing reconnect."
                         )
@@ -255,8 +255,8 @@ class BleArousalProvider(threading.Thread):
         hr, rr_list = _parse_hrm_packet(data)
         if hr is None:
             return
-        with self._lock:
-            self._handle_sample(int(hr), rr_list)
+        # Keep callback work lightweight; snapshot writes are protected separately.
+        self._handle_sample(int(hr), rr_list)
 
     def _handle_sample(self, hr: int, rr_list: List[float]) -> None:
         now = time.time()
@@ -276,7 +276,7 @@ class BleArousalProvider(threading.Thread):
             self._hr_baseline_vals.append(float(hr))
             if rmssd_log is not None:
                 self._rmssd_baseline_vals.append(float(rmssd_log))
-            if self._baseline_start is not None and time.monotonic() - self._baseline_start >= self._baseline_seconds:
+            if self._baseline_start is not None and mono_now - self._baseline_start >= self._baseline_seconds:
                 self._finish_baseline()
             self._update_snapshot(
                 value=None,
@@ -381,13 +381,14 @@ class BleArousalProvider(threading.Thread):
         quality: Optional[str],
         hr_bpm: Optional[int],
     ) -> None:
-        self._snapshot = ArousalSnapshot(
-            value=value,
-            method=method,
-            timestamp_ms=timestamp_ms,
-            quality=quality,
-            hr_bpm=hr_bpm,
-        )
+        with self._lock:
+            self._snapshot = ArousalSnapshot(
+                value=value,
+                method=method,
+                timestamp_ms=timestamp_ms,
+                quality=quality,
+                hr_bpm=hr_bpm,
+            )
 
     def _maybe_debug_print(
         self,
@@ -399,17 +400,17 @@ class BleArousalProvider(threading.Thread):
     ) -> None:
         if not self._debug:
             return
+        # Always throttle debug output to avoid console I/O impacting sim tick cadence.
+        if mono_now - self._last_debug_ts < self._debug_interval:
+            return
+        self._last_debug_ts = mono_now
         if self._calibrating:
-            if mono_now - self._last_debug_ts < self._debug_interval:
-                return
-            self._last_debug_ts = mono_now
             remaining = ""
             if self._baseline_start is not None:
                 remaining_s = max(0.0, self._baseline_seconds - (mono_now - self._baseline_start))
                 remaining = f" baseline_remaining={remaining_s:.0f}s"
             print(f"[Arousal] calibrating hr={hr_bpm} bpm quality={quality}{remaining}")
             return
-        # After baseline: print every sample (no throttling) to show all sensor data.
         if arousal is None:
             print(f"[Arousal] hr={hr_bpm} bpm quality={quality}")
         else:

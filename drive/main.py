@@ -19,7 +19,12 @@ from src.pedestrians import PedestrianSpawner
 from src.route import RoutePlanner, draw_route
 from src.monitor import LapMonitor
 from src.ticker import WorldTicker
-from src.datasets import DatasetContext, ErrorDatasetLogger, DistractionDatasetLogger
+from src.datasets import (
+    DatasetContext,
+    ErrorDatasetLogger,
+    DistractionDatasetLogger,
+    BaselineDrivingTimeLogger,
+)
 from src.error_monitor import ErrorMonitor
 from src.distraction_windows import DistractionCoordinator, DistractionWindow, focus_simulation_window
 from src.camera_preview import CameraPreviewWindow, preview_available
@@ -516,6 +521,11 @@ def main() -> int:
     elif dataset_profile == "distraction":
         dataset_suffix = cfg.experiment.distraction_dataset_suffix or "_distraction"
     print(f"[Runner] Dataset profile: {dataset_profile} (suffix='{dataset_suffix}')")
+    max_duration_seconds = max(0.0, float(cfg.experiment.max_duration_seconds))
+    if max_duration_seconds > 0.0:
+        print(f"[Runner] Max scenario duration: {max_duration_seconds:.1f}s")
+    else:
+        print("[Runner] Max scenario duration disabled (<= 0).")
 
     configured_run_id = int(cfg.experiment.run_id)
     if configured_run_id > 0:
@@ -614,6 +624,13 @@ def main() -> int:
         model_provider=model_inference,
         emotion_provider=emotion_inference,
     )
+    baseline_time_logger = None
+    if dataset_profile == "baseline":
+        baseline_time_logger = BaselineDrivingTimeLogger(
+            output_dir=output_dir,
+            context=context,
+            suffix=dataset_suffix,
+        )
     distraction_logger = None
     if distractions_enabled:
         distraction_logger = DistractionDatasetLogger(
@@ -731,6 +748,7 @@ def main() -> int:
             print("[Runner] Distraction windows disabled by config.")
 
     proc = None
+    drive_start_monotonic: Optional[float] = None
     mc_env = os.environ.copy()
     mc_env["SIM_SHUTDOWN_FILE"] = shutdown_flag_path
     if center_rect is not None:
@@ -755,8 +773,22 @@ def main() -> int:
                 mc_args,
                 env=mc_env,
             )
+            drive_start_monotonic = time.monotonic()
 
             while True:
+                if max_duration_seconds > 0.0 and drive_start_monotonic is not None:
+                    elapsed = time.monotonic() - drive_start_monotonic
+                    if elapsed >= max_duration_seconds:
+                        print(
+                            f"[Runner] Scenario timeout reached at {elapsed:.1f}s "
+                            f"(limit={max_duration_seconds:.1f}s). Stopping scenario."
+                        )
+                        try:
+                            with open(shutdown_flag_path, "w", encoding="utf-8") as f:
+                                f.write("shutdown\n")
+                        except Exception:
+                            pass
+                        break
                 if os.path.exists(shutdown_flag_path):
                     print("[Runner] Shutdown flag detected. Stopping scenario.")
                     break
@@ -767,7 +799,21 @@ def main() -> int:
                 time.sleep(0.5)
         else:
             print("[Runner] --no-launch-manual set. Scenario running; you can start manual_control separately.")
+            drive_start_monotonic = time.monotonic()
             while True:
+                if max_duration_seconds > 0.0 and drive_start_monotonic is not None:
+                    elapsed = time.monotonic() - drive_start_monotonic
+                    if elapsed >= max_duration_seconds:
+                        print(
+                            f"[Runner] Scenario timeout reached at {elapsed:.1f}s "
+                            f"(limit={max_duration_seconds:.1f}s). Stopping scenario."
+                        )
+                        try:
+                            with open(shutdown_flag_path, "w", encoding="utf-8") as f:
+                                f.write("shutdown\n")
+                        except Exception:
+                            pass
+                        break
                 if os.path.exists(shutdown_flag_path):
                     print("[Runner] Shutdown flag detected. Stopping scenario.")
                     break
@@ -776,6 +822,17 @@ def main() -> int:
     except KeyboardInterrupt:
         print("[Runner] KeyboardInterrupt received, shutting down.")
     finally:
+        if baseline_time_logger is not None and drive_start_monotonic is not None:
+            try:
+                run_duration_seconds = max(0.0, time.monotonic() - drive_start_monotonic)
+                total_seconds = baseline_time_logger.log_run_duration(run_duration_seconds)
+                print(
+                    "[Runner] Baseline driving time saved "
+                    f"(run={run_duration_seconds:.1f}s, user_total={total_seconds:.1f}s)."
+                )
+            except Exception as exc:
+                print(f"[Runner] Failed to save baseline driving time: {exc}")
+
         monitor.stop()
         error_monitor.stop()
         for w in distraction_windows:

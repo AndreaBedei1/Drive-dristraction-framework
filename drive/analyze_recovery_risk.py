@@ -34,6 +34,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to baseline Dataset Errors CSV.",
     )
     parser.add_argument(
+        "--baseline-driving-time",
+        type=Path,
+        default=Path("data") / "Dataset Driving Time_baseline.csv",
+        help="Path to baseline driving-time CSV.",
+    )
+    parser.add_argument(
         "--distraction-errors",
         type=Path,
         default=Path("data") / "Dataset Errors_distraction.csv",
@@ -147,6 +153,24 @@ def read_distractions(path: Path) -> pd.DataFrame:
     return df
 
 
+def read_baseline_driving_time(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path, skipinitialspace=True)
+    df.columns = [c.strip() for c in df.columns]
+
+    required_cols = ["user_id", "run_id", "run_duration_seconds"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Baseline driving-time CSV missing required columns: {', '.join(missing)}"
+        )
+
+    df["user_id"] = df["user_id"].map(clean_text)
+    df["run_id"] = df["run_id"].map(clean_text)
+    df["run_duration_seconds"] = pd.to_numeric(df["run_duration_seconds"], errors="coerce")
+    df = df[df["run_duration_seconds"].notna()].copy()
+    return df
+
+
 def apply_user_filter(df: pd.DataFrame, users: Sequence[str]) -> pd.DataFrame:
     if not users:
         return df
@@ -171,25 +195,41 @@ def _timestamps_to_ns(series: pd.Series) -> np.ndarray:
     return np.sort(series.astype("int64").to_numpy(dtype=np.int64, copy=False))
 
 
-def compute_baseline_run_probabilities(errors: pd.DataFrame, delta_t_seconds: float) -> pd.DataFrame:
+def compute_baseline_run_probabilities(
+    errors: pd.DataFrame,
+    baseline_driving_time: pd.DataFrame,
+    delta_t_seconds: float,
+) -> pd.DataFrame:
     rows: List[Dict[str, object]] = []
+
+    duration_by_run = (
+        baseline_driving_time.groupby(["user_id", "run_id"], dropna=False)["run_duration_seconds"]
+        .sum()
+        .to_dict()
+    )
+
+    timestamps_by_run: Dict[Tuple[str, str], pd.Series] = {}
     for (user_id, run_id), grp in errors.groupby(["user_id", "run_id"], dropna=False):
         ts = grp["timestamp"].dropna().sort_values()
         if ts.empty:
             continue
+        timestamps_by_run[(str(user_id), str(run_id))] = ts
 
-        start_ns = int(ts.iloc[0].value)
-        end_ns = int(ts.iloc[-1].value)
-        duration_s = max((end_ns - start_ns) / NANOS_PER_SECOND, delta_t_seconds)
+    for (user_id, run_id), run_duration_seconds in duration_by_run.items():
+        duration_s = float(run_duration_seconds)
+        if duration_s <= 0.0:
+            continue
         n_windows = max(1, int(np.ceil(duration_s / delta_t_seconds)))
 
-        rel_s = (ts.astype("int64") - start_ns) / NANOS_PER_SECOND
-        idx = np.floor(rel_s / delta_t_seconds).astype(int).to_numpy()
-        idx = np.clip(idx, 0, n_windows - 1)
+        ts = timestamps_by_run.get((str(user_id), str(run_id)))
+        error_windows = 0
+        if ts is not None and not ts.empty:
+            start_ns = int(ts.iloc[0].value)
+            rel_s = (ts.astype("int64") - start_ns) / NANOS_PER_SECOND
+            idx = np.floor(rel_s / delta_t_seconds).astype(int).to_numpy()
+            idx = np.clip(idx, 0, n_windows - 1)
+            error_windows = int(np.unique(idx).size)
 
-        has_error = np.zeros(n_windows, dtype=bool)
-        has_error[np.unique(idx)] = True
-        error_windows = int(has_error.sum())
         p_error = float(error_windows / n_windows)
 
         rows.append(
@@ -566,6 +606,7 @@ def main() -> None:
     state_values = parse_list(args.state_values)
 
     ensure_exists(args.baseline_errors, "baseline errors")
+    ensure_exists(args.baseline_driving_time, "baseline driving time")
     ensure_exists(args.distraction_errors, "distraction errors")
     ensure_exists(args.distractions, "distraction windows")
 
@@ -578,17 +619,23 @@ def main() -> None:
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     baseline_errors = read_errors(args.baseline_errors)
+    baseline_driving_time = read_baseline_driving_time(args.baseline_driving_time)
     distraction_errors = read_errors(args.distraction_errors)
     distractions = read_distractions(args.distractions)
 
     baseline_errors = apply_user_filter(baseline_errors, users)
+    baseline_driving_time = apply_user_filter(baseline_driving_time, users)
     distraction_errors = apply_user_filter(distraction_errors, users)
     distractions = apply_user_filter(distractions, users)
 
     baseline_errors = apply_state_filter(baseline_errors, args.state_col, state_values)
     distraction_errors = apply_state_filter(distraction_errors, args.state_col, state_values)
 
-    baseline_run = compute_baseline_run_probabilities(baseline_errors, args.delta_t_seconds)
+    baseline_run = compute_baseline_run_probabilities(
+        baseline_errors,
+        baseline_driving_time,
+        args.delta_t_seconds,
+    )
     baseline_user = aggregate_baseline_by_user(baseline_run)
     baseline_overall = aggregate_baseline_overall(baseline_run)
 
