@@ -35,6 +35,9 @@ class ErrorMonitor(threading.Thread):
         self._stop_event = threading.Event()
 
         self._hero: Optional[carla.Vehicle] = None
+        self._hero_id: Optional[int] = None
+        self._last_hero_refresh_wall_time = 0.0
+        self._hero_refresh_interval_seconds = 1.0
         self._collision_sensor: Optional[carla.Actor] = None
         self._lane_sensor: Optional[carla.Actor] = None
 
@@ -52,10 +55,15 @@ class ErrorMonitor(threading.Thread):
         self._tracked_red_light_stop_wps: List[carla.Waypoint] = []
         self._last_solid_line_time = -1e9
         self._last_collision_time = -1e9
+        self._last_static_collision_time: Dict[int, float] = {}
         self._last_stop_violation_time = -1e9
         self._last_stop_violation_loc: Optional[carla.Location] = None
         self._last_stop_violation_id: Optional[str] = None
         self._last_tl_debug_time = 0.0
+        self._red_light_check_period = 1.0 / max(0.1, float(getattr(self._cfg, "red_light_check_hz", 15.0)))
+        self._stop_sign_check_period = 1.0 / max(0.1, float(getattr(self._cfg, "stop_sign_check_hz", 15.0)))
+        self._next_red_light_check_time = -1e9
+        self._next_stop_sign_check_time = -1e9
 
         self._lights_list = self._world.get_actors().filter("*traffic_light*")
         self._lights_map: Dict[int, carla.Waypoint] = {}
@@ -90,15 +98,35 @@ class ErrorMonitor(threading.Thread):
 
     def _ensure_hero(self) -> Optional[carla.Vehicle]:
         """Ensure a hero vehicle reference and attach sensors if needed."""
+        now = time.monotonic()
+
         if self._hero is not None:
             try:
-                if self._hero.is_alive:
-                    return self._hero
+                if not self._hero.is_alive:
+                    self._hero = None
+                    self._hero_id = None
             except Exception:
-                pass
-        self._hero = find_hero_vehicle(self._world, preferred_role=self._role)
-        if self._hero is not None:
-            self._attach_sensors(self._hero)
+                self._hero = None
+                self._hero_id = None
+
+        should_refresh = (
+            self._hero is None
+            or now - self._last_hero_refresh_wall_time >= self._hero_refresh_interval_seconds
+        )
+        if should_refresh:
+            self._last_hero_refresh_wall_time = now
+            candidate = find_hero_vehicle(self._world, preferred_role=self._role)
+            if candidate is not None:
+                candidate_id = None
+                try:
+                    candidate_id = int(candidate.id)
+                except Exception:
+                    pass
+                if self._hero is None or candidate_id != self._hero_id:
+                    self._hero = candidate
+                    self._hero_id = candidate_id
+                    self._attach_sensors(self._hero)
+
         return self._hero
 
     def _attach_sensors(self, hero: carla.Vehicle) -> None:
@@ -122,19 +150,53 @@ class ErrorMonitor(threading.Thread):
         if self is None or self._hero is None:
             return
         now = self._safe_sim_time()
-        if now - self._last_collision_time < self._cfg.collision_cooldown_seconds:
-            return
-        self._last_collision_time = now
 
         other = event.other_actor
+        other_id: Optional[int] = None
         other_type = ""
         if other is not None:
             try:
                 other_type = other.type_id
             except Exception:
                 pass
+            try:
+                other_id = int(other.id)
+            except Exception:
+                other_id = None
 
         other_type_norm = str(other_type).strip().lower()
+        is_static_actor = other_type_norm.startswith("static.")
+
+        speed_kmh = 0.0
+        try:
+            v = self._hero.get_velocity()
+            speed_kmh = 3.6 * (v.x * v.x + v.y * v.y + v.z * v.z) ** 0.5
+        except Exception:
+            speed_kmh = 0.0
+
+        impulse_norm = 0.0
+        try:
+            impulse = event.normal_impulse
+            impulse_norm = (impulse.x * impulse.x + impulse.y * impulse.y + impulse.z * impulse.z) ** 0.5
+        except Exception:
+            impulse_norm = 0.0
+
+        if is_static_actor:
+            if (
+                speed_kmh < float(getattr(self._cfg, "collision_static_min_speed_kmh", 2.5))
+                and impulse_norm < float(getattr(self._cfg, "collision_static_min_impulse", 120.0))
+            ):
+                return
+            if other_id is not None:
+                relog_seconds = float(getattr(self._cfg, "collision_static_relog_seconds", 12.0))
+                last_t = self._last_static_collision_time.get(other_id, -1e9)
+                if now - last_t < relog_seconds:
+                    return
+                self._last_static_collision_time[other_id] = now
+
+        if now - self._last_collision_time < self._cfg.collision_cooldown_seconds:
+            return
+        self._last_collision_time = now
 
         if (
             other_type_norm.startswith("walker.pedestrian")
@@ -786,8 +848,12 @@ class ErrorMonitor(threading.Thread):
             try:
                 self._draw_traffic_light_stop_line(hero, sim_time)
                 self._check_harsh_brake(hero, sim_time, dt)
-                self._check_red_light(hero, speed_kmh, sim_time)
-                self._check_stop_sign(hero, speed_kmh, sim_time)
+                if sim_time >= self._next_red_light_check_time:
+                    self._next_red_light_check_time = sim_time + self._red_light_check_period
+                    self._check_red_light(hero, speed_kmh, sim_time)
+                if sim_time >= self._next_stop_sign_check_time:
+                    self._next_stop_sign_check_time = sim_time + self._stop_sign_check_period
+                    self._check_stop_sign(hero, speed_kmh, sim_time)
             except Exception:
                 pass
 

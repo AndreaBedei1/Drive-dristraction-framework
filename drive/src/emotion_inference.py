@@ -182,6 +182,14 @@ class EmotionInferenceService(threading.Thread, EmotionProvider):
         last_infer_t = 0.0
 
         while not self._stop_event.is_set():
+            now = time.monotonic()
+            elapsed_since_last = now - last_infer_t
+            if elapsed_since_last < infer_period:
+                sleep_s = min(0.05, infer_period - elapsed_since_last)
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+                continue
+
             frame = None
             try:
                 frame = self._frame_provider.get_latest_frame()
@@ -192,10 +200,6 @@ class EmotionInferenceService(threading.Thread, EmotionProvider):
                 time.sleep(0.05)
                 continue
 
-            now = time.monotonic()
-            if now - last_infer_t < infer_period:
-                time.sleep(0.01)
-                continue
             last_infer_t = now
 
             try:

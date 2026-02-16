@@ -42,6 +42,9 @@ class LapMonitor(threading.Thread):
         self._lap = 0
         self._idx = 0
         self._hero: Optional[carla.Vehicle] = None
+        self._hero_id: Optional[int] = None
+        self._last_hero_refresh_wall_time = 0.0
+        self._hero_refresh_interval_seconds = 1.0
         self._hero_initialized = False
 
     def stop(self) -> None:
@@ -65,10 +68,26 @@ class LapMonitor(threading.Thread):
                 time.sleep(0.1)
                 continue
 
+            now = time.monotonic()
+            should_refresh = (
+                self._hero is None
+                or now - self._last_hero_refresh_wall_time >= self._hero_refresh_interval_seconds
+            )
+            if should_refresh:
+                self._last_hero_refresh_wall_time = now
+                candidate = find_hero_vehicle(self._world, preferred_role=self._role)
+                if candidate is not None:
+                    candidate_id = None
+                    try:
+                        candidate_id = int(candidate.id)
+                    except Exception:
+                        pass
+                    if self._hero is None or candidate_id != self._hero_id:
+                        self._hero = candidate
+                        self._hero_id = candidate_id
+                        self._hero_initialized = False
             if self._hero is None:
-                self._hero = find_hero_vehicle(self._world, preferred_role=self._role)
-                if self._hero is None:
-                    continue
+                continue
 
             if not self._hero_initialized:
                 try:
@@ -86,6 +105,7 @@ class LapMonitor(threading.Thread):
                 hero_loc = self._hero.get_location()
             except Exception:
                 self._hero = None
+                self._hero_id = None
                 self._hero_initialized = False
                 continue
 

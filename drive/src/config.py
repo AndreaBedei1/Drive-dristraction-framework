@@ -31,6 +31,7 @@ class CarlaConfig:
     map_preference: List[str]
     sync: bool
     fixed_delta_seconds: float
+    ticker_stats_interval_seconds: float
     traffic_manager: TrafficManagerConfig
 
 
@@ -110,6 +111,7 @@ class ErrorConfig:
     harsh_brake_min_speed_kmh: float
     harsh_brake_min_brake: float
     harsh_brake_cooldown_seconds: float
+    red_light_check_hz: float
     red_light_min_speed_kmh: float
     red_light_distance_m: float
     red_light_pass_distance_m: float
@@ -117,6 +119,7 @@ class ErrorConfig:
     red_light_track_distance_m: float
     red_light_min_interval_seconds: float
     red_light_cooldown_seconds: float
+    stop_sign_check_hz: float
     stop_sign_min_speed_kmh: float
     stop_sign_zone_half_width_m: float
     stop_sign_zone_length_m: float
@@ -126,6 +129,9 @@ class ErrorConfig:
     debug_stop_life_time: float
     solid_line_cooldown_seconds: float
     collision_cooldown_seconds: float
+    collision_static_min_speed_kmh: float
+    collision_static_min_impulse: float
+    collision_static_relog_seconds: float
 
 
 @dataclass(frozen=True)
@@ -237,6 +243,7 @@ def load_config(path: str) -> ScenarioConfig:
         map_preference=list(raw["carla"]["map_preference"]),
         sync=bool(raw["carla"]["sync"]),
         fixed_delta_seconds=float(raw["carla"]["fixed_delta_seconds"]),
+        ticker_stats_interval_seconds=float(_get(raw["carla"], "ticker_stats_interval_seconds", 5.0)),
         traffic_manager=tm,
     )
 
@@ -313,6 +320,7 @@ def load_config(path: str) -> ScenarioConfig:
         harsh_brake_min_speed_kmh=float(_get(err_raw, "harsh_brake_min_speed_kmh", 10.0)),
         harsh_brake_min_brake=float(_get(err_raw, "harsh_brake_min_brake", 0.7)),
         harsh_brake_cooldown_seconds=float(_get(err_raw, "harsh_brake_cooldown_seconds", 1.5)),
+        red_light_check_hz=float(_get(err_raw, "red_light_check_hz", 15.0)),
         red_light_min_speed_kmh=float(_get(err_raw, "red_light_min_speed_kmh", 5.0)),
         red_light_distance_m=float(_get(err_raw, "red_light_distance_m", 12.0)),
         red_light_pass_distance_m=float(_get(err_raw, "red_light_pass_distance_m", 1.5)),
@@ -320,6 +328,7 @@ def load_config(path: str) -> ScenarioConfig:
         red_light_track_distance_m=float(_get(err_raw, "red_light_track_distance_m", 12.0)),
         red_light_min_interval_seconds=float(_get(err_raw, "red_light_min_interval_seconds", 2.0)),
         red_light_cooldown_seconds=float(_get(err_raw, "red_light_cooldown_seconds", 5.0)),
+        stop_sign_check_hz=float(_get(err_raw, "stop_sign_check_hz", 15.0)),
         stop_sign_min_speed_kmh=float(_get(err_raw, "stop_sign_min_speed_kmh", 10.0)),
         stop_sign_zone_half_width_m=float(_get(err_raw, "stop_sign_zone_half_width_m", 1.0)),
         stop_sign_zone_length_m=float(_get(err_raw, "stop_sign_zone_length_m", 3.0)),
@@ -329,6 +338,9 @@ def load_config(path: str) -> ScenarioConfig:
         debug_stop_life_time=float(_get(err_raw, "debug_stop_life_time", 6.0)),
         solid_line_cooldown_seconds=float(_get(err_raw, "solid_line_cooldown_seconds", 2.0)),
         collision_cooldown_seconds=float(_get(err_raw, "collision_cooldown_seconds", 2.0)),
+        collision_static_min_speed_kmh=float(_get(err_raw, "collision_static_min_speed_kmh", 2.5)),
+        collision_static_min_impulse=float(_get(err_raw, "collision_static_min_impulse", 120.0)),
+        collision_static_relog_seconds=float(_get(err_raw, "collision_static_relog_seconds", 12.0)),
     )
 
     dis_raw = _get(raw, "distractions", {})

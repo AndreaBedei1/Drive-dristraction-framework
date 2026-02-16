@@ -23,16 +23,29 @@ def dist(a: carla.Location, b: carla.Location) -> float:
 
 
 def find_hero_vehicle(world: carla.World, preferred_role: str = "hero") -> Optional[carla.Vehicle]:
-    """Return the first vehicle with the given role name."""
+    """Return the newest alive vehicle with the given role name."""
     vehicles = world.get_actors().filter("vehicle.*")
+    heroes: List[carla.Vehicle] = []
     for v in vehicles:
         try:
             role = v.attributes.get("role_name", "")
         except Exception:
             role = ""
-        if role == preferred_role:
-            return v
-    return None
+        if role != preferred_role:
+            continue
+        try:
+            if hasattr(v, "is_alive") and not v.is_alive:
+                continue
+        except Exception:
+            pass
+        heroes.append(v)
+    if not heroes:
+        return None
+    try:
+        heroes.sort(key=lambda a: int(a.id), reverse=True)
+    except Exception:
+        pass
+    return heroes[0]
 
 
 def pick_spawn_point_indices(

@@ -96,12 +96,30 @@ def _pick_monitor_layout(rects: List[Tuple[int, int, int, int]]) -> Tuple[Option
     return rects[0], mid, rects[-1]
 
 
-def _compute_next_run_id(output_dir: str, user_id: str, suffix: str) -> int:
-    """Compute the next run id from existing dataset files."""
+def _compute_next_run_id(
+    output_dir: str,
+    user_id: str,
+    suffix: str,
+    dataset_profile: str,
+    mode: str,
+) -> int:
+    """Compute the next run id for a participant from profile-specific dataset files."""
     import csv
 
+    profile = str(dataset_profile or "").strip().lower()
+    run_mode = str(mode or "").strip().lower()
+    participant = str(user_id or "").strip()
+
+    filenames = [f"Dataset Errors{suffix}.csv"]
+    if run_mode == "test":
+        filenames.append(f"Dataset Distractions{suffix}.csv")
+    elif profile == "baseline":
+        filenames.append(f"Dataset Driving Time{suffix}.csv")
+    else:
+        filenames.append(f"Dataset Distractions{suffix}.csv")
+
     max_run_id = 0
-    for filename in (f"Dataset Errors{suffix}.csv", f"Dataset Distractions{suffix}.csv"):
+    for filename in dict.fromkeys(filenames):
         path = os.path.join(output_dir, filename)
         if not os.path.exists(path):
             continue
@@ -109,10 +127,11 @@ def _compute_next_run_id(output_dir: str, user_id: str, suffix: str) -> int:
             with open(path, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    if user_id and row.get("user_id") and row.get("user_id") != user_id:
+                    row_user_id = str(row.get("user_id", "")).strip()
+                    if participant and row_user_id != participant:
                         continue
                     try:
-                        rid = int(row.get("run_id", 0))
+                        rid = int(str(row.get("run_id", "")).strip())
                     except Exception:
                         continue
                     if rid > max_run_id:
@@ -145,6 +164,33 @@ def _safe_destroy_ids(world: carla.World, actor_ids: List[int]) -> None:
             actor.destroy()
         except Exception:
             pass
+
+
+def _destroy_stale_hero_vehicles(world: carla.World, preferred_role_name: str = "hero") -> int:
+    """Destroy existing hero vehicles to avoid stale monitors tracking old actors."""
+    destroyed = 0
+    try:
+        vehicles = world.get_actors().filter("vehicle.*")
+    except Exception:
+        return 0
+    for veh in vehicles:
+        try:
+            role = veh.attributes.get("role_name", "")
+        except Exception:
+            role = ""
+        if role != preferred_role_name:
+            continue
+        try:
+            if hasattr(veh, "is_alive") and not veh.is_alive:
+                continue
+        except Exception:
+            pass
+        try:
+            veh.destroy()
+            destroyed += 1
+        except Exception:
+            pass
+    return destroyed
 
 
 def _configure_traffic_lights(world: carla.World, cfg) -> None:
@@ -315,11 +361,18 @@ def main() -> int:
     session.configure_sync(world, cfg.carla.sync, cfg.carla.fixed_delta_seconds)
     session.set_weather_preset(world, cfg.weather.preset)
     _configure_traffic_lights(world, cfg.traffic_lights)
+    removed_heroes = _destroy_stale_hero_vehicles(world, preferred_role_name="hero")
+    if removed_heroes > 0:
+        print(f"[Runner] Removed stale hero vehicles at startup: {removed_heroes}")
 
     ticker = None
     if cfg.carla.sync:
         hz = 1.0 / float(cfg.carla.fixed_delta_seconds)
-        ticker = WorldTicker(world, target_hz=hz)
+        ticker = WorldTicker(
+            world,
+            target_hz=hz,
+            stats_interval_seconds=cfg.carla.ticker_stats_interval_seconds,
+        )
         ticker.start()
 
     tm = session.get_traffic_manager(cfg.carla.traffic_manager.port)
@@ -527,12 +580,14 @@ def main() -> int:
     else:
         print("[Runner] Max scenario duration disabled (<= 0).")
 
-    configured_run_id = int(cfg.experiment.run_id)
-    if configured_run_id > 0:
-        run_id = configured_run_id
-    else:
-        run_id = _compute_next_run_id(output_dir, cfg.experiment.user_id, dataset_suffix)
-    print(f"[Runner] Using run_id={run_id}")
+    run_id = _compute_next_run_id(
+        output_dir=output_dir,
+        user_id=cfg.experiment.user_id,
+        suffix=dataset_suffix,
+        dataset_profile=dataset_profile,
+        mode=mode,
+    )
+    print(f"[Runner] Using run_id={run_id} (auto-increment per user_id).")
     context = DatasetContext(
         user_id=cfg.experiment.user_id,
         run_id=run_id,
@@ -648,6 +703,11 @@ def main() -> int:
         config=cfg.errors,
         preferred_role_name="hero",
         tick_source=ticker,
+    )
+    print(
+        "[Runner] Error monitor frequencies: "
+        f"red_light={cfg.errors.red_light_check_hz:.1f} Hz, "
+        f"stop_sign={cfg.errors.stop_sign_check_hz:.1f} Hz."
     )
     error_monitor.start()
 
@@ -893,6 +953,9 @@ def main() -> int:
             pass
 
         _safe_destroy_ids(world, vehicle_ids + controller_ids + walker_ids)
+        removed_heroes_end = _destroy_stale_hero_vehicles(world, preferred_role_name="hero")
+        if removed_heroes_end > 0:
+            print(f"[Runner] Removed stale hero vehicles at shutdown: {removed_heroes_end}")
 
     return 0
 

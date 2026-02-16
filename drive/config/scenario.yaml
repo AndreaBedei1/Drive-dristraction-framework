@@ -9,6 +9,7 @@ carla:
 
   sync: true
   fixed_delta_seconds: 0.035
+  ticker_stats_interval_seconds: 5.0  # 0 disables ticker performance logs
 
   traffic_manager:
     port: 8000
@@ -93,7 +94,7 @@ manual_control:
     # - "-a"
 
 experiment:
-  user_id: "participant_01"
+  user_id: "participant_03"
   run_id: 1
   weather_label: "day"
   output_dir: "data"
@@ -113,6 +114,7 @@ errors:
   harsh_brake_min_speed_kmh: 10.0
   harsh_brake_min_brake: 0.7
   harsh_brake_cooldown_seconds: 1.5
+  red_light_check_hz: 15.0   # keep high enough to avoid missed crossings
   red_light_min_speed_kmh: 1.0
   red_light_distance_m: 12.0
   red_light_pass_distance_m: 5.0
@@ -120,6 +122,7 @@ errors:
   red_light_track_distance_m: 12.0
   red_light_min_interval_seconds: 2.0
   red_light_cooldown_seconds: 5.0
+  stop_sign_check_hz: 15.0   # keep high enough to track stop-zone entry/exit
   stop_sign_min_speed_kmh: 10.0
   stop_sign_zone_half_width_m: 1.0
   stop_sign_zone_length_m: 3.0
@@ -129,6 +132,9 @@ errors:
   debug_stop_life_time: 6.0
   solid_line_cooldown_seconds: 2.0
   collision_cooldown_seconds: 2.0
+  collision_static_min_speed_kmh: 2.5   # ignore static-object contacts below this speed
+  collision_static_min_impulse: 120.0   # ignore static-object contacts below this impulse
+  collision_static_relog_seconds: 12.0  # avoid repeated logs on the same static actor
 
 distractions:
   enabled: true
