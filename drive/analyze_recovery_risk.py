@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-OFFSET = 6
+OFFSET = 10
 
 # 1. Load Data
 distractions = pd.read_csv('data/Dataset Distractions_distraction.csv')
