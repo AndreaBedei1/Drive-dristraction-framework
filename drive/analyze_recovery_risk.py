@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-OFFSET = 20
+OFFSET = 10
 
 # 1. Load Data
 distractions = pd.read_csv('data/Dataset Distractions_distraction.csv')
@@ -17,14 +17,14 @@ errors_dist['timestamp'] = pd.to_datetime(errors_dist['timestamp'])
 total_base_duration = driving_time['run_duration_seconds'].sum()
 p_error_baseline = len(errors_base) / total_base_duration
 
-print(f"BASELINE --> P(error | 1s): {p_error_baseline:.4f}")
+print(f"BASELINE --> P(error | 1s): {100*p_error_baseline:.4f}%")
 
 # 3. Distraction P(Error outside distraction events | distraction events)
 intervals = list(zip(distractions['start'], distractions['end']))
 inside_mask = errors_dist['timestamp'].apply(
 lambda ts: any(start <= ts <= end for start, end in intervals))
 outside_errors = errors_dist[~inside_mask].copy() 
-print(f"DISTRACTION --> P(Error outside distraction events | distraction events): {len(outside_errors) / len(errors_dist)}")
+print(f"DISTRACTION --> P(Error outside distraction events | distraction events): {100*len(outside_errors) / len(errors_dist)}%")
 
 # For each outside error, find the most recent window end (same run)
 def most_recent_window_end(error_ts, run_windows):
@@ -57,7 +57,7 @@ outside_errors['time_since_last_window'] = time_diffs
 outside_after = outside_errors.dropna(subset=['time_since_last_window']).copy()
 
 # Now bin the times (e.g., into 1‑second intervals)
-bins = np.arange(0, 61, 1)   # 0‑60 seconds in 1‑sec steps
+bins = np.arange(0, OFFSET+1, 1)   # 0‑60 seconds in 1‑sec steps
 labels = bins[1:]             # 1,2,...,60
 
 # Assign each error to a bin (right‑closed intervals, e.g., (0,1] seconds)

@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import math
 
-bins_of_interest = [6, 9, 10, 13, 20]
+bins_of_interest = [9, 13, 15, 24]
 
 # 1. Load data
 distractions = pd.read_csv('data/Dataset Distractions_distraction.csv')
