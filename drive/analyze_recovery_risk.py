@@ -2,12 +2,13 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-OFFSET = 10
+OFFSET = 50
 
 # 1. Load Data
 distractions = pd.read_csv('data/Dataset Distractions_distraction.csv')
 errors_dist = pd.read_csv('data/Dataset Errors_distraction.csv')
 errors_base = pd.read_csv('data/Dataset Errors_baseline.csv')
+
 driving_time = pd.read_csv('data/Dataset Driving Time_baseline.csv')
 distractions['start'] = pd.to_datetime(distractions['timestamp_start'])
 distractions['end']   = pd.to_datetime(distractions['timestamp_end'])
