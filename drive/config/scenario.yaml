@@ -94,13 +94,13 @@ manual_control:
     # - "-a"
 
 experiment:
-  user_id: "participant_03"
+  user_id: "participant_06"
   run_id: 1
   weather_label: "day"
   output_dir: "data"
   max_duration_seconds: 600  # stop scenario after 10 minutes; <= 0 disables timeout
   # baseline | distraction
-  dataset_profile: "baseline"
+  dataset_profile: "distraction"
   baseline_dataset_suffix: "_baseline"
   distraction_dataset_suffix: "_distraction"
   mode: "train"  # train | test
@@ -156,7 +156,6 @@ distractions:
     - N
     - G
     - C
-    - O
     - T
     - V
     - B

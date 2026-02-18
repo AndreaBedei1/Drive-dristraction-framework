@@ -1,3 +1,6 @@
 Lorenzo Bacchiani=participant_01
 Andrea Matteucci=participant_02
 Andrea Bedei=participant_03
+Serafino Pandolfini = participant_04
+Nicolò di domenico = participant_05
+Fabio Notaro = participant_06

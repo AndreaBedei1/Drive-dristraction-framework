@@ -37,7 +37,7 @@ class _CsvWriter:
     def __init__(self, path: str, fieldnames: List[str]) -> None:
         """Create a writer for the target CSV path."""
         self._path = path
-        self._fieldnames = fieldnames
+        self._fieldnames = list(fieldnames)
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         write_header = not os.path.exists(path)
@@ -50,12 +50,70 @@ class _CsvWriter:
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=self._fieldnames)
                 writer.writeheader()
+            return
+
+        existing_fieldnames = self._read_existing_fieldnames(path)
+        if not existing_fieldnames:
+            return
+        merged_fieldnames = self._merge_fieldnames(existing_fieldnames, self._fieldnames)
+        self._fieldnames = merged_fieldnames
+        if merged_fieldnames != existing_fieldnames:
+            try:
+                self._rewrite_with_fieldnames(merged_fieldnames)
+            except Exception:
+                self._fieldnames = existing_fieldnames
 
     def append(self, row: Dict[str, Any]) -> None:
         """Append a row to the CSV file."""
         with self._lock, open(self._path, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=self._fieldnames)
+            writer = csv.DictWriter(f, fieldnames=self._fieldnames, extrasaction="ignore")
             writer.writerow(row)
+
+    @staticmethod
+    def _read_existing_fieldnames(path: str) -> List[str]:
+        """Read the first non-empty CSV row as fieldnames."""
+        try:
+            with open(path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    if not row:
+                        continue
+                    raw = [str(col) for col in row]
+                    if any(col.strip() for col in raw):
+                        return raw
+        except Exception:
+            return []
+        return []
+
+    @staticmethod
+    def _merge_fieldnames(existing: List[str], required: List[str]) -> List[str]:
+        """Keep existing columns and append missing required columns."""
+        merged: List[str] = [name for name in existing if name]
+        for name in required:
+            if name and name not in merged:
+                merged.append(name)
+        return merged
+
+    def _rewrite_with_fieldnames(self, fieldnames: List[str]) -> None:
+        """Rewrite an existing CSV file using an expanded header."""
+        tmp_path = f"{self._path}.tmp"
+        try:
+            with open(self._path, "r", newline="", encoding="utf-8") as src, open(
+                tmp_path, "w", newline="", encoding="utf-8"
+            ) as dst:
+                reader = csv.DictReader(src)
+                writer = csv.DictWriter(dst, fieldnames=fieldnames, extrasaction="ignore")
+                writer.writeheader()
+                for row in reader:
+                    writer.writerow(row)
+            os.replace(tmp_path, self._path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
 
 
 def _map_short_name(world: carla.World) -> str:
@@ -73,6 +131,32 @@ def _speed_kmh(vehicle: carla.Actor) -> float:
         return 3.6 * (v.x * v.x + v.y * v.y + v.z * v.z) ** 0.5
     except Exception:
         return 0.0
+
+
+def _steer_angle_deg(vehicle: carla.Actor) -> float:
+    """Estimate current steering angle in degrees from vehicle control."""
+    try:
+        steer_norm = float(vehicle.get_control().steer)
+    except Exception:
+        return 0.0
+
+    max_steer_deg = 0.0
+    try:
+        physics = vehicle.get_physics_control()
+        wheel_angles: List[float] = []
+        for wheel in getattr(physics, "wheels", []):
+            try:
+                angle = abs(float(getattr(wheel, "max_steer_angle", 0.0)))
+                if angle > 0.0:
+                    wheel_angles.append(angle)
+            except Exception:
+                continue
+        if wheel_angles:
+            max_steer_deg = max(wheel_angles)
+    except Exception:
+        max_steer_deg = 0.0
+
+    return steer_norm * max_steer_deg
 
 
 def _location_info(world: carla.World, location: carla.Location) -> Dict[str, Any]:
@@ -229,6 +313,7 @@ class ErrorDatasetLogger:
                 "emotion_label",
                 "emotion_prob",
                 "speed_kmh",
+                "steer_angle_deg",
                 "timestamp",
                 "frame",
                 "sim_time_seconds",
@@ -287,6 +372,7 @@ class ErrorDatasetLogger:
             "emotion_label": _format_emotion_label(emotion.label),
             "emotion_prob": _format_emotion_prob(emotion.prob),
             "speed_kmh": round(_speed_kmh(vehicle), 3),
+            "steer_angle_deg": round(_steer_angle_deg(vehicle), 3),
             "timestamp": _wall_time_iso(),
             "details": details,
         }
@@ -327,6 +413,10 @@ class DistractionDatasetLogger:
                 "end_x",
                 "end_y",
                 "end_z",
+                "speed_kmh_start",
+                "speed_kmh_end",
+                "steer_angle_deg_start",
+                "steer_angle_deg_end",
                 "arousal_start",
                 "arousal_end",
                 "hr_bpm_start",
@@ -417,6 +507,8 @@ class DistractionDatasetLogger:
                 "timestamp_start": _wall_time_iso(),
                 "model_pred_start": pred_label,
                 "model_prob_start": round(pred_prob, 3),
+                "speed_kmh_start": round(_speed_kmh(vehicle), 3),
+                "steer_angle_deg_start": round(_steer_angle_deg(vehicle), 3),
                 "arousal_start": self._format_arousal(arousal.value),
                 "hr_bpm_start": self._format_hr(arousal.hr_bpm),
                 "emotion_label_start": _format_emotion_label(emotion.label),
@@ -450,6 +542,10 @@ class DistractionDatasetLogger:
             "end_x": float(end_location.x),
             "end_y": float(end_location.y),
             "end_z": float(end_location.z),
+            "speed_kmh_start": start_info.get("speed_kmh_start", ""),
+            "speed_kmh_end": round(_speed_kmh(vehicle), 3),
+            "steer_angle_deg_start": start_info.get("steer_angle_deg_start", ""),
+            "steer_angle_deg_end": round(_steer_angle_deg(vehicle), 3),
             "arousal_start": start_info.get("arousal_start", ""),
             "arousal_end": self._format_arousal(end_arousal.value),
             "hr_bpm_start": start_info.get("hr_bpm_start", ""),
