@@ -37,7 +37,7 @@ class _CsvWriter:
     def __init__(self, path: str, fieldnames: List[str]) -> None:
         """Create a writer for the target CSV path."""
         self._path = path
-        self._fieldnames = list(fieldnames)
+        self._fieldnames = self._merge_fieldnames([], list(fieldnames))
         self._lock = threading.Lock()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         write_header = not os.path.exists(path)
@@ -78,9 +78,9 @@ class _CsvWriter:
                 for row in reader:
                     if not row:
                         continue
-                    raw = [str(col) for col in row]
-                    if any(col.strip() for col in raw):
-                        return raw
+                    cleaned = _CsvWriter._merge_fieldnames([], [str(col) for col in row])
+                    if cleaned:
+                        return cleaned
         except Exception:
             return []
         return []
@@ -88,11 +88,30 @@ class _CsvWriter:
     @staticmethod
     def _merge_fieldnames(existing: List[str], required: List[str]) -> List[str]:
         """Keep existing columns and append missing required columns."""
-        merged: List[str] = [name for name in existing if name]
-        for name in required:
-            if name and name not in merged:
-                merged.append(name)
+        merged: List[str] = []
+        seen = set()
+        for raw in list(existing) + list(required):
+            name = str(raw).strip()
+            if not name or name in seen:
+                continue
+            merged.append(name)
+            seen.add(name)
         return merged
+
+    @staticmethod
+    def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize row keys by trimming whitespace and preferring non-empty values."""
+        normalized: Dict[str, Any] = {}
+        for raw_key, value in row.items():
+            key = str(raw_key).strip()
+            if not key:
+                continue
+            current = normalized.get(key, "")
+            if current == "" and value not in ("", None):
+                normalized[key] = value
+            elif key not in normalized:
+                normalized[key] = value
+        return normalized
 
     def _rewrite_with_fieldnames(self, fieldnames: List[str]) -> None:
         """Rewrite an existing CSV file using an expanded header."""
@@ -105,7 +124,7 @@ class _CsvWriter:
                 writer = csv.DictWriter(dst, fieldnames=fieldnames, extrasaction="ignore")
                 writer.writeheader()
                 for row in reader:
-                    writer.writerow(row)
+                    writer.writerow(self._normalize_row(row))
             os.replace(tmp_path, self._path)
         except Exception:
             try:
