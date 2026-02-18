@@ -4,3 +4,5 @@ Andrea Bedei=participant_03
 Serafino Pandolfini = participant_04
 Nicolò di domenico = participant_05
 Fabio Notaro = participant_06
+Kelvin = participant_07
+Gianni = participant_08
