@@ -24,3 +24,5 @@ six==1.17.0
 matplotlib
 pandas
 scipy
+scikit-learn
+xgboost
