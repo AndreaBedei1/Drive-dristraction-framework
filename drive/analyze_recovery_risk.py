@@ -92,18 +92,19 @@ def calculate_hangover(gap_lengths, error_times, baseline_rate):
     
     rates = pd.Series({i: (counts.get(i, 0) / exposure[i] if exposure[i] > 0 else np.nan) 
                        for i in range(1, max_offset + 1)}).dropna()
-    
+        
     if rates.empty: return 0, rates
     
     smoothed = rates.rolling(window=ROLLING_WINDOW, center=True, min_periods=1).mean()
     above = smoothed[smoothed > baseline_rate]
     limit = int(above.index.max()) if not above.empty else 0
-    return limit, smoothed
+    return limit, smoothed, rates
+
+
 
 # 6. Global Analysis
-global_limit, global_smoothed = calculate_hangover(
-    inter_window_gaps['gap_len'], outside_after['time_since'], p_error_baseline_global
-)
+global_limit, global_smoothed, rates = calculate_hangover(inter_window_gaps['gap_len'], outside_after['time_since'], p_error_baseline_global)
+
 
 # 7. Per-Participant Analysis
 participant_results = []
@@ -115,7 +116,7 @@ for user in all_users:
     # Use user-specific baseline, fallback to global if user not found in baseline data
     user_baseline = user_baselines.get(user, p_error_baseline_global)
     
-    limit, _ = calculate_hangover(user_gaps, user_errs, user_baseline)
+    limit, _, _ = calculate_hangover(user_gaps, user_errs, user_baseline)
     participant_results.append({
         'User': user, 
         'Baseline (%)': user_baseline * 100, 
@@ -135,4 +136,17 @@ for res in sorted(participant_results, key=lambda x: x['User']):
     print(f"{res['User']:<18} | {res['Baseline (%)']:<12.4f} | {res['Hangover (s)']:<12} | {res['Errors Found']:<6}")
 
 print("-" * 80)
-print("Note: Hangover '0' indicates the user's risk profile never exceeded their personal baseline during recovery.")
+
+N_seconds = int(inter_window_gaps['gap_len'].max())
+
+# Create the global probability table
+global_prob_df = pd.DataFrame({
+    'second_after_distraction': range(1, N_seconds + 1),
+    'probability': [rates.get(i, 0) for i in range(1, N_seconds + 1)]
+})
+
+# Display the top N seconds (e.g., first 10 seconds)
+print("\nGLOBAL PROBABILITY PER SECOND (Post-Distraction)")
+print(global_prob_df.head(30)['probability'])
+
+
