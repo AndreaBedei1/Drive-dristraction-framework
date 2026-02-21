@@ -56,11 +56,14 @@ RECALL_LEVELS    = [0.80, 0.85, 0.90, 0.95]
 os.makedirs(EVAL_OUT, exist_ok=True)
 
 XGB_PARAMS = dict(
-    n_estimators     = 300,
-    max_depth        = 4,
-    learning_rate    = 0.05,
-    subsample        = 0.8,
-    colsample_bytree = 0.8,
+    n_estimators     = 900,
+    max_depth        = 3,
+    learning_rate    = 0.03,
+    subsample        = 0.9,
+    colsample_bytree = 0.9,
+    min_child_weight = 5,
+    reg_lambda       = 2.0,
+    gamma            = 1.0,
     eval_metric      = 'aucpr',
     random_state     = RANDOM_SEED,
     verbosity        = 0,
@@ -74,6 +77,8 @@ FEATURE_COLS = [
     'emotion_prob',
     'emotion_label_enc',
     'baseline_error_rate',
+    'speed_kmh',
+    'steer_angle_deg',
 ]
 
 # ── 1. Load ────────────────────────────────────────────────────────────────────
@@ -119,7 +124,7 @@ if dup_errors.sum():
     issues.append(f"{dup_errors.sum()} duplicate error timestamps in errors_dist")
 
 for col in ['user_id', 'run_id', 'timestamp', 'model_pred', 'model_prob',
-            'emotion_label', 'emotion_prob']:
+            'emotion_label', 'emotion_prob', 'speed_kmh', 'steer_angle_deg']:
     if col not in errors_dist.columns:
         issues.append(f"Missing column in errors_dist: {col}")
 
@@ -282,6 +287,8 @@ def build_positives(H):
             'model_pred_enc': pred_enc, 'emotion_prob': err['emotion_prob'],
             'emotion_label_enc': emo_enc,
             'baseline_error_rate': user_baselines.get(uid, p_baseline_global),
+            'speed_kmh': err['speed_kmh'],
+            'steer_angle_deg': err['steer_angle_deg'],
             'label': 1,
         })
     return pd.DataFrame(rows)
@@ -310,6 +317,8 @@ def build_negatives(H, sample_every=NEG_SAMPLE_EVERY):
                     'model_pred_enc': pred_enc, 'emotion_prob': win['emotion_prob_start'],
                     'emotion_label_enc': emo_enc,
                     'baseline_error_rate': b_rate, 'label': 0,
+                    'speed_kmh': win['speed_kmh_start'],
+                    'steer_angle_deg': win['steer_angle_deg_start'],
                 })
 
         # Inter-window gaps
@@ -330,12 +339,15 @@ def build_negatives(H, sample_every=NEG_SAMPLE_EVERY):
                     'model_pred_enc': pred_enc, 'emotion_prob': win_state['emotion_prob_end'],
                     'emotion_label_enc': emo_enc,
                     'baseline_error_rate': b_rate, 'label': 0,
+                    'speed_kmh': win_state['speed_kmh_end'],
+                    'steer_angle_deg': win_state['steer_angle_deg_end'],
                 })
     return pd.DataFrame(rows)
 
 def build_baseline_negatives(sample_every=NEG_SAMPLE_EVERY,
                               default_model_prob=None, default_model_pred_enc=None,
-                              default_emotion_prob=None, default_emotion_label_enc=None):
+                              default_emotion_prob=None, default_emotion_label_enc=None,
+                              default_speed_kmh=None, default_steer_angle_deg=None):
     """
     Sample negatives from baseline driving sessions.
     Uses provided default feature values (e.g., medians from safe seconds in distraction runs).
@@ -354,6 +366,8 @@ def build_baseline_negatives(sample_every=NEG_SAMPLE_EVERY,
                 'model_pred_enc': default_model_pred_enc,
                 'emotion_prob': default_emotion_prob,
                 'emotion_label_enc': default_emotion_label_enc,
+                'speed_kmh': default_speed_kmh,
+                'steer_angle_deg': default_steer_angle_deg,
                 'baseline_error_rate': b_rate,
                 'label': 0,
             })
@@ -404,7 +418,7 @@ for H in H_CANDIDATES:
     groups = df['user_id'].values
 
     pos_rate = y.mean()
-    scale_pos_weight = (1 - pos_rate) / pos_rate
+    scale_pos_weight = np.sqrt((1 - pos_rate) / pos_rate)
 
     y_true_all, y_prob_all = [], []
     for train_idx, test_idx in logo.split(X, y, groups):
@@ -460,18 +474,24 @@ for train_idx, test_idx in logo.split(df_ev[FEATURE_COLS].values, df_ev['label']
         default_model_pred_enc = le_pred.transform([UNKNOWN_LABEL])[0]
         default_emotion_prob = 0.5
         default_emotion_label_enc = le_emotion.transform([UNKNOWN_LABEL])[0]
+        default_speed_kmh = 0.0
+        default_steer_angle_deg = 0.0
     else:
         default_model_prob = train_df.loc[safe_mask, 'model_prob'].median()
         default_model_pred_enc = train_df.loc[safe_mask, 'model_pred_enc'].mode()[0]
         default_emotion_prob = train_df.loc[safe_mask, 'emotion_prob'].median()
         default_emotion_label_enc = train_df.loc[safe_mask, 'emotion_label_enc'].mode()[0]
+        default_speed_kmh = train_df.loc[safe_mask, 'speed_kmh'].median()
+        default_steer_angle_deg = train_df.loc[safe_mask, 'steer_angle_deg'].median()
 
     # Build training set: distraction-run negatives + positives + baseline negatives
     base_neg_train = build_baseline_negatives(
         default_model_prob=default_model_prob,
         default_model_pred_enc=default_model_pred_enc,
         default_emotion_prob=default_emotion_prob,
-        default_emotion_label_enc=default_emotion_label_enc
+        default_emotion_label_enc=default_emotion_label_enc,
+        default_speed_kmh=default_speed_kmh,
+        default_steer_angle_deg=default_steer_angle_deg
     )
     # Filter baseline negatives to only users in train set
     base_neg_train = base_neg_train[base_neg_train['user_id'].isin(train_df['user_id'].unique())]
@@ -483,7 +503,7 @@ for train_idx, test_idx in logo.split(df_ev[FEATURE_COLS].values, df_ev['label']
 
     # Train XGBoost on this augmented training set
     pos_rate_tr = y_tr.mean()
-    spw_tr = (1 - pos_rate_tr) / pos_rate_tr
+    spw_tr = np.sqrt((1 - pos_rate_tr) / pos_rate_tr)
     clf = xgb.XGBClassifier(scale_pos_weight=spw_tr, **XGB_PARAMS)
     clf.fit(X_tr, y_tr)
 
@@ -516,7 +536,9 @@ for train_idx, test_idx in logo.split(df_ev[FEATURE_COLS].values, df_ev['label']
         default_model_prob=default_model_prob,
         default_model_pred_enc=default_model_pred_enc,
         default_emotion_prob=default_emotion_prob,
-        default_emotion_label_enc=default_emotion_label_enc
+        default_emotion_label_enc=default_emotion_label_enc,
+        default_speed_kmh=default_speed_kmh,
+        default_steer_angle_deg=default_steer_angle_deg
     )
     test_base_neg = test_base_neg[test_base_neg['user_id'].isin(test_df['user_id'].unique())]
     test_full = pd.concat([test_df, test_base_neg], ignore_index=True).dropna(subset=FEATURE_COLS)
@@ -829,22 +851,28 @@ if len(safe_global) > 0:
     default_model_pred_enc_global = safe_global['model_pred_enc'].mode()[0]
     default_emotion_prob_global = safe_global['emotion_prob'].median()
     default_emotion_label_enc_global = safe_global['emotion_label_enc'].mode()[0]
+    default_speed_kmh_global = safe_global['speed_kmh'].median()
+    default_steer_angle_deg_global = safe_global['steer_angle_deg'].median()
 else:
     default_model_prob_global = 0.5
     default_model_pred_enc_global = le_pred.transform([UNKNOWN_LABEL])[0]
     default_emotion_prob_global = 0.5
     default_emotion_label_enc_global = le_emotion.transform([UNKNOWN_LABEL])[0]
+    default_speed_kmh_global = 0.0
+    default_steer_angle_deg_global = 0.0
 
 base_f = build_baseline_negatives(
     default_model_prob=default_model_prob_global,
     default_model_pred_enc=default_model_pred_enc_global,
     default_emotion_prob=default_emotion_prob_global,
-    default_emotion_label_enc=default_emotion_label_enc_global
+    default_emotion_label_enc=default_emotion_label_enc_global,
+    default_speed_kmh=default_speed_kmh_global,
+    default_steer_angle_deg=default_steer_angle_deg_global
 )
 
 df_f = pd.concat([pos_f, neg_f, base_f], ignore_index=True).dropna(subset=FEATURE_COLS)
 X_f, y_f = df_f[FEATURE_COLS].values.astype(float), df_f['label'].values.astype(int)
-spw_f = (1 - y_f.mean()) / y_f.mean()
+spw_f = np.sqrt((1 - y_f.mean()) / y_f.mean())
 
 base_clf = xgb.XGBClassifier(scale_pos_weight=spw_f, **XGB_PARAMS)
 base_clf.fit(X_f, y_f)
@@ -901,6 +929,8 @@ def predict_fitness(
     emotion_prob: float = 0.5,
     arousal_pred_label: str = None,
     arousal_pred_prob: float = 0.5,
+    speed_kmh: float = 0.0,
+    steer_angle_deg: float = 0.0,
     user_id: str = None,
     artifact_path: str = MODEL_OUT,
 ) -> dict:
@@ -944,6 +974,20 @@ def predict_fitness(
     a_prob = _clip_prob(arousal_pred_prob, 'arousal_pred_prob')
     e_prob = _clip_prob(emotion_prob, 'emotion_prob')
 
+    def _to_float(val, name, default=0.0):
+        try:
+            v = float(val)
+            if name == 'speed_kmh' and v < 0:
+                warns.append(f"{name}={v} < 0, clamped to 0")
+                return 0.0
+            return v
+        except Exception:
+            warns.append(f"{name} invalid, defaulting to {default}")
+            return float(default)
+
+    speed_val = _to_float(speed_kmh, 'speed_kmh', default=0.0)
+    steer_val = _to_float(steer_angle_deg, 'steer_angle_deg', default=0.0)
+
     _le_emotion = art['le_emotion']
     _le_pred = art['le_pred']
 
@@ -969,6 +1013,8 @@ def predict_fitness(
         'emotion_prob': e_prob,
         'emotion_label_enc': emo_enc,
         'baseline_error_rate': b_rate,
+        'speed_kmh': speed_val,
+        'steer_angle_deg': steer_val,
     }])
 
     raw_prob = float(art['model'].predict_proba(sample[art['feature_cols']])[0, 1])

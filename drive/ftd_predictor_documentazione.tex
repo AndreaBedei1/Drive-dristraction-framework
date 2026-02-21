@@ -2,170 +2,177 @@
 \usepackage[margin=2.2cm]{geometry}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
-\usepackage[italian]{babel}
+\usepackage[english]{babel}
 \usepackage{hyperref}
 
-\title{Spiegazione Semplice di Fitness-to-Drive}
-\author{Versione facile da leggere}
+\title{Simple Explanation of Fitness-to-Drive}
+\author{Easy-to-read version}
 \date{\today}
 
 \begin{document}
 \maketitle
 
-\section{Idea super semplice}
-Immagina un copilota digitale.
-Questo copilota guarda cosa succede mentre guidi e prova a rispondere a una domanda:
+\section{Super simple idea}
+Imagine a digital co-driver.
+This co-driver watches what happens while you drive and tries to answer one question:
 
 \begin{center}
-\textbf{``Nel prossimo secondo, quanto e' probabile fare un errore?''}
+\textbf{``In the next second, how likely is a driving error?''}
 \end{center}
 
-Il file \texttt{ftd\_predictor.py} serve proprio a costruire questo copilota.
+The file \texttt{ftd\_predictor.py} builds this co-driver.
 
-\section{Che cosa significa Fitness-to-Drive}
-\textbf{Fitness-to-Drive} vuol dire: \textit{quanto sei in forma per guidare adesso}.
+\section{What Fitness-to-Drive means}
+\textbf{Fitness-to-Drive} means: \textit{how ready you are to drive safely right now}.
 
-Nel codice si calcola cosi:
+In the code:
 \begin{center}
 \texttt{fitness\_to\_drive = 1 - error\_probability}
 \end{center}
 
-Esempio:
+Example:
 \begin{itemize}
-    \item se \texttt{error\_probability = 0.20}, allora \texttt{fitness\_to\_drive = 0.80}.
-    \item se \texttt{error\_probability = 0.70}, allora \texttt{fitness\_to\_drive = 0.30}.
+    \item if \texttt{error\_probability = 0.20}, then \texttt{fitness\_to\_drive = 0.80}.
+    \item if \texttt{error\_probability = 0.70}, then \texttt{fitness\_to\_drive = 0.30}.
 \end{itemize}
 
-Quindi:
+So:
 \begin{itemize}
-    \item errore probabile basso = guida piu sicura;
-    \item errore probabile alto = guida piu rischiosa.
+    \item low error probability = safer driving condition;
+    \item high error probability = riskier driving condition.
 \end{itemize}
 
-\section{Quali dati usa}
-Il programma legge 4 file CSV:
+\section{What data it uses}
+The program reads 4 CSV files:
 \begin{enumerate}
-    \item quando ci sono state distrazioni;
-    \item quando ci sono stati errori durante quelle prove;
-    \item errori in guida normale (baseline);
-    \item quanti secondi di guida normale ci sono stati.
+    \item when distractions happened;
+    \item when errors happened in distraction runs;
+    \item errors in normal driving (baseline);
+    \item how many baseline driving seconds we have.
 \end{enumerate}
 
-Detto semplice: guarda \textbf{quando ti distrai}, \textbf{quando sbagli} e \textbf{come va quando non ci sono distrazioni}.
+In simple words: it looks at \textbf{when you are distracted}, \textbf{when you make errors}, and \textbf{what happens when there are no special distractions}.
 
-\section{Le 7 feature del modello (spiegate semplice)}
-Il modello usa 7 ``indizi'' (feature). Ogni indizio e' un numeretto che aiuta a capire il rischio.
+\section{The 9 model features (simple explanation)}
+The model uses 9 clues (features). Each clue is a number that helps estimate risk.
 
 \begin{enumerate}
     \item \texttt{distraction\_active}\\
-    Dice se in quel momento c'e una distrazione attiva: 1 = si, 0 = no.\\
-    Arriva dalle finestre tempo in \texttt{Dataset Distractions\_distraction.csv} (colonne \texttt{timestamp\_start}, \texttt{timestamp\_end}).
+    Says if a distraction is active now: 1 = yes, 0 = no.\\
+    Computed from \texttt{timestamp\_start} and \texttt{timestamp\_end} in \texttt{Dataset Distractions\_distraction.csv}.
 
     \item \texttt{time\_since\_last\_dist}\\
-    Dice da quanti secondi e' finita l'ultima distrazione.\\
-    Anche questo viene calcolato usando i tempi di \texttt{Dataset Distractions\_distraction.csv}.
+    Says how many seconds passed since the last distraction ended.\\
+    Also computed from distraction window timestamps.
 
     \item \texttt{model\_prob}\\
-    E' la fiducia del modello di arousal.\\
-    Nei campioni con errore arriva da \texttt{Dataset Errors\_distraction.csv} (colonna \texttt{model\_prob}).\\
-    Nei negativi da distrazione arriva da \texttt{model\_prob\_start} o \texttt{model\_prob\_end} in \texttt{Dataset Distractions\_distraction.csv}.\\
-    Nei negativi baseline usa un valore ``tipico'' (mediana).
+    Confidence from the arousal model.\\
+    For error samples it comes from \texttt{model\_prob} in \texttt{Dataset Errors\_distraction.csv}.\\
+    For distraction negatives it comes from \texttt{model\_prob\_start} or \texttt{model\_prob\_end}.
 
     \item \texttt{model\_pred\_enc}\\
-    E' l'etichetta arousal trasformata in numero (perche il modello capisce meglio i numeri).\\
-    Parte da \texttt{model\_pred}, \texttt{model\_pred\_start}, \texttt{model\_pred\_end}.
+    Arousal label transformed into a number (encoding).\\
+    Built from \texttt{model\_pred}, \texttt{model\_pred\_start}, \texttt{model\_pred\_end}.
 
     \item \texttt{emotion\_prob}\\
-    E' la fiducia del classificatore emozioni.\\
-    Parte da \texttt{emotion\_prob} (errori) oppure \texttt{emotion\_prob\_start/end} (distrazioni), e baseline tipico.
+    Confidence of the emotion classifier.\\
+    Built from \texttt{emotion\_prob} (errors) or \texttt{emotion\_prob\_start/end} (distractions).
 
     \item \texttt{emotion\_label\_enc}\\
-    E' l'emozione trasformata in numero.\\
-    Parte da \texttt{emotion\_label}, \texttt{emotion\_label\_start}, \texttt{emotion\_label\_end}.
+    Emotion label transformed into a number (encoding).\\
+    Built from \texttt{emotion\_label}, \texttt{emotion\_label\_start}, \texttt{emotion\_label\_end}.
 
     \item \texttt{baseline\_error\_rate}\\
-    E' il ``rischio normale'' della persona quando guida senza distrazioni speciali.\\
-    Si calcola con:
+    The driver's normal risk when driving without special distractions.\\
+    Computed from:
     \begin{itemize}
-        \item \texttt{Dataset Errors\_baseline.csv} (quanti errori baseline);
-        \item \texttt{Dataset Driving Time\_baseline.csv} (quanti secondi di guida baseline).
+        \item \texttt{Dataset Errors\_baseline.csv} (how many baseline errors);
+        \item \texttt{Dataset Driving Time\_baseline.csv} (how many baseline driving seconds).
     \end{itemize}
+
+    \item \texttt{speed\_kmh}\\
+    Car speed at that moment.\\
+    From \texttt{speed\_kmh} (error rows) or \texttt{speed\_kmh\_start/end} (distraction rows).
+
+    \item \texttt{steer\_angle\_deg}\\
+    Steering wheel angle in degrees.\\
+    From \texttt{steer\_angle\_deg} (error rows) or \texttt{steer\_angle\_deg\_start/end} (distraction rows).
 \end{enumerate}
 
-In breve: il modello guarda \textbf{distrazione}, \textbf{tempo di recupero}, \textbf{stato emotivo/arousal} e \textbf{rischio personale di base}.
+In short: the model uses \textbf{distraction status}, \textbf{recovery time}, \textbf{emotion/arousal state}, \textbf{personal baseline risk}, and \textbf{vehicle motion} (speed and steering).
 
-\section{Come lavora, passo per passo}
+\section{How it works, step by step}
 \begin{enumerate}
-    \item \textbf{Legge i dati.}
-    \item \textbf{Controlla i dati.} Se trova problemi gravi, si ferma.
-    \item \textbf{Capisce il rischio ``normale''.} Ogni persona puo avere un rischio base diverso.
-    \item \textbf{Costruisce esempi.}
+    \item \textbf{Read data.}
+    \item \textbf{Check data quality.} If data has serious issues, stop.
+    \item \textbf{Estimate normal risk.} Each driver may have a different baseline risk.
+    \item \textbf{Build training examples.}
     \begin{itemize}
-        \item esempi positivi = secondi in cui c'e stato un errore;
-        \item esempi negativi = secondi in cui non c'e stato errore.
+        \item positive examples = seconds where an error happened;
+        \item negative examples = seconds where no error happened.
     \end{itemize}
-    \item \textbf{Addestra il modello} (XGBoost), cioe un algoritmo che impara dai dati.
-    \item \textbf{Lo testa su persone non viste} per vedere se davvero generalizza.
-    \item \textbf{Sistema le probabilita} (calibrazione), cosi i numeri sono piu affidabili.
-    \item \textbf{Salva il modello} in un file \texttt{.pkl} per usarlo dopo.
+    \item \textbf{Train the model} (XGBoost).
+    \item \textbf{Test on unseen drivers} to check real generalization.
+    \item \textbf{Calibrate probabilities} to make numbers more reliable.
+    \item \textbf{Save the model} in a \texttt{.pkl} file.
 \end{enumerate}
 
-\section{Come calcola la probabilita di errore}
-Quando arriva un nuovo istante di guida, il modello guarda:
+\section{How error probability is computed}
+For a new driving instant, the model looks at:
 \begin{itemize}
-    \item se la distrazione e' attiva;
-    \item da quanto tempo e' finita l'ultima distrazione;
-    \item segnali di arousal/emozione;
-    \item rischio base personale del guidatore.
+    \item is distraction active or not;
+    \item how long since the last distraction ended;
+    \item arousal/emotion signals;
+    \item speed and steering angle;
+    \item the driver's baseline risk.
 \end{itemize}
 
-Poi fa due passaggi:
+Then it does two steps:
 \begin{enumerate}
-    \item produce una probabilita ``grezza'' (\texttt{raw\_prob});
-    \item la corregge con una calibrazione (\texttt{calibrated\_prob}).
+    \item compute a raw probability (\texttt{raw\_prob});
+    \item adjust it with calibration (\texttt{calibrated\_prob}).
 \end{enumerate}
 
-La probabilita finale di errore e' quella calibrata.
+The final error probability is the calibrated one.
 
-\section{Perche fa anche la calibrazione}
-Perche un modello puo dire ``0.70'' ma nella realta quel numero potrebbe non essere preciso.
+\section{Why calibration is used}
+A model can output ``0.70'', but that number may not be perfectly honest.
 
-La calibrazione serve a rendere i numeri piu onesti:
+Calibration makes probabilities more trustworthy:
 \begin{itemize}
-    \item se dice 0.30, dovrebbe davvero significare ``circa 30\%'' di rischio;
-    \item se dice 0.80, dovrebbe davvero significare ``rischio molto alto''.
+    \item if it says 0.30, it should behave close to 30\% risk;
+    \item if it says 0.80, it should really mean very high risk.
 \end{itemize}
 
-\section{Metriche spiegate come a un bambino}
-Le metriche sono voti del modello.
+\section{Metrics explained for a child}
+Metrics are model report-card grades.
 
 \begin{itemize}
-    \item \textbf{Precision}: quando il modello dice ``attenzione!'', quante volte ha ragione.
-    \item \textbf{Recall}: quanti errori veri riesce a trovare.
-    \item \textbf{F1}: un voto che mette insieme precision e recall.
-    \item \textbf{AUC-PR}: quanto e' bravo a trovare errori rari.
-    \item \textbf{AUC-ROC}: quanto separa bene momenti sicuri e rischiosi.
-    \item \textbf{Brier}: quanto sono giuste le probabilita (piu basso e meglio).
-    \item \textbf{Log-Loss}: punisce tanto le probabilita molto sbagliate.
-    \item \textbf{MCC/Kappa}: voti robusti anche quando gli errori sono pochi.
-    \item \textbf{Specificity}: quanto e' bravo a riconoscere i secondi sicuri.
-    \item \textbf{NPV}: se dice ``sei sicuro'', quanto spesso e' vero.
+    \item \textbf{Precision}: when the model says ``warning!'', how often it is correct.
+    \item \textbf{Recall}: how many real errors it catches.
+    \item \textbf{F1}: one score that combines precision and recall.
+    \item \textbf{AUC-PR}: how good it is at finding rare errors.
+    \item \textbf{AUC-ROC}: how well it separates safe vs risky moments.
+    \item \textbf{Brier}: how good probability numbers are (lower is better).
+    \item \textbf{Log-Loss}: strong penalty for very wrong confident probabilities.
+    \item \textbf{MCC/Kappa}: robust scores when classes are imbalanced.
+    \item \textbf{Specificity}: how well it recognizes safe seconds.
+    \item \textbf{NPV}: when it says ``safe'', how often it is truly safe.
 \end{itemize}
 
-In piu, il codice usa il \textbf{bootstrap}: rifa i conti tante volte per capire quanto i voti sono stabili.
+The code also uses \textbf{bootstrap}: it repeats metric computation many times to check stability.
 
-\section{Cosa restituisce alla fine}
-La funzione \texttt{predict\_fitness(...)} restituisce:
+\section{What the final function returns}
+The function \texttt{predict\_fitness(...)} returns:
 \begin{itemize}
-    \item \texttt{error\_probability}: rischio di errore nel prossimo secondo;
-    \item \texttt{fitness\_to\_drive}: quanto sei ``in forma'' per guidare;
-    \item \texttt{alert}: vero/falso, se il rischio supera una soglia;
-    \item \texttt{input\_warnings}: avvisi se qualche dato in ingresso non va bene.
+    \item \texttt{error\_probability}: risk of error in the next second;
+    \item \texttt{fitness\_to\_drive}: how fit/safe the driver is right now;
+    \item \texttt{alert}: true/false if risk is above threshold;
+    \item \texttt{input\_warnings}: warnings for invalid or unusual inputs.
 \end{itemize}
 
-\section{Frase finale}
-Questo sistema non dice solo ``errore/non errore''.
-Dice anche \textbf{quanto rischio c'e}, e prova a dirlo in modo affidabile.
-Per questo usa controlli sui dati, test seri, calibrazione e tante metriche.
+\section{Final sentence}
+This system does not only say ``error / no error''.
+It also estimates \textbf{how much risk there is}, and tries to make that number reliable using data checks, validation, calibration, and multiple metrics.
 
 \end{document}
