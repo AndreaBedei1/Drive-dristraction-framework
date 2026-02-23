@@ -1,0 +1,108 @@
+\documentclass[a4paper,11pt]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{hyperref}
+
+\title{Miglioramento del Modello FTD: da \texttt{ftd\_predictor2.py} a \texttt{ftd\_predictor3.py}}
+\author{Nota tecnica}
+\date{23 febbraio 2026}
+
+\begin{document}
+\maketitle
+
+\section{Obiettivo}
+Stimare la probabilita condizionata di errore al secondo, legata alla dinamica temporale della distrazione:
+\[
+P(\text{errore al secondo } t \mid \text{stato distrazione e contesto})
+\]
+con finestra temporale fino a \(H\), dove \(H\) viene selezionato con nested grid search.
+
+\section{Prima: come lavorava \texttt{ftd\_predictor2.py}}
+La versione precedente era gia corretta come impostazione generale (LOSO, nested selection di \(H\), calibrazione isotona), ma aveva un limite importante per la probabilita condizionata temporale:
+\begin{itemize}
+  \item tutta la fase \emph{dentro} la distrazione era compressa in un solo bin (bin 0),
+  \item quindi non distingueva i secondi iniziali/finali della stessa finestra di distrazione,
+  \item la curva temporale era dettagliata solo nel post-distrazione.
+\end{itemize}
+
+In pratica, la componente condizionata nel tempo era forte nel recovery, ma poco espressiva durante la distrazione attiva.
+
+\section{Cosa ho cambiato in \texttt{ftd\_predictor3.py}}
+\subsection{1) Nuova feature temporale intra-finestra}
+E stata introdotta la feature:
+\begin{itemize}
+  \item \texttt{time\_in\_current\_dist}: secondi dal \texttt{timestamp\_start} della distrazione corrente.
+\end{itemize}
+
+Questo permette al modello di vedere \emph{come cambia il rischio secondo per secondo dentro la distrazione} (0..H), non solo dopo la fine.
+
+\subsection{2) Ground truth condizionata separata in due profili}
+Sono state costruite due curve GT:
+\begin{itemize}
+  \item fase attiva: \(P(\text{errore}\mid s\text{ secondi da start distrazione})\),
+  \item fase post: \(P(\text{errore}\mid s\text{ secondi da fine distrazione})\).
+\end{itemize}
+
+Poi:
+\begin{itemize}
+  \item smoothing bayesiano leggero (riduce rumore su bin poco popolati),
+  \item vincolo isotono decrescente nel post-distrazione (andamento del recovery piu stabile e fisicamente plausibile).
+\end{itemize}
+
+\subsection{3) Selezione di \(H\) con criterio composito}
+La nested evaluation ora salva anche errore di calibrazione (MAE/RMSE) e usa score composito:
+\[
+\text{score}(H)=\text{AUC-PR}_{nested}(H)-\lambda\cdot\text{Cal\_MAE}(H), \quad \lambda=0.15
+\]
+
+Quindi \(H\) non viene scelto solo per ranking/discriminazione, ma anche per qualita probabilistica.
+
+\subsection{4) Robustezza operativa}
+Corretto il type hint di \texttt{predict\_fitness} (compatibilita Python <3.10) e aggiornato l'inferenza per valorizzare la nuova feature temporale.
+
+\section{Risultati: confronto prima/dopo}
+Confronto tra run completo di \texttt{ftd\_predictor2.py} (baseline) e \texttt{ftd\_predictor3.py} (nuovo):
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Metrica & Predictor2 & Predictor3 \\
+\midrule
+Best H (nested) & 5 & 7 \\
+AUC-PR (raw) & 0.4021 & 0.5040 \\
+AUC-ROC (raw) & 0.9437 & 0.9587 \\
+MCC (raw) & 0.4321 & 0.4884 \\
+Brier (raw) & 0.0877 & 0.0731 \\
+MAE raw vs GT & 0.1525 & 0.1349 \\
+RMSE raw vs GT & 0.2948 & 0.2797 \\
+MAE calibrated vs GT & 0.0124 & 0.0131 \\
+RMSE calibrated vs GT & 0.0204 & 0.0220 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Lettura:} il ranking/discriminazione migliora in modo netto (AUC-PR, AUC-ROC, MCC, Brier raw), mentre la calibrazione globale resta molto buona e comparabile (leggero trade-off su MAE/RMSE calibrati).
+
+\section{Perche migliora cosi}
+\begin{itemize}
+  \item Il modello ora osserva la fase attiva con risoluzione temporale (0..H), quindi apprende pattern piu informativi.
+  \item La GT e meno rumorosa grazie allo smoothing e alla monotonicita nel recovery.
+  \item La scelta di \(H\) e allineata all'obiettivo probabilistico, non solo alla separazione di classe.
+\end{itemize}
+
+\section{Nuovi output utili}
+Nel folder \texttt{evaluation/predictor3/} il nuovo script salva anche:
+\begin{itemize}
+  \item \texttt{fitness\_model\_calibrated\_v3.pkl}
+  \item \texttt{gt\_active\_window\_profile.csv}
+\end{itemize}
+che descrive la dinamica 0..H nella fase di distrazione attiva.
+
+\section{Conclusione}
+\texttt{ftd\_predictor3.py} migliora sensibilmente la qualita predittiva e rende la probabilita condizionata temporale piu coerente con il fenomeno reale (durante e dopo distrazione), mantenendo la struttura nested rigorosa richiesta.
+
+\end{document}
