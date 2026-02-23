@@ -32,6 +32,7 @@ import bisect
 import os
 import numpy as np
 import pandas as pd
+from typing import Dict, Optional, Union
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import (
     average_precision_score, roc_auc_score,
@@ -58,7 +59,7 @@ DATA_PATH        = 'data/'
 MODEL_OUT        = 'fitness_model_calibrated.pkl'
 EVAL_OUT         = 'evaluation/'
 BIN_LIMIT        = 14
-H_CANDIDATES     = list(range(13, BIN_LIMIT))
+H_CANDIDATES     = list(range(1, BIN_LIMIT))
 TOP_N_CANDIDATES = 10          # how many top grid-search H values to fully evaluate
 NEG_SAMPLE_EVERY = 1
 N_BOOTSTRAP      = 1000
@@ -72,6 +73,7 @@ XGB_PARAMS = dict(
     learning_rate    = 0.05,
     subsample        = 0.8,
     colsample_bytree = 0.8,
+    n_jobs           = -1,
     eval_metric      = 'aucpr',
     random_state     = RANDOM_SEED,
     verbosity        = 0,
@@ -308,6 +310,11 @@ for t in _outside.dropna(subset=['time_since'])['time_since']:
     n = int(np.floor(t)) + 1
     if 1 <= n <= max_H_gt:
         _g_errs[n] += 1
+
+# Reused later for temporal-decay summaries and CSV export.
+gt_errors = _g_errs.copy()
+gt_exposure = _g_expo.copy()
+
 for n in range(1, min(11, max_H_gt + 1)):
     print(f"    {n:2d}s : {gt_rate_per_sec[n]:.6f}  "
           f"(exposure={_g_expo[n]:6.0f}, errors={int(_g_errs[n]):3d})")
@@ -1138,20 +1145,20 @@ print(f"  Saved -> {MODEL_OUT}")
 
 # ── 18. Inference helper ──────────────────────────────────────────────────────
 def predict_fitness(
-    distraction_active:              bool | int,
+    distraction_active:              Union[bool, int],
     seconds_since_last_distraction:  float,
-    emotion_label:                   str   = None,
+    emotion_label:                   Optional[str] = None,
     emotion_prob:                    float = 0.5,
-    arousal_pred_label:              str   = None,
+    arousal_pred_label:              Optional[str] = None,
     arousal_pred_prob:               float = 0.5,
-    user_id:                         str   = None,
+    user_id:                         Optional[str] = None,
     # New context features — pass what you know; defaults give conservative estimates
     distraction_density_30:          int   = 0,
     distraction_density_60:          int   = 0,
     distraction_density_120:         int   = 0,
     prev_distraction_duration_s:     float = 0.0,
     artifact_path:                   str   = MODEL_OUT,
-) -> dict:
+) -> Dict[str, object]:
     # Returns calibrated probability of an error in the next second.
     # New parameters:
     #   distraction_density_*        : # windows that ended in the last 30/60/120 s
