@@ -47,8 +47,8 @@ np.random.seed(RANDOM_SEED)
 DATA_PATH        = 'data/'
 MODEL_OUT        = 'fitness_model_calibrated.pkl'
 EVAL_OUT         = 'evaluation/'
-BIN_LIMIT        = 27                     
-H_CANDIDATES     = list(range(26, 27))  
+BIN_LIMIT        = 35                     
+H_CANDIDATES     = list(range(5, BIN_LIMIT))  
 NEG_SAMPLE_EVERY = 1                       
 N_BOOTSTRAP      = 1000                    
 RECALL_LEVELS    = [0.80, 0.85, 0.90, 0.95]
