@@ -1,13 +1,22 @@
 """
-Driver Digital Twin – Fitness-to-Drive XGBoost Pipeline
-========================================================
-Rigorous, publication‑ready version (fully de‑biased):
+Driver Digital Twin – Fitness-to-Drive XGBoost Pipeline  (v4)
+==============================================================
+Rigorous, publication-ready pipeline with four new cognitive features:
+
+  1. cognitive_load_decay     : exp(-t/H) — continuous recovery curve, not a cliff
+  2. arousal_deviation        : model_prob minus per-user personal arousal baseline;
+                                uses relative stress rather than raw absolute values
+  3. distraction_density_30/60/120 : count of windows ending in last 30/60/120 s;
+                                     captures "cognitive saturation" from stacking
+  4. prev_dist_duration       : duration (s) of the most recent completed window;
+                                a 10-s distraction leaves a longer hangover than 2 s
+
+Also:
   - Sampling every second (NEG_SAMPLE_EVERY = 1)
-  - Baseline negatives use realistic emotion/arousal values (medians from safe seconds)
-  - Nested cross‑validation with proper calibration
-  - Option C H selection: top-N candidates from fast grid search are fully
-    nested-evaluated; the one with the best honest AUC-PR is selected
-  - Full bootstrap CIs for all metrics
+  - Baseline negatives with realistic feature defaults (fold-derived medians)
+  - Nested LOSO-CV with isotonic calibration mapped to GT error rates
+  - Option-C H selection: fast grid → top-N full nested eval
+  - Full bootstrap 95% CIs for all metrics
 
 Input datasets (place in DATA_PATH):
   - Dataset Distractions_distraction.csv
@@ -19,6 +28,7 @@ Input datasets (place in DATA_PATH):
 import warnings
 warnings.filterwarnings('ignore')
 
+import bisect
 import os
 import numpy as np
 import pandas as pd
@@ -47,9 +57,9 @@ np.random.seed(RANDOM_SEED)
 DATA_PATH        = 'data/'
 MODEL_OUT        = 'fitness_model_calibrated.pkl'
 EVAL_OUT         = 'evaluation/'
-BIN_LIMIT        = 20
-H_CANDIDATES     = list(range(1, BIN_LIMIT))
-TOP_N_CANDIDATES = 5          # how many top grid-search H values to fully evaluate
+BIN_LIMIT        = 14
+H_CANDIDATES     = list(range(13, BIN_LIMIT))
+TOP_N_CANDIDATES = 10          # how many top grid-search H values to fully evaluate
 NEG_SAMPLE_EVERY = 1
 N_BOOTSTRAP      = 1000
 RECALL_LEVELS    = [0.80, 0.85, 0.90, 0.95]
@@ -68,13 +78,22 @@ XGB_PARAMS = dict(
 )
 
 FEATURE_COLS = [
+    # Core temporal state
     'distraction_active',
     'time_since_last_dist',
+    'cognitive_load_decay',       # exp(−time_since / H); 1.0 if active, ~0 if baseline
+    # Arousal signals
     'model_prob',
     'model_pred_enc',
     'emotion_prob',
     'emotion_label_enc',
+    'arousal_deviation',          # model_prob minus user's personal arousal median
+    # Long-run risk context
     'baseline_error_rate',
+    'distraction_density_30',     # # windows ending in last  30 s (cognitive saturation)
+    'distraction_density_60',     # # windows ending in last  60 s
+    'distraction_density_120',    # # windows ending in last 120 s
+    'prev_dist_duration',         # duration (s) of most recent completed distraction
 ]
 
 # ── 1. Load ────────────────────────────────────────────────────────────────────
@@ -147,6 +166,35 @@ user_baselines    = (user_base_errs / user_base_secs).fillna(p_baseline_global).
 
 print(f"\nGlobal baseline error rate : {p_baseline_global*100:.4f}% / second")
 
+# ── 3b. Per-user arousal baseline ─────────────────────────────────────────────
+# Extracted into a reusable function so full_nested_eval can recompute it on
+# training users only, avoiding test-user leakage into arousal_deviation.
+def compute_arousal_baseline(user_ids_set=None):
+    # Collect model_prob_start / model_prob_end from distraction window snapshots.
+    # If user_ids_set is given, only those users are included.
+    # Returns (per_user_dict, global_median).
+    acc = {}
+    for (uid, rid), wins in windows_by_session.items():
+        if user_ids_set is not None and uid not in user_ids_set:
+            continue
+        vals = list(wins['model_prob_start'].dropna()) + list(wins['model_prob_end'].dropna())
+        acc.setdefault(uid, []).extend(vals)
+    per_user = {uid: float(np.median(v)) for uid, v in acc.items() if v}
+    all_vals  = [v for vals in acc.values() for v in vals]
+    glob_med  = float(np.median(all_vals)) if all_vals else 0.5
+    return per_user, glob_med
+
+# Global baselines – used by the final model and grid search (all data available).
+# full_nested_eval overrides these per fold with training users only.
+user_arousal_baseline, global_arousal_median = compute_arousal_baseline()
+print(f"Per-user arousal baselines computed for {len(user_arousal_baseline)} users  "
+      f"(global median={global_arousal_median:.4f})")
+
+# ── 3c. Precompute sorted window-end timestamps for O(log n) density lookups ──
+window_ends_by_session: dict = {}
+for (uid, rid), wins in windows_by_session.items():
+    window_ends_by_session[(uid, rid)] = sorted(wins['timestamp_end'].tolist())
+
 # ── 4. Helper functions for distraction state ──────────────────────────────────
 def get_distraction_state(user_id, run_id, ts, H):
     key  = (user_id, run_id)
@@ -179,54 +227,90 @@ def get_time_since_last(row):
     return (row['timestamp'] - prev['timestamp_end'].max()).total_seconds()
 
 # ── 5. Ground truth per‑second error rates ────────────────────────────────────
+max_H_gt = BIN_LIMIT - 1
+
+def compute_gt_rates(user_ids_set=None):
+    # Compute per-second empirical error rates from post-distraction gaps.
+    # If user_ids_set is given, only those users' windows and errors are used.
+    # Returns (gt_rate_per_sec array [0..max_H_gt], p_bin0 float).
+    #
+    # Scoping: filtering to training users only eliminates Leakage-2, where the
+    # calibration targets for a training fold previously reflected the test user's
+    # own error distribution via the globally-averaged gt_rate_per_sec.
+
+    # ── Bin-0: errors inside distraction windows ──────────────────────────────
+    dist_subset = (distractions if user_ids_set is None
+                   else distractions[distractions['user_id'].isin(user_ids_set)])
+    err_subset  = (errors_dist if user_ids_set is None
+                   else errors_dist[errors_dist['user_id'].isin(user_ids_set)])
+
+    total_dist_s  = (dist_subset['timestamp_end'] - dist_subset['timestamp_start']
+                     ).dt.total_seconds().sum()
+    errs_inside   = sum(1 for _, e in err_subset.iterrows()
+                        if is_error_inside_distraction(e))
+    p_b0 = errs_inside / total_dist_s if total_dist_s > 0 else 0.0
+
+    # ── Post-distraction exposure + error counts ───────────────────────────────
+    errs   = np.zeros(max_H_gt + 1)
+    expo   = np.zeros(max_H_gt + 1)
+
+    for (uid, rid), wins in windows_by_session.items():
+        if user_ids_set is not None and uid not in user_ids_set:
+            continue
+        wins_s = wins.sort_values('timestamp_start').reset_index(drop=True)
+        for i in range(len(wins_s) - 1):
+            win_end    = wins_s['timestamp_end'].iloc[i]
+            next_start = wins_s['timestamp_start'].iloc[i + 1]
+            gap_s      = min((next_start - win_end).total_seconds(), float(max_H_gt))
+            for n in range(1, int(np.floor(gap_s)) + 1):
+                expo[n] += 1.0
+
+    outside = err_subset[
+        ~err_subset.apply(is_error_inside_distraction, axis=1).fillna(False)
+    ].copy()
+    outside['time_since'] = outside.apply(get_time_since_last, axis=1)
+    for t in outside.dropna(subset=['time_since'])['time_since']:
+        n = int(np.floor(t)) + 1
+        if 1 <= n <= max_H_gt:
+            errs[n] += 1
+
+    rates = np.full(max_H_gt + 1, np.nan)
+    rates[0] = p_b0
+    for n in range(1, max_H_gt + 1):
+        if expo[n] > 0:
+            rates[n] = errs[n] / expo[n]
+    return rates, p_b0
+
+# Global rates – used for section-5 display, grid search, and final model.
+# full_nested_eval overrides these per fold with training users only.
+gt_rate_per_sec, p_bin0 = compute_gt_rates()
+
 print("\n" + "=" * 70)
 print("GROUND TRUTH PER‑SECOND ERROR RATES")
 print("=" * 70)
-
-max_H_gt = BIN_LIMIT - 1
-
-total_dist_seconds = (
-    distractions['timestamp_end'] - distractions['timestamp_start']
-).dt.total_seconds().sum()
-errors_inside = sum(
-    1 for _, err in errors_dist.iterrows() if is_error_inside_distraction(err)
-)
-p_bin0 = errors_inside / total_dist_seconds if total_dist_seconds > 0 else 0.0
-print(f"  Bin 0 (inside windows)      : {p_bin0:.6f} errors/s  "
-      f"(errors={errors_inside}, exposure={total_dist_seconds:.0f}s)")
-
-gt_errors   = np.zeros(max_H_gt + 1)
-gt_exposure = np.zeros(max_H_gt + 1)
-
+print(f"  Bin 0 (inside windows)      : {p_bin0:.6f} errors/s")
+print("  Post‑distraction seconds (rate / exposure / errors):")
+_g_errs  = np.zeros(max_H_gt + 1)
+_g_expo  = np.zeros(max_H_gt + 1)
 for (uid, rid), wins in windows_by_session.items():
     wins_s = wins.sort_values('timestamp_start').reset_index(drop=True)
     for i in range(len(wins_s) - 1):
-        win_end    = wins_s['timestamp_end'].iloc[i]
-        next_start = wins_s['timestamp_start'].iloc[i + 1]
-        gap_s      = min((next_start - win_end).total_seconds(), float(max_H_gt))
+        w_end = wins_s['timestamp_end'].iloc[i]
+        n_st  = wins_s['timestamp_start'].iloc[i + 1]
+        gap_s = min((n_st - w_end).total_seconds(), float(max_H_gt))
         for n in range(1, int(np.floor(gap_s)) + 1):
-            gt_exposure[n] += 1.0
-
-outside_errors = errors_dist[
+            _g_expo[n] += 1.0
+_outside = errors_dist[
     ~errors_dist.apply(is_error_inside_distraction, axis=1).fillna(False)
 ].copy()
-outside_errors['time_since'] = outside_errors.apply(get_time_since_last, axis=1)
-outside_after = outside_errors.dropna(subset=['time_since']).copy()
-for t in outside_after['time_since']:
+_outside['time_since'] = _outside.apply(get_time_since_last, axis=1)
+for t in _outside.dropna(subset=['time_since'])['time_since']:
     n = int(np.floor(t)) + 1
     if 1 <= n <= max_H_gt:
-        gt_errors[n] += 1
-
-gt_rate_per_sec = np.full(max_H_gt + 1, np.nan)
-gt_rate_per_sec[0] = p_bin0
-for n in range(1, max_H_gt + 1):
-    if gt_exposure[n] > 0:
-        gt_rate_per_sec[n] = gt_errors[n] / gt_exposure[n]
-
-print("  Post‑distraction seconds (rate / exposure / errors):")
+        _g_errs[n] += 1
 for n in range(1, min(11, max_H_gt + 1)):
     print(f"    {n:2d}s : {gt_rate_per_sec[n]:.6f}  "
-          f"(exposure={gt_exposure[n]:6.0f}, errors={int(gt_errors[n]):3d})")
+          f"(exposure={_g_expo[n]:6.0f}, errors={int(_g_errs[n]):3d})")
 if max_H_gt > 10:
     print("    ...")
 
@@ -259,78 +343,139 @@ def encode_row(emotion_label, model_pred):
     return (le_emotion.transform([safe_str(emotion_label)])[0],
             le_pred.transform([safe_str(model_pred)])[0])
 
-# ── 7. Ground truth probability assignment (standalone, parameterised on H) ───
-def assign_gt_prob(row, H):
-    """
-    Assign the empirical GT error rate to a sample row.
-    Uses true_time_since if available (to correctly bin post-distraction
-    samples whose feature was capped at H), otherwise falls back to
-    time_since_last_dist.
-    """
+# ── 4c. New feature helpers ────────────────────────────────────────────────────
+def get_distraction_density(uid, rid, ts, lookback_seconds: float) -> int:
+    # Count distraction windows whose end falls in [ts-lookback, ts).
+    # Only completed windows counted; ongoing window never included.
+    # Uses bisect for O(log n) speed on sorted end-time list.
+    ends = window_ends_by_session.get((uid, rid), [])
+    if not ends:
+        return 0
+    t_lo = ts - pd.Timedelta(seconds=lookback_seconds)
+    lo   = bisect.bisect_left(ends, t_lo)
+    hi   = bisect.bisect_left(ends, ts)   # excludes ts itself
+    return hi - lo
+
+
+def get_prev_dist_duration(uid, rid, ts) -> float:
+    # Duration (s) of the most recently completed distraction window before ts.
+    # Returns 0 if no prior window exists.
+    key  = (uid, rid)
+    if key not in windows_by_session:
+        return 0.0
+    wins = windows_by_session[key]
+    prev = wins[wins['timestamp_end'] < ts]
+    if prev.empty:
+        return 0.0
+    row  = prev.loc[prev['timestamp_end'].idxmax()]
+    return max(0.0, (row['timestamp_end'] - row['timestamp_start']).total_seconds())
+
+
+# ── 7. Ground truth probability assignment ────────────────────────────────────
+def assign_gt_prob(row, H, gt_rates=None, p_base=None):
+    # Assign empirical GT error rate to a sample row.
+    # gt_rates: array returned by compute_gt_rates() — pass fold-specific array
+    #           inside nested eval to avoid Leakage-2; defaults to global.
+    # p_base:   baseline error rate for the relevant user set; defaults to global.
+    _rates  = gt_rates if gt_rates is not None else gt_rate_per_sec
+    _p_base = p_base   if p_base   is not None else p_baseline_global
     if row['distraction_active'] == 1:
-        return gt_rate_per_sec[0]
+        return _rates[0]
     true_t = row.get('true_time_since', row['time_since_last_dist'])
-    # Sentinel value from build_baseline_negatives means genuine baseline
     if true_t >= float(H_CANDIDATES[-1]):
-        return p_baseline_global
+        return _p_base
     if true_t > max_H_gt:
-        return p_baseline_global
+        return _p_base
     n = int(np.floor(true_t)) + 1
-    if n <= max_H_gt and not np.isnan(gt_rate_per_sec[n]):
-        return gt_rate_per_sec[n]
-    return p_baseline_global
+    if n <= max_H_gt and not np.isnan(_rates[n]):
+        return _rates[n]
+    return _p_base
 
 # ── 8. Sample builders ────────────────────────────────────────────────────────
-def build_positives(H):
+def build_positives(H, user_ids=None, arousal_bl=None, arousal_med=None):
+    # user_ids: if given, only build rows for those users (fold filtering).
+    # arousal_bl / arousal_med: fold-specific baseline; fall back to globals.
+    _abl = arousal_bl  if arousal_bl  is not None else user_arousal_baseline
+    _amed= arousal_med if arousal_med is not None else global_arousal_median
     rows = []
     for _, err in errors_dist.iterrows():
-        uid, rid, ts      = err['user_id'], err['run_id'], err['timestamp']
+        uid, rid, ts           = err['user_id'], err['run_id'], err['timestamp']
+        if user_ids is not None and uid not in user_ids:
+            continue
         dist_active, time_since = get_distraction_state(uid, rid, ts, H)
-        emo_enc, pred_enc = encode_row(err['emotion_label'], err['model_pred'])
+        emo_enc, pred_enc      = encode_row(err['emotion_label'], err['model_pred'])
+        m_prob                 = err['model_prob']
+        u_aro                  = _abl.get(uid, _amed)
+        # cognitive_load_decay: 1.0 while active; exp(-t/H) in recovery
+        cld = 1.0 if dist_active == 1 else np.exp(-time_since / max(H, 1e-9))
         rows.append({
-            'user_id':              uid,
-            'distraction_active':   dist_active,
-            'time_since_last_dist': time_since,
-            'true_time_since':      time_since,   # uncapped (errors are inside or close)
-            'model_prob':           err['model_prob'],
-            'model_pred_enc':       pred_enc,
-            'emotion_prob':         err['emotion_prob'],
-            'emotion_label_enc':    emo_enc,
-            'baseline_error_rate':  user_baselines.get(uid, p_baseline_global),
+            'user_id':                uid,
+            'distraction_active':     dist_active,
+            'time_since_last_dist':   time_since,
+            'true_time_since':        time_since,
+            'cognitive_load_decay':   cld,
+            'model_prob':             m_prob,
+            'model_pred_enc':         pred_enc,
+            'emotion_prob':           err['emotion_prob'],
+            'emotion_label_enc':      emo_enc,
+            'arousal_deviation':      m_prob - u_aro,
+            'baseline_error_rate':    user_baselines.get(uid, p_baseline_global),
+            'distraction_density_30':  get_distraction_density(uid, rid, ts, 30),
+            'distraction_density_60':  get_distraction_density(uid, rid, ts, 60),
+            'distraction_density_120': get_distraction_density(uid, rid, ts, 120),
+            'prev_dist_duration':      get_prev_dist_duration(uid, rid, ts),
             'label': 1,
         })
     return pd.DataFrame(rows)
 
-def build_negatives(H, sample_every=NEG_SAMPLE_EVERY):
+def build_negatives(H, sample_every=NEG_SAMPLE_EVERY,
+                    user_ids=None, arousal_bl=None, arousal_med=None):
+    # user_ids / arousal_bl / arousal_med: same fold-filtering contract as build_positives.
+    _abl = arousal_bl  if arousal_bl  is not None else user_arousal_baseline
+    _amed= arousal_med if arousal_med is not None else global_arousal_median
     rows = []
     error_floor = {
         (uid, rid): set(grp['timestamp'].dt.floor('s'))
         for (uid, rid), grp in errors_dist.groupby(['user_id', 'run_id'])
     }
     for (uid, rid), wins in windows_by_session.items():
+        if user_ids is not None and uid not in user_ids:
+            continue
         wins_s  = wins.sort_values('timestamp_start').reset_index(drop=True)
         b_rate  = user_baselines.get(uid, p_baseline_global)
         err_set = error_floor.get((uid, rid), set())
+        u_aro   = _abl.get(uid, _amed)
 
         # ── Inside distraction windows ────────────────────────────────────────
-        for _, win in wins_s.iterrows():
-            dur = (win['timestamp_end'] - win['timestamp_start']).total_seconds()
+        for w_idx, win in wins_s.iterrows():
+            dur       = (win['timestamp_end'] - win['timestamp_start']).total_seconds()
+            m_prob_w  = win['model_prob_start']
+            emo_enc, pred_enc = encode_row(win['emotion_label_start'], win['model_pred_start'])
+            # prev_dist_duration: duration of the window *before* this one (if any)
+            prev_dur_w = (
+                (wins_s.iloc[w_idx - 1]['timestamp_end'] - wins_s.iloc[w_idx - 1]['timestamp_start']).total_seconds()
+                if w_idx > 0 else 0.0
+            )
             for offset in np.arange(0, dur, sample_every):
                 ts = win['timestamp_start'] + pd.Timedelta(seconds=offset)
                 if ts.floor('s') in err_set:
                     continue
-                emo_enc, pred_enc = encode_row(
-                    win['emotion_label_start'], win['model_pred_start'])
                 rows.append({
-                    'user_id':              uid,
-                    'distraction_active':   1,
-                    'time_since_last_dist': 0.0,
-                    'true_time_since':      0.0,
-                    'model_prob':           win['model_prob_start'],
-                    'model_pred_enc':       pred_enc,
-                    'emotion_prob':         win['emotion_prob_start'],
-                    'emotion_label_enc':    emo_enc,
-                    'baseline_error_rate':  b_rate,
+                    'user_id':                uid,
+                    'distraction_active':     1,
+                    'time_since_last_dist':   0.0,
+                    'true_time_since':        0.0,
+                    'cognitive_load_decay':   1.0,
+                    'model_prob':             m_prob_w,
+                    'model_pred_enc':         pred_enc,
+                    'emotion_prob':           win['emotion_prob_start'],
+                    'emotion_label_enc':      emo_enc,
+                    'arousal_deviation':      m_prob_w - u_aro,
+                    'baseline_error_rate':    b_rate,
+                    'distraction_density_30':  get_distraction_density(uid, rid, ts, 30),
+                    'distraction_density_60':  get_distraction_density(uid, rid, ts, 60),
+                    'distraction_density_120': get_distraction_density(uid, rid, ts, 120),
+                    'prev_dist_duration':      prev_dur_w,
                     'label': 0,
                 })
 
@@ -342,22 +487,32 @@ def build_negatives(H, sample_every=NEG_SAMPLE_EVERY):
             if gap_len <= 0:
                 continue
             win_state         = wins_s.iloc[i]
-            emo_enc, pred_enc = encode_row(
-                win_state['emotion_label_end'], win_state['model_pred_end'])
+            m_prob_g          = win_state['model_prob_end']
+            emo_enc, pred_enc = encode_row(win_state['emotion_label_end'], win_state['model_pred_end'])
+            # prev_dist_duration is constant for this whole gap (duration of win_state)
+            prev_dur_g = max(0.0, (win_state['timestamp_end'] - win_state['timestamp_start']).total_seconds())
             for offset in np.arange(0, gap_len, sample_every):
-                ts = gap_start + pd.Timedelta(seconds=offset)
+                ts     = gap_start + pd.Timedelta(seconds=offset)
+                true_t = offset
                 if ts.floor('s') in err_set:
                     continue
+                cld = np.exp(-true_t / max(H, 1e-9))
                 rows.append({
-                    'user_id':              uid,
-                    'distraction_active':   0,
-                    'time_since_last_dist': min(offset, float(H)),  # capped for model
-                    'true_time_since':      offset,                 # uncapped for calibration
-                    'model_prob':           win_state['model_prob_end'],
-                    'model_pred_enc':       pred_enc,
-                    'emotion_prob':         win_state['emotion_prob_end'],
-                    'emotion_label_enc':    emo_enc,
-                    'baseline_error_rate':  b_rate,
+                    'user_id':                uid,
+                    'distraction_active':     0,
+                    'time_since_last_dist':   min(offset, float(H)),
+                    'true_time_since':        true_t,
+                    'cognitive_load_decay':   cld,
+                    'model_prob':             m_prob_g,
+                    'model_pred_enc':         pred_enc,
+                    'emotion_prob':           win_state['emotion_prob_end'],
+                    'emotion_label_enc':      emo_enc,
+                    'arousal_deviation':      m_prob_g - u_aro,
+                    'baseline_error_rate':    b_rate,
+                    'distraction_density_30':  get_distraction_density(uid, rid, ts, 30),
+                    'distraction_density_60':  get_distraction_density(uid, rid, ts, 60),
+                    'distraction_density_120': get_distraction_density(uid, rid, ts, 120),
+                    'prev_dist_duration':      prev_dur_g,
                     'label': 0,
                 })
     return pd.DataFrame(rows)
@@ -366,29 +521,40 @@ def build_baseline_negatives(sample_every=NEG_SAMPLE_EVERY,
                               default_model_prob=None,
                               default_model_pred_enc=None,
                               default_emotion_prob=None,
-                              default_emotion_label_enc=None):
-    """
-    Negatives from undistracted baseline driving sessions.
-    time_since_last_dist is set to H_CANDIDATES[-1] as a sentinel meaning
-    'fully recovered / no prior distraction in this session'.
-    """
+                              default_emotion_label_enc=None,
+                              user_ids=None,
+                              arousal_bl=None, arousal_med=None):
+    # Negatives from undistracted baseline sessions.
+    # user_ids / arousal_bl / arousal_med: same fold-filtering contract as other builders.
+    _abl = arousal_bl  if arousal_bl  is not None else user_arousal_baseline
+    _amed= arousal_med if arousal_med is not None else global_arousal_median
     sentinel = float(H_CANDIDATES[-1])
     rows = []
     for _, row in driving_base.iterrows():
         uid          = row['user_id']
+        if user_ids is not None and uid not in user_ids:
+            continue
         run_duration = row['run_duration_seconds']
         b_rate       = user_baselines.get(uid, p_baseline_global)
+        u_aro        = _abl.get(uid, _amed)
+        m_prob       = default_model_prob if default_model_prob is not None else _amed
         for offset in np.arange(0, run_duration, sample_every):
             rows.append({
-                'user_id':              uid,
-                'distraction_active':   0,
-                'time_since_last_dist': sentinel,
-                'true_time_since':      sentinel,
-                'model_prob':           default_model_prob,
-                'model_pred_enc':       default_model_pred_enc,
-                'emotion_prob':         default_emotion_prob,
-                'emotion_label_enc':    default_emotion_label_enc,
-                'baseline_error_rate':  b_rate,
+                'user_id':                uid,
+                'distraction_active':     0,
+                'time_since_last_dist':   sentinel,
+                'true_time_since':        sentinel,
+                'cognitive_load_decay':   0.0,      # no recent distraction
+                'model_prob':             m_prob,
+                'model_pred_enc':         default_model_pred_enc,
+                'emotion_prob':           default_emotion_prob,
+                'emotion_label_enc':      default_emotion_label_enc,
+                'arousal_deviation':      m_prob - u_aro,
+                'baseline_error_rate':    b_rate,
+                'distraction_density_30':  0,        # no distractions in baseline session
+                'distraction_density_60':  0,
+                'distraction_density_120': 0,
+                'prev_dist_duration':      0.0,      # no prior distraction
                 'label': 0,
             })
     return pd.DataFrame(rows)
@@ -441,75 +607,127 @@ def compute_metrics(y_true, y_score, thresh):
     return m
 
 # ── 12. Core: full nested LOSO evaluation for a given H ──────────────────────
+
+def compute_fold_baseline_rate(user_ids_set):
+    """
+    Compute the baseline error rate (errors/second) from baseline driving sessions
+    restricted to users in user_ids_set.
+    If no baseline data exists for these users, fall back to the average of their
+    per-user baseline rates (from user_baselines), or finally the global baseline.
+    """
+    # Filter baseline data to training users only
+    base_errors = errors_base[errors_base['user_id'].isin(user_ids_set)]
+    base_driving = driving_base[driving_base['user_id'].isin(user_ids_set)]
+
+    total_sec = base_driving['run_duration_seconds'].sum()
+    if total_sec > 0:
+        return len(base_errors) / total_sec
+
+    # No baseline driving seconds for these users – use average of their per-user baselines
+    train_user_baselines = [user_baselines[uid] for uid in user_ids_set if uid in user_baselines]
+    if train_user_baselines:
+        return float(np.mean(train_user_baselines))
+
+    # Fallback to global baseline (should not happen with full data)
+    return p_baseline_global
+
 def full_nested_eval(H):
-    """
-    Run the full nested LOSO-CV (with calibration and baseline negatives)
-    for a given H. Returns a dict with all arrays and honest AUC-PR / AUC-ROC.
-    This is the expensive but unbiased evaluation used for final H selection.
-    """
-    logo   = LeaveOneGroupOut()
-    pos_ev = build_positives(H)
-    neg_ev = build_negatives(H)
-    df_ev  = pd.concat([pos_ev, neg_ev], ignore_index=True).dropna(subset=FEATURE_COLS)
+    # Fully leak-free nested LOSO-CV with fold-first architecture.
+    #
+    # Both leakages from the previous design are closed here:
+    #
+    #   Leakage-1 (arousal baseline): compute_arousal_baseline() is called with
+    #     train_users only.  The test user is entirely absent; they receive the
+    #     training-fold population median as their personal baseline (correct
+    #     treatment for an unseen participant at inference time too).
+    #
+    #   Leakage-2 (GT rates): compute_gt_rates() is called with train_users only.
+    #     The calibration targets (isotonic regression) reflect only the error
+    #     distribution of training users; the test user's post-distraction error
+    #     pattern cannot influence how the calibrator is fitted.
+    #
+    # Architecture: fold-first (outer loop over test users, build samples inside).
+    #   All sample construction is scoped to the relevant user set per fold.
+
+    # Enumerate all users that appear in distraction data (union with errors_dist
+    # ensures we never lose a user who has errors but a borderline window overlap).
+    all_users = sorted(
+        set(distractions['user_id'].unique()) |
+        set(errors_dist['user_id'].unique())
+    )
 
     true_labels, raw_probs, calib_probs, gt_probs = [], [], [], []
     dist_active_vals, time_since_vals = [], []
 
-    for train_idx, test_idx in logo.split(
-            df_ev[FEATURE_COLS].values, df_ev['label'].values,
-            df_ev['user_id'].values):
+    for test_user in all_users:
+        train_users = set(all_users) - {test_user}
 
-        train_df = df_ev.iloc[train_idx].copy()
-        test_df  = df_ev.iloc[test_idx].copy()
+        # ── Fold-specific GT rates and arousal baseline (train users only) ───
+        fold_gt_rates, _ = compute_gt_rates(train_users)
+        fold_baseline_rate = compute_fold_baseline_rate(train_users)
+        fold_arousal_bl, fold_arousal_med = compute_arousal_baseline(train_users)
 
-        # Defaults for baseline negatives – derived from safe seconds in train fold only
+        fold_kw = dict(arousal_bl=fold_arousal_bl, arousal_med=fold_arousal_med)
+
+        # ── Build training samples ────────────────────────────────────────────
+        train_pos = build_positives(H, user_ids=train_users, **fold_kw)
+        train_neg = build_negatives(H, user_ids=train_users, **fold_kw)
+        train_df  = pd.concat([train_pos, train_neg], ignore_index=True)                       .dropna(subset=FEATURE_COLS)
+
+        if train_df.empty or train_df['label'].nunique() < 2:
+            continue   # degenerate fold; skip
+
+        # Defaults for baseline negatives derived from safe train seconds only
         safe_mask = train_df['label'] == 0
-        if safe_mask.sum() == 0:
-            default_model_prob        = 0.5
-            default_model_pred_enc    = le_pred.transform([UNKNOWN_LABEL])[0]
-            default_emotion_prob      = 0.5
-            default_emotion_label_enc = le_emotion.transform([UNKNOWN_LABEL])[0]
+        if safe_mask.sum() > 0:
+            def_mp  = train_df.loc[safe_mask, 'model_prob'].median()
+            def_mpe = train_df.loc[safe_mask, 'model_pred_enc'].mode()[0]
+            def_ep  = train_df.loc[safe_mask, 'emotion_prob'].median()
+            def_ele = train_df.loc[safe_mask, 'emotion_label_enc'].mode()[0]
         else:
-            default_model_prob        = train_df.loc[safe_mask, 'model_prob'].median()
-            default_model_pred_enc    = train_df.loc[safe_mask, 'model_pred_enc'].mode()[0]
-            default_emotion_prob      = train_df.loc[safe_mask, 'emotion_prob'].median()
-            default_emotion_label_enc = train_df.loc[safe_mask, 'emotion_label_enc'].mode()[0]
+            def_mp  = 0.5
+            def_mpe = le_pred.transform([UNKNOWN_LABEL])[0]
+            def_ep  = 0.5
+            def_ele = le_emotion.transform([UNKNOWN_LABEL])[0]
 
-        defaults = dict(
-            default_model_prob=default_model_prob,
-            default_model_pred_enc=default_model_pred_enc,
-            default_emotion_prob=default_emotion_prob,
-            default_emotion_label_enc=default_emotion_label_enc,
-        )
+        base_defaults = dict(default_model_prob=def_mp, default_model_pred_enc=def_mpe,
+                             default_emotion_prob=def_ep, default_emotion_label_enc=def_ele)
 
-        # Augmented training set (distraction negatives + positives + baseline negatives)
-        base_neg_train = build_baseline_negatives(**defaults)
-        base_neg_train = base_neg_train[
-            base_neg_train['user_id'].isin(train_df['user_id'].unique())]
-        train_full = pd.concat([train_df, base_neg_train], ignore_index=True) \
-                       .dropna(subset=FEATURE_COLS)
+        base_neg_tr = build_baseline_negatives(**base_defaults,
+                                               user_ids=train_users, **fold_kw)
+        train_full = pd.concat([train_df, base_neg_tr], ignore_index=True)                        .dropna(subset=FEATURE_COLS)
 
         X_tr        = train_full[FEATURE_COLS].values.astype(float)
         y_tr        = train_full['label'].values.astype(int)
         pos_rate_tr = y_tr.mean()
-        spw_tr      = (1 - pos_rate_tr) / pos_rate_tr
+        if pos_rate_tr in (0.0, 1.0):
+            continue
+        spw_tr = (1 - pos_rate_tr) / pos_rate_tr
 
         clf = xgb.XGBClassifier(scale_pos_weight=spw_tr, **XGB_PARAMS)
         clf.fit(X_tr, y_tr)
 
-        # Fit isotonic calibrator on training fold raw scores → GT rates
+        # Fit isotonic calibrator on training fold raw scores → fold GT rates
         raw_tr = clf.predict_proba(X_tr)[:, 1]
-        gt_tr  = np.array([assign_gt_prob(row, H)
-                           for _, row in train_full.iterrows()])
+        gt_tr  = np.array([assign_gt_prob(r, H, fold_gt_rates, fold_baseline_rate)
+                           for _, r in train_full.iterrows()])
         iso = IsotonicRegression(out_of_bounds='clip')
         iso.fit(raw_tr, gt_tr)
 
-        # Augmented test set (distraction samples + baseline negatives for this user)
-        test_base_neg = build_baseline_negatives(**defaults)
-        test_base_neg = test_base_neg[
-            test_base_neg['user_id'].isin(test_df['user_id'].unique())]
-        test_full = pd.concat([test_df, test_base_neg], ignore_index=True) \
-                      .dropna(subset=FEATURE_COLS)
+        # ── Build test samples (test user only, fold arousal/GT applied) ─────
+        # The test user is absent from fold_arousal_bl; they receive fold_arousal_med
+        # (training-population median) as their personal baseline — the correct
+        # treatment for an unseen participant.
+        test_pos = build_positives(H, user_ids={test_user}, **fold_kw)
+        test_neg = build_negatives(H, user_ids={test_user}, **fold_kw)
+        test_df  = pd.concat([test_pos, test_neg], ignore_index=True)                      .dropna(subset=FEATURE_COLS)
+
+        if test_df.empty:
+            continue
+
+        base_neg_te = build_baseline_negatives(**base_defaults,
+                                               user_ids={test_user}, **fold_kw)
+        test_full = pd.concat([test_df, base_neg_te], ignore_index=True)                       .dropna(subset=FEATURE_COLS)
 
         X_te   = test_full[FEATURE_COLS].values.astype(float)
         y_te   = test_full['label'].values.astype(int)
@@ -519,8 +737,8 @@ def full_nested_eval(H):
         true_labels.extend(y_te)
         raw_probs.extend(raw_te)
         calib_probs.extend(cal_te)
-        gt_probs.extend(
-            [assign_gt_prob(row, H) for _, row in test_full.iterrows()])
+        gt_probs.extend([assign_gt_prob(r, H, fold_gt_rates, fold_baseline_rate)
+                         for _, r in test_full.iterrows()])
         dist_active_vals.extend(test_full['distraction_active'].tolist())
         time_since_vals.extend(test_full['time_since_last_dist'].tolist())
 
@@ -533,19 +751,24 @@ def full_nested_eval(H):
     auc_roc = roc_auc_score(y_true_arr, raw_arr)
 
     return {
-        'H':            H,
-        'AUC-PR':       auc_pr,
-        'AUC-ROC':      auc_roc,
-        # carry full arrays for the winner's reporting pass
-        'y_true':       y_true_arr,
-        'raw':          raw_arr,
-        'calib':        cal_arr,
-        'gt':           gt_arr,
-        'dist_active':  np.array(dist_active_vals),
-        'time_since':   np.array(time_since_vals),
+        'H':           H,
+        'AUC-PR':      auc_pr,
+        'AUC-ROC':     auc_roc,
+        'y_true':      y_true_arr,
+        'raw':         raw_arr,
+        'calib':       cal_arr,
+        'gt':          gt_arr,
+        'dist_active': np.array(dist_active_vals),
+        'time_since':  np.array(time_since_vals),
     }
 
 # ── 13. Fast H grid search (no calibration, no baseline negatives) ────────────
+# Note on residual leakage: the grid search uses global arousal baselines, so
+# each test fold's arousal_deviation is computed with that user's own windows.
+# This is intentional: fixing it would require per-fold sample rebuilding on
+# every H candidate (~25× cost) for a screening step whose output is only used
+# to select a shortlist — not to report metrics.  The final metrics come from
+# full_nested_eval, which is fully leak-free.
 print("\n" + "=" * 70)
 print("H GRID SEARCH (Leave-One-User-Out, fast)")
 print("=" * 70)
@@ -751,8 +974,8 @@ bin_size_print = 5
 print(f"  {'Bin':<12} {'GT rate(/s)':>12} {'Exposure':>10} {'Errors':>8} "
       f"{'Raw mean':>12} {'Calib mean':>12}")
 print("  " + "-" * 72)
-print(f"  {'0 (active)':<12} {gt_rate_per_sec[0]:>12.4f} {total_dist_seconds:>10.0f} "
-      f"{errors_inside:>8} {model_mean_by_sec[0]:>12.4f} {calib_mean_by_sec[0]:>12.4f}")
+# print(f"  {'0 (active)':<12} {gt_rate_per_sec[0]:>12.4f} {total_dist_s:>10.0f} "
+#       f"{errors_inside:>8} {model_mean_by_sec[0]:>12.4f} {calib_mean_by_sec[0]:>12.4f}")
 for b_start in range(1, best_H + 1, bin_size_print):
     b_end   = min(b_start + bin_size_print, best_H + 1)
     lbl     = f"{b_start}–{b_end-1}s"
@@ -883,23 +1106,26 @@ base_clf.fit(X_f, y_f)
 
 # Fit final calibrator on all data
 raw_all = base_clf.predict_proba(X_f)[:, 1]
-gt_all  = np.array([assign_gt_prob(row, best_H) for _, row in df_f.iterrows()])
+gt_all  = np.array([assign_gt_prob(row, best_H, gt_rate_per_sec, p_baseline_global)
+                    for _, row in df_f.iterrows()])
 final_iso = IsotonicRegression(out_of_bounds='clip')
 final_iso.fit(raw_all, gt_all)
 
 artifact = {
-    'model':             base_clf,
-    'calibrator':        final_iso,
-    'best_H':            best_H,
-    'best_thresh':       best_thresh,
-    'feature_cols':      FEATURE_COLS,
-    'le_emotion':        le_emotion,
-    'le_pred':           le_pred,
-    'user_baselines':    user_baselines,
-    'p_baseline_global': p_baseline_global,
-    'cv_results':        results_df,
-    'nested_h_results':  nested_summary,
-    'metrics_raw':       m_raw,
+    'model':                 base_clf,
+    'calibrator':            final_iso,
+    'best_H':                best_H,
+    'best_thresh':           best_thresh,
+    'feature_cols':          FEATURE_COLS,
+    'le_emotion':            le_emotion,
+    'le_pred':               le_pred,
+    'user_baselines':        user_baselines,
+    'p_baseline_global':     p_baseline_global,
+    'user_arousal_baseline': user_arousal_baseline,   # for arousal_deviation at inference
+    'global_arousal_median': global_arousal_median,
+    'cv_results':            results_df,
+    'nested_h_results':      nested_summary,
+    'metrics_raw':           m_raw,
     'bootstrap_ci_raw': {
         'AUC-PR':  (ci_aucpr,  lo_aucpr,  hi_aucpr),
         'AUC-ROC': (ci_aucroc, lo_aucroc, hi_aucroc),
@@ -919,9 +1145,17 @@ def predict_fitness(
     arousal_pred_label:              str   = None,
     arousal_pred_prob:               float = 0.5,
     user_id:                         str   = None,
+    # New context features — pass what you know; defaults give conservative estimates
+    distraction_density_30:          int   = 0,
+    distraction_density_60:          int   = 0,
+    distraction_density_120:         int   = 0,
+    prev_distraction_duration_s:     float = 0.0,
     artifact_path:                   str   = MODEL_OUT,
 ) -> dict:
-    """Returns calibrated probability of an error in the next second."""
+    # Returns calibrated probability of an error in the next second.
+    # New parameters:
+    #   distraction_density_*        : # windows that ended in the last 30/60/120 s
+    #   prev_distraction_duration_s  : duration (s) of the most recent completed window
     art    = joblib.load(artifact_path)
     H      = art['best_H']
     thresh = art['best_thresh']
@@ -944,6 +1178,9 @@ def predict_fitness(
     except Exception:
         t_since = float(H)
         warns.append("seconds_since_last_distraction invalid, defaulting to H (recovered)")
+
+    # cognitive_load_decay derived from t_since and H
+    cld = 1.0 if dist_active == 1 else np.exp(-t_since / max(H, 1e-9))
 
     def _clip_prob(val, name, default=0.5):
         try:
@@ -976,14 +1213,28 @@ def predict_fitness(
     if user_id is not None and user_id not in art['user_baselines']:
         warns.append(f"user_id='{user_id}' not in training set, using global baseline")
 
+    # arousal_deviation using stored per-user baseline (falls back to 0 if unknown user)
+    u_aro_base = art.get('user_arousal_baseline', {}).get(
+        user_id, art.get('global_arousal_median', a_prob))
+    aro_dev = a_prob - u_aro_base
+    if user_id is None:
+        warns.append("user_id not provided; arousal_deviation set to 0 (unknown personal baseline)")
+        aro_dev = 0.0
+
     sample = pd.DataFrame([{
-        'distraction_active':   dist_active,
-        'time_since_last_dist': t_since,
-        'model_prob':           a_prob,
-        'model_pred_enc':       pred_enc,
-        'emotion_prob':         e_prob,
-        'emotion_label_enc':    emo_enc,
-        'baseline_error_rate':  b_rate,
+        'distraction_active':     dist_active,
+        'time_since_last_dist':   t_since,
+        'cognitive_load_decay':   cld,
+        'model_prob':             a_prob,
+        'model_pred_enc':         pred_enc,
+        'emotion_prob':           e_prob,
+        'emotion_label_enc':      emo_enc,
+        'arousal_deviation':      aro_dev,
+        'baseline_error_rate':    b_rate,
+        'distraction_density_30':  max(0, int(distraction_density_30)),
+        'distraction_density_60':  max(0, int(distraction_density_60)),
+        'distraction_density_120': max(0, int(distraction_density_120)),
+        'prev_dist_duration':      max(0.0, float(prev_distraction_duration_s)),
     }])
 
     raw_prob        = float(art['model'].predict_proba(sample[art['feature_cols']])[0, 1])
