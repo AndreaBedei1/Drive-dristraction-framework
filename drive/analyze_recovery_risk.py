@@ -148,6 +148,7 @@ print("GLOBAL ANALYSIS")
 print(f"Baseline Error Rate: {p_error_baseline_global*100:.4f}%")
 print(f"Global Hangover: {global_limit} seconds")
 print(f"Total Distractions: {total_distractions}")
+print(f"Total Errors: {len(errors_dist)}")
 print(f"Global Avg Distraction Duration: {global_avg_duration:.2f} s")
 print("=" * 100)
 

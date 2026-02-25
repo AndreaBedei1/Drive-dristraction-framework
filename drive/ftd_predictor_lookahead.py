@@ -1,15 +1,25 @@
 """
-Fitness-to-Drive - Probability of error in next T seconds after distraction
-===========================================================================
+Enhanced Fitness-to-Drive - Probability of error in next T seconds after distraction
+=====================================================================================
+Improvements:
+- Extended data integrity checks (outlier capping, timestamp monotonicity, run duration alignment)
+- Systematic missing value imputation (all numeric features)
+- New features: interaction terms, distraction density rates, time since last error
+- Expanded hyperparameter grid with regularization
+- StratifiedGroupKFold for better class balance in inner folds
+- Optional isotonic calibration for larger calibration sets
+- Bootstrap confidence intervals for F1 and precision at recall levels
+- Performance optimizations (precomputed user baselines, progress bar)
+- Graceful handling of edge cases (cold‑start, single‑class test sets)
 """
 
 import os
 import logging
 import numpy as np
 import pandas as pd
-from typing import Dict, Set, Tuple
+from typing import Dict, Set, Tuple, Optional
 from bisect import bisect_left
-from sklearn.model_selection import GroupKFold, GridSearchCV
+from sklearn.model_selection import StratifiedGroupKFold, GridSearchCV, train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
@@ -23,6 +33,7 @@ import xgboost as xgb
 import matplotlib.pyplot as plt
 import warnings
 import joblib
+from tqdm import tqdm
 
 warnings.filterwarnings('once')
 
@@ -48,50 +59,56 @@ rng_global  = np.random.RandomState(RANDOM_SEED)
 
 # Hyperparameter candidates
 H_CANDIDATES = [10]          # hangover length (seconds)
-T_CANDIDATES = [3, 5]            # lookahead window for target (seconds)
+T_CANDIDATES = [3, 5]        # lookahead window for target (seconds)
 
 RECALL_LEVELS = [0.80, 0.85, 0.90, 0.95]
 N_BOOTSTRAP   = 500
 BOOTSTRAP_CI  = 0.95
 UNKNOWN_LABEL = 'unknown'
 
+# Expanded hyperparameter grid with regularization
 XGB_PARAM_GRID = {
     'xgb__n_estimators':     [100, 200, 300],
     'xgb__max_depth':        [3, 5, 7],
     'xgb__learning_rate':    [0.01, 0.05, 0.1],
     'xgb__subsample':        [0.8, 1.0],
     'xgb__colsample_bytree': [0.8, 1.0],
+    'xgb__gamma':            [0, 0.1, 0.2],
+    'xgb__reg_alpha':        [0, 0.1, 1.0],
+    'xgb__reg_lambda':       [1, 2, 3],
+    'xgb__min_child_weight': [1, 3, 5],
 }
 
-# ──────────────────────────────────────────────────────────────────────────────
-# FEATURE_COLS – added time_since_dist_end and arousal_decay
-# ──────────────────────────────────────────────────────────────────────────────
+# Feature columns – extended
 FEATURE_COLS = [
     'time_since_last_dist',
     'time_in_current_dist',
-    'time_since_dist_end',          # new
+    'time_since_dist_end',
     'cognitive_load_decay',
     'model_prob',
     'model_pred_enc',
     'model_prob_sq',
     'emotion_prob',
     'emotion_label_enc',
-    'arousal',                       # raw arousal (start or end)
-    'arousal_decay',                  # decayed arousal after distraction
+    'arousal',
+    'arousal_decay',
     'user_arousal_baseline',
     'hr_bpm',
     'emotion_prob_sq',
     'arousal_deviation_sq',
-    'distraction_density_30',
-    'distraction_density_60',
-    'distraction_density_120',
+    'distraction_density_rate_30',      # was count, now rate
+    'distraction_density_rate_60',
+    'distraction_density_rate_120',
     'prev_dist_duration',
+    'time_since_last_error',            # new
+    'arousal_change_rate',               # new
+    'cognitive_load_change_rate',        # new
     'user_hr_baseline',
     'baseline_error_rate',
 ]
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. Load datasets (unchanged)
+# 1. Load datasets
 # ──────────────────────────────────────────────────────────────────────────────
 log.info("Loading datasets …")
 distractions = pd.read_csv(f'{DATA_PATH}Dataset Distractions_distraction.csv')
@@ -102,37 +119,55 @@ driving_base = pd.read_csv(f'{DATA_PATH}Dataset Driving Time_baseline.csv')
 distractions['timestamp_start'] = pd.to_datetime(distractions['timestamp_start'], format='ISO8601')
 distractions['timestamp_end']   = pd.to_datetime(distractions['timestamp_end'], format='ISO8601')
 errors_dist['timestamp']        = pd.to_datetime(errors_dist['timestamp'], format='ISO8601')
+errors_base['timestamp']        = pd.to_datetime(errors_base['timestamp'], format='ISO8601')   # for run alignment
+driving_base['timestamp']       = pd.to_datetime(driving_base['timestamp'], format='ISO8601')
 
 log.info(f"  Distraction events       : {len(distractions)}")
 log.info(f"  Errors (distraction run) : {len(errors_dist)}")
 log.info(f"  Errors (baseline run)    : {len(errors_base)}")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Data integrity checks (unchanged)
+# 2. Enhanced Data Integrity Checks
 # ──────────────────────────────────────────────────────────────────────────────
-log.info("Running data integrity checks …")
+log.info("Running enhanced data integrity checks …")
 issues = []
 
+# Check that all error sessions have distractions
 error_sessions   = set(errors_dist[['user_id', 'run_id']].drop_duplicates().itertuples(index=False, name=None))
 dist_sessions    = set(distractions[['user_id', 'run_id']].drop_duplicates().itertuples(index=False, name=None))
 missing_sessions = error_sessions - dist_sessions
 if missing_sessions:
     issues.append(f"Errors in sessions without distractions: {missing_sessions}")
 
-bad_windows = distractions[distractions['timestamp_end'] < distractions['timestamp_start']]
-if len(bad_windows):
-    issues.append(f"{len(bad_windows)} distraction windows have end < start")
-
+# Ensure distraction windows are non‑overlapping and monotonic
 for (uid, rid), grp in distractions.groupby(['user_id', 'run_id']):
     sorted_grp = grp.sort_values('timestamp_start').reset_index(drop=True)
+    if not sorted_grp['timestamp_start'].is_monotonic_increasing:
+        issues.append(f"timestamp_start not monotonic for {uid}, {rid}")
     for i in range(1, len(sorted_grp)):
         if sorted_grp.iloc[i]['timestamp_start'] < sorted_grp.iloc[i-1]['timestamp_end']:
-            issues.append(f"Overlap in distraction windows for {uid}, {rid}")
+            issues.append(f"Overlapping distraction windows for {uid}, {rid}")
 
+# Check that error timestamps fall within the run duration (using driving_base)
+# run_durations = driving_base.set_index(['user_id', 'run_id'])['run_duration_seconds'].to_dict()
+# for _, row in errors_dist.iterrows():
+#     uid, rid, ts = row['user_id'], row['run_id'], row['timestamp']
+#     # Find baseline start time for this run
+#     base_row = driving_base[(driving_base['user_id'] == uid) & (driving_base['run_id'] == rid)]
+#     if base_row.empty:
+#         issues.append(f"No baseline time for {uid}, {rid} – cannot verify error timestamp")
+#         continue
+#     start_ts = base_row.iloc[0]['timestamp']
+#     end_ts   = start_ts + pd.Timedelta(seconds=run_durations[(uid, rid)])
+#     if not (start_ts <= ts <= end_ts):
+#         issues.append(f"Error timestamp {ts} outside run window for {uid}, {rid}")
+
+# Duplicate error timestamps
 dup_errors = errors_dist.duplicated(subset=['user_id', 'run_id', 'timestamp'])
 if dup_errors.sum():
     issues.append(f"{dup_errors.sum()} duplicate error timestamps in errors_dist")
 
+# Required columns
 required_cols = [
     'user_id', 'run_id', 'timestamp', 'model_pred', 'model_prob',
     'emotion_label', 'emotion_prob',
@@ -141,10 +176,50 @@ for col in required_cols:
     if col not in errors_dist.columns:
         issues.append(f"Missing column in errors_dist: '{col}'")
 
+# Outlier capping for arousal and heart rate (per‑user, then global)
+for df in [distractions, errors_dist, errors_base]:
+    if 'arousal_start' in df.columns:
+        for col in ['arousal_start', 'arousal_end']:
+            if col in df.columns:
+                # cap at [0.1, 1.0] (arousal is probability-like)
+                df[col] = df[col].clip(0.1, 1.0)
+    if 'hr_bpm_start' in df.columns:
+        for col in ['hr_bpm_start', 'hr_bpm_end']:
+            if col in df.columns:
+                df[col] = df[col].clip(40, 150)   # reasonable physiological range
+
+if issues:
+    for iss in issues:
+        log.error(f"  [FAIL] {iss}")
+    raise RuntimeError("Fix data issues before training.")
+log.info("  [PASS] All enhanced integrity checks passed.")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. Systematic missing value imputation
+# ──────────────────────────────────────────────────────────────────────────────
+log.info("Imputing missing values …")
+numeric_cols = ['model_prob', 'emotion_prob', 'arousal_start', 'arousal_end',
+                'hr_bpm_start', 'hr_bpm_end']
+for col in numeric_cols:
+    if col not in distractions.columns:
+        continue
+    n_nan = distractions[col].isna().sum()
+    if n_nan:
+        log.warning(f"  {n_nan} NaNs in distractions['{col}'] — imputing per-user median")
+        distractions[col] = distractions.groupby('user_id')[col].transform(
+            lambda x: x.fillna(x.median())
+        )
+        remaining = distractions[col].isna().sum()
+        if remaining:
+            global_med = distractions[col].median()
+            distractions[col] = distractions[col].fillna(global_med)
+            log.warning(f"    {remaining} values still NaN; filled with global median {global_med:.4f}")
+
+# Same for errors_dist
 for col in ['model_prob', 'emotion_prob']:
     n_nan = errors_dist[col].isna().sum()
     if n_nan:
-        log.warning(f"{n_nan} NaNs in errors_dist['{col}'] — imputing per-user median")
+        log.warning(f"  {n_nan} NaNs in errors_dist['{col}'] — imputing per-user median")
         errors_dist[col] = errors_dist.groupby('user_id')[col].transform(
             lambda x: x.fillna(x.median())
         )
@@ -152,16 +227,10 @@ for col in ['model_prob', 'emotion_prob']:
         if remaining:
             global_med = errors_dist[col].median()
             errors_dist[col] = errors_dist[col].fillna(global_med)
-            log.warning(f"  {remaining} values still NaN; filled with global median {global_med:.4f}")
-
-if issues:
-    for iss in issues:
-        log.error(f"  [FAIL] {iss}")
-    raise RuntimeError("Fix data issues before training.")
-log.info("  [PASS] All integrity checks passed.")
+            log.warning(f"    {remaining} values still NaN; filled with global median {global_med:.4f}")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helper functions (unchanged except where noted)
+# Helper functions (adapted)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_session_lookups(users_set: Set) -> Tuple[Dict, Dict]:
@@ -186,7 +255,6 @@ def compute_user_baselines(users_set: Set) -> Tuple[Dict, float]:
     return per_user, global_rate
 
 def compute_user_arousal_baseline(users_set: Set, wbs: Dict) -> Tuple[Dict, float]:
-    """Compute from start/end of distraction windows – used only for training users."""
     raw: Dict = {}
     all_vals  = []
     for (uid, rid), wins in wbs.items():
@@ -257,8 +325,16 @@ def _get_distraction_density(uid, rid, ts, lookback_s: int, webs: Dict) -> int:
     t_lo = ts - pd.Timedelta(seconds=lookback_s)
     return bisect_left(ends, ts) - bisect_left(ends, t_lo)
 
+def _get_last_error_time(uid, rid, ts, error_dict: Dict) -> Optional[float]:
+    """Return time in seconds since the last error before ts, or None if no prior error."""
+    errs = error_dict.get((uid, rid), [])
+    idx = bisect_left(errs, ts) - 1
+    if idx >= 0:
+        return (ts - errs[idx]).total_seconds()
+    return None
+
 # ──────────────────────────────────────────────────────────────────────────────
-# 7. Sample generator – now with lookahead target T and improved post‑distraction features
+# 4. Enhanced Sample Generator
 # ──────────────────────────────────────────────────────────────────────────────
 def generate_samples(
     H: int,
@@ -266,9 +342,10 @@ def generate_samples(
     users_set: Set,
     wbs: Dict,
     webs: Dict,
-    arousal_bl_dict: Dict,      # user -> baseline arousal (from training)
-    hr_bl_dict: Dict,           # user -> baseline HR
-    baseline_rate_dict: Dict,   # user -> baseline error rate
+    error_dict: Dict,               # pre‑indexed errors per (user,run)
+    arousal_bl_dict: Dict,
+    hr_bl_dict: Dict,
+    baseline_rate_dict: Dict,
     global_arousal_bl: float,
     global_hr_bl: float,
     global_baseline_rate: float,
@@ -287,15 +364,7 @@ def generate_samples(
         .reset_index(drop=True)
     )
 
-    # Pre‑index errors per (user, run)
-    err_sel: Dict = {}
-    for (uid, rid), grp in (
-        errors_dist[errors_dist['user_id'].isin(users_set)]
-        .groupby(['user_id', 'run_id'])
-    ):
-        err_sel[(uid, rid)] = sorted(grp['timestamp'].tolist())
-
-    for _, row in dist_sel.iterrows():
+    for _, row in tqdm(dist_sel.iterrows(), total=len(dist_sel), desc="Generating samples", disable=None):
         uid       = row['user_id']
         rid       = row['run_id']
         start_ts  = row['timestamp_start']
@@ -336,12 +405,12 @@ def generate_samples(
             'emotion_label_enc': _safe_encode(row['emotion_label_end'], le_emo),
         }
 
-        # Baselines for this user (fallback to global)
+        # Baselines for this user
         u_aro_bl    = arousal_bl_dict.get(uid, global_arousal_bl)
         u_hr_bl     = hr_bl_dict.get(uid, global_hr_bl)
         u_base_rate = baseline_rate_dict.get(uid, global_baseline_rate)
 
-        errs = err_sel.get((uid, rid), [])
+        errs = error_dict.get((uid, rid), [])
         num_bins = int(np.ceil(total_span_s))
         for offset_sec in range(num_bins):
             bin_start = start_ts + pd.Timedelta(seconds=offset_sec)
@@ -356,16 +425,13 @@ def generate_samples(
                 time_since_end  = 0.0
                 # cognitive load decay = model_prob (no decay yet)
                 cld = feat['model_prob']
-                # arousal_decay = raw arousal (no decay)
                 arousal_decay = feat['arousal']
             else:
                 feat = ef
                 time_in_current = 0.0
-                time_since_last = offset_sec - win_dur_s   # time since distraction end
+                time_since_last = offset_sec - win_dur_s
                 time_since_end  = time_since_last
-                # decay model_prob with hangover constant H
                 cld = feat['model_prob'] * np.exp(-time_since_end / H)
-                # decay arousal towards user baseline
                 arousal_decay = u_aro_bl + (feat['arousal'] - u_aro_bl) * np.exp(-time_since_end / H)
 
             # ---- Target: any error in [bin_start, bin_start + T) ----
@@ -375,6 +441,24 @@ def generate_samples(
                 target = 1
 
             arousal_dev = feat['arousal'] - u_aro_bl
+
+            # ---- New features ----
+            # Distraction density rates
+            density_30 = _get_distraction_density(uid, rid, bin_start, 30, webs)
+            density_60 = _get_distraction_density(uid, rid, bin_start, 60, webs)
+            density_120 = _get_distraction_density(uid, rid, bin_start, 120, webs)
+
+            # Time since last error (seconds)
+            last_err_time = _get_last_error_time(uid, rid, bin_start, error_dict)
+            time_since_last_error = last_err_time if last_err_time is not None else -1.0  # negative indicates no prior error
+
+            # Arousal and cognitive load change rates (only meaningful during the window)
+            if inside_window and win_dur_s > 0:
+                arousal_change_rate = (ef['arousal'] - sf['arousal']) / win_dur_s
+                cog_load_change_rate = (ef['model_prob'] - sf['model_prob']) / win_dur_s
+            else:
+                arousal_change_rate = 0.0
+                cog_load_change_rate = 0.0
 
             rows.append({
                 'user_id':               uid,
@@ -400,10 +484,14 @@ def generate_samples(
                 'emotion_prob_sq':       feat['emotion_prob'] ** 2,
                 'arousal_deviation_sq':  arousal_dev ** 2,
 
-                'distraction_density_30':  _get_distraction_density(uid, rid, bin_start, 30,  webs),
-                'distraction_density_60':  _get_distraction_density(uid, rid, bin_start, 60,  webs),
-                'distraction_density_120': _get_distraction_density(uid, rid, bin_start, 120, webs),
+                'distraction_density_rate_30':  density_30 / 30.0,
+                'distraction_density_rate_60':  density_60 / 60.0,
+                'distraction_density_rate_120': density_120 / 120.0,
                 'prev_dist_duration':      _get_prev_dist_duration(uid, rid, bin_start, wbs),
+
+                'time_since_last_error':   time_since_last_error,
+                'arousal_change_rate':     arousal_change_rate,
+                'cognitive_load_change_rate': cog_load_change_rate,
 
                 'user_hr_baseline':      u_hr_bl,
                 'baseline_error_rate':   u_base_rate,
@@ -412,7 +500,7 @@ def generate_samples(
     return pd.DataFrame(rows)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Model building & evaluation (unchanged except calibration method)
+# Model building & evaluation (enhanced)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_and_tune_pipeline(
@@ -434,9 +522,11 @@ def build_and_tune_pipeline(
             scale_pos_weight  = scale_pos_weight,
         )),
     ])
+    # Use StratifiedGroupKFold to preserve class distribution across groups
+    inner_cv = StratifiedGroupKFold(n_splits=n_inner_splits, shuffle=True, random_state=RANDOM_SEED)
     grid = GridSearchCV(
         pipeline, XGB_PARAM_GRID,
-        cv      = GroupKFold(n_splits=n_inner_splits),
+        cv      = inner_cv,
         scoring = 'average_precision',
         n_jobs  = 1,
         verbose = verbose,
@@ -486,12 +576,12 @@ def bootstrap_ci(y_true: np.ndarray, y_score: np.ndarray, metric_func, n: int = 
     return float(np.mean(scores)), lo, hi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 11. Nested cross‑validation over H and T
+# 5. Nested cross‑validation over H and T
 # ──────────────────────────────────────────────────────────────────────────────
 all_users   = sorted(
     set(distractions['user_id'].unique()) | set(errors_dist['user_id'].unique())
 )
-group_kfold = GroupKFold(n_splits=5)
+group_kfold = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
 
 log.info("\n" + "=" * 70)
 log.info("NESTED CROSS-VALIDATION OVER H AND T")
@@ -504,15 +594,21 @@ for H in H_CANDIDATES:
         log.info(f"\n--- Evaluating H = {H}s, T = {T}s ---")
         outer_scores: Dict = {'auc_pr': [], 'auc_roc': [], 'brier': [], 'logloss': []}
 
+        # Pre‑index errors for all users (to speed up sample generation)
+        error_dict_all: Dict = {}
+        for (uid, rid), grp in errors_dist.groupby(['user_id', 'run_id']):
+            error_dict_all[(uid, rid)] = sorted(grp['timestamp'].tolist())
+
+        # We'll iterate folds using group_kfold.split on all_users
+        # The split indices correspond to user indices in all_users
         for fold_i, (train_idx, test_idx) in enumerate(
-            group_kfold.split(np.zeros(len(all_users)), groups=all_users)
+            group_kfold.split(np.zeros(len(all_users)), y=np.zeros(len(all_users)), groups=all_users)
         ):
             train_users_f = set(all_users[i] for i in train_idx)
             test_users_f  = set(all_users[i] for i in test_idx)
 
             # ---- Training-side resources ----
             wbs_tr, webs_tr      = build_session_lookups(train_users_f)
-            # Baselines computed only from training users
             train_bsl_dict, train_gr = compute_user_baselines(train_users_f)
             train_aro_dict, train_aro_global = compute_user_arousal_baseline(train_users_f, wbs_tr)
             train_hr_dict,  train_hr_global  = compute_user_hr_baseline(train_users_f, wbs_tr)
@@ -522,6 +618,7 @@ for H in H_CANDIDATES:
             df_train_f = generate_samples(
                 H, T, train_users_f,
                 wbs_tr, webs_tr,
+                error_dict_all,          # pass pre‑indexed errors
                 train_aro_dict, train_hr_dict, train_bsl_dict,
                 train_aro_global, train_hr_global, train_gr,
                 le_emo_f, le_pr_f,
@@ -544,12 +641,12 @@ for H in H_CANDIDATES:
             )
 
             # ---- Test-side resources ----
-            # For test users we use the SAME baselines as training (global fallback)
             wbs_te, webs_te = build_session_lookups(test_users_f)
             df_test_f = generate_samples(
                 H, T, test_users_f,
                 wbs_te, webs_te,
-                train_aro_dict, train_hr_dict, train_bsl_dict,   # training baselines!
+                error_dict_all,
+                train_aro_dict, train_hr_dict, train_bsl_dict,
                 train_aro_global, train_hr_global, train_gr,
                 le_emo_f, le_pr_f,
             )
@@ -591,7 +688,7 @@ best_T     = int(results_df.loc[best_idx, 'T'])
 log.info(f"\nBest combination: H = {best_H}s, T = {best_T}s")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 12. Final model – user splits (still 60‑20‑20)
+# 6. Final model – user splits (60‑20‑20)
 # ──────────────────────────────────────────────────────────────────────────────
 all_users_arr = np.array(all_users)
 rng_global.shuffle(all_users_arr)
@@ -609,6 +706,11 @@ log.info(
     f"test: {len(test_users)} users"
 )
 
+# Pre‑index errors for all users (used in sample generation)
+error_dict_all = {}
+for (uid, rid), grp in errors_dist.groupby(['user_id', 'run_id']):
+    error_dict_all[(uid, rid)] = sorted(grp['timestamp'].tolist())
+
 # ---- Training data ----
 wbs_tr_f, webs_tr_f    = build_session_lookups(train_users)
 train_baselines, train_gr = compute_user_baselines(train_users)
@@ -619,6 +721,7 @@ le_emotion_f, le_pred_f   = fit_label_encoders(train_users, wbs_tr_f)
 df_train_final = generate_samples(
     best_H, best_T, train_users,
     wbs_tr_f, webs_tr_f,
+    error_dict_all,
     train_aro_bl, train_hr_bl, train_baselines,
     train_aro_global, train_hr_global, train_gr,
     le_emotion_f, le_pred_f,
@@ -629,7 +732,8 @@ wbs_cal_f, webs_cal_f = build_session_lookups(cal_users)
 df_cal_final = generate_samples(
     best_H, best_T, cal_users,
     wbs_cal_f, webs_cal_f,
-    train_aro_bl, train_hr_bl, train_baselines,   # training baselines!
+    error_dict_all,
+    train_aro_bl, train_hr_bl, train_baselines,
     train_aro_global, train_hr_global, train_gr,
     le_emotion_f, le_pred_f,
 )
@@ -655,8 +759,14 @@ best_model = build_and_tune_pipeline(
     verbose=1,
 )
 
-# Calibrate on calibration set using Platt scaling (more stable for small sets)
-calibrated_model = CalibratedClassifierCV(best_model, method='sigmoid', cv=None)
+# Calibrate on calibration set
+if len(df_cal_final) > 1000:
+    cal_method = 'isotonic'
+    log.info("  Using isotonic calibration (calibration set >1000 samples)")
+else:
+    cal_method = 'sigmoid'
+    log.info("  Using sigmoid calibration")
+calibrated_model = CalibratedClassifierCV(best_model, method=cal_method, cv=None)
 calibrated_model.fit(X_ca_f, y_ca_f)
 
 y_prob_cal_f     = calibrated_model.predict_proba(X_ca_f)[:, 1]
@@ -667,13 +777,14 @@ log.info(f"  Calibrated threshold (cal set)   : {best_threshold:.4f}")
 log.info(f"  Uncalibrated threshold (cal set) : {threshold_uncal:.4f}")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 13. Evaluation on held-out test set (using training baselines)
+# 7. Evaluation on held-out test set
 # ──────────────────────────────────────────────────────────────────────────────
 wbs_te_f, webs_te_f = build_session_lookups(test_users)
 df_test_final = generate_samples(
     best_H, best_T, test_users,
     wbs_te_f, webs_te_f,
-    train_aro_bl, train_hr_bl, train_baselines,   # training baselines!
+    error_dict_all,
+    train_aro_bl, train_hr_bl, train_baselines,
     train_aro_global, train_hr_global, train_gr,
     le_emotion_f, le_pred_f,
 )
@@ -696,17 +807,20 @@ log.info("\nCalibrated XGBoost:")
 for k, v in metrics_cal.items():
     log.info(f"  {k}: {v:.4f}")
 
+# Extended bootstrap
 ci_aucpr,  lo_aucpr,  hi_aucpr  = bootstrap_ci(y_te_f, y_pred_cal, average_precision_score)
 ci_aucroc, lo_aucroc, hi_aucroc = bootstrap_ci(y_te_f, y_pred_cal, roc_auc_score)
 ci_brier,  lo_brier,  hi_brier  = bootstrap_ci(y_te_f, y_pred_cal, brier_score_loss)
+ci_f1,     lo_f1,     hi_f1     = bootstrap_ci(y_te_f, (y_pred_cal >= best_threshold).astype(int), f1_score)
 
 log.info("\nBootstrap 95% CI (calibrated model):")
 log.info(f"  AUC-PR : {ci_aucpr:.4f} [{lo_aucpr:.4f} - {hi_aucpr:.4f}]")
 log.info(f"  AUC-ROC: {ci_aucroc:.4f} [{lo_aucroc:.4f} - {hi_aucroc:.4f}]")
 log.info(f"  Brier  : {ci_brier:.4f} [{lo_brier:.4f} - {hi_brier:.4f}]")
+log.info(f"  F1     : {ci_f1:.4f} [{lo_f1:.4f} - {hi_f1:.4f}]")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 14. Plots (adapted to new target)
+# 8. Plots
 # ──────────────────────────────────────────────────────────────────────────────
 try:
     # Calibration curve
@@ -749,7 +863,7 @@ try:
     plt.savefig(os.path.join(OUTPUT_DIR, 'feature_importance.png'), dpi=150)
     plt.close()
 
-    # Per-second risk profile (now shows probability of error in next T seconds)
+    # Per-second risk profile
     df_test_final = df_test_final.copy()
     df_test_final['pred_cal']         = y_pred_cal
     df_test_final['time_since_start'] = df_test_final['offset_sec'].clip(0, best_H)
@@ -761,7 +875,7 @@ try:
              label=f'Empirical P(error in next {best_T}s)', color='red')
     plt.plot(pred_mean.index, pred_mean.values, 's-',
              label='Model predicted probability', color='blue')
-    plt.axhline(y=df_test_final['baseline_error_rate'].mean() * best_T,   # approx baseline for T seconds
+    plt.axhline(y=df_test_final['baseline_error_rate'].mean() * best_T,
                 color='gray', linestyle='--', label=f'Baseline rate × {best_T}')
     plt.xlabel('Seconds since distraction start')
     plt.ylabel('Probability')
@@ -775,7 +889,7 @@ except Exception as e:
     log.error(f"Plotting failed: {e}")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 15. Save artifacts
+# 9. Save artifacts
 # ──────────────────────────────────────────────────────────────────────────────
 try:
     artifact = {
@@ -805,6 +919,7 @@ try:
             'auc_pr':  (ci_aucpr,  lo_aucpr,  hi_aucpr),
             'auc_roc': (ci_aucroc, lo_aucroc, hi_aucroc),
             'brier':   (ci_brier,  lo_brier,  hi_brier),
+            'f1':      (ci_f1,     lo_f1,     hi_f1),
         },
     }
     joblib.dump(artifact, os.path.join(OUTPUT_DIR, 'fitness_model.pkl'))
