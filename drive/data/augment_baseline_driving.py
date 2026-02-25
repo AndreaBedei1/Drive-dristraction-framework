@@ -55,11 +55,11 @@ if __name__ == "__main__":
     ]
     
     # Base timestamp – we'll use the last timestamp in the file as reference
-    last_timestamp_str = df_original['timestamp'].iloc[-1]
+    last_timestamp_str = '2026-02-19T10:24:42.517342' #df_original['timestamp'].iloc[-1]
     base_time = datetime.fromisoformat(last_timestamp_str)
     
     # Define the synthetic users and runs
-    user_ids = [f'participant_{i:02d}' for i in range(19, 26)]   # 20..25
+    user_ids = [f'participant_{i:02d}' for i in range(9, 15)]   # 20..25
     run_range = range(1, 4)                                      # 1,2,3
     
     all_synthetic_rows = []

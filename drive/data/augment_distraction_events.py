@@ -40,7 +40,9 @@ def augment_distractions(
     first_run_timestamp='2026-02-18T15:52:21.858625',
     new_users=None,
     new_runs=None,
-    noise_scale=0.05
+    noise_scale=0.05,
+    min_gap_seconds=5,
+    max_gap_seconds=20
 ):
     if new_users is None:
         new_users = [f'participant_{i:02d}' for i in range(19, 26)]
@@ -66,10 +68,8 @@ def augment_distractions(
     # Ensure all continuous columns exist
     for col in continuous_cols:
         if col not in df_dist.columns:
-            # If missing, create column with NaN (should not happen)
             df_dist[col] = np.nan
         else:
-            # Convert empty strings to NaN and coerce to float
             df_dist[col] = pd.to_numeric(df_dist[col], errors='coerce')
 
     categorical_cols = [
@@ -82,7 +82,6 @@ def augment_distractions(
         if col not in df_dist.columns:
             df_dist[col] = ''
         else:
-            # Replace empty strings with NaN for consistency
             df_dist[col] = df_dist[col].replace('', np.nan)
 
     # Convert timestamp columns
@@ -92,16 +91,12 @@ def augment_distractions(
     # ------------------------------------------------------------------
     # Prepare statistics for imputation
     # ------------------------------------------------------------------
-    # Means and stds for continuous columns
     cont_means = {col: df_dist[col].mean() for col in continuous_cols}
     cont_stds  = {col: df_dist[col].std() for col in continuous_cols}
 
-    # Pools of observed values for categorical columns
     cat_value_pools = {}
     for col in categorical_cols:
-        # Get all non-null, non-empty values
         vals = df_dist[col].dropna().unique()
-        # Convert any non-string to string (just in case)
         vals = [str(v) for v in vals if pd.notna(v)]
         cat_value_pools[col] = vals
 
@@ -113,26 +108,11 @@ def augment_distractions(
     if not event_counts:
         event_counts = [1]
 
-    # 2. Relative offsets
-    rel_offsets = []
-    for (user, run), group in df_dist.groupby(['user_id', 'run_id']):
-        run_start = group['timestamp_start'].min()
-        run_end   = group['timestamp_end'].max()
-        run_dur = (run_end - run_start).total_seconds()
-        if run_dur <= 0:
-            continue
-        for _, row in group.iterrows():
-            offset = (row['timestamp_start'] - run_start).total_seconds()
-            if 0 <= offset <= run_dur:
-                rel_offsets.append(offset / run_dur)
-    if not rel_offsets:
-        rel_offsets = [0.5]
-
-    # 3. Event durations
+    # 2. Event durations (seconds)
     durations = (df_dist['timestamp_end'] - df_dist['timestamp_start']).dt.total_seconds().values
     durations = durations[durations > 0]
 
-    # 4. Frame rate
+    # 3. Frame rate
     delta_frame = df_dist['frame_end'] - df_dist['frame_start']
     delta_sim   = df_dist['sim_time_end'] - df_dist['sim_time_start']
     valid = (delta_sim > 0) & (delta_frame > 0)
@@ -162,7 +142,7 @@ def augment_distractions(
             current_sim += gap_seconds
 
     # ------------------------------------------------------------------
-    # Generate synthetic rows
+    # Generate synthetic rows for each new (user, run)
     # ------------------------------------------------------------------
     synthetic_rows = []
     run_dur = 600.0
@@ -171,27 +151,31 @@ def augment_distractions(
         for run in new_runs:
             run_real_start, run_sim_start = run_starts[(user, run)]
 
+            # Sample number of events for this run
             n_events = np.random.choice(event_counts)
+
+            # Sequential generation of events
             events = []
-            attempts_per_event = 20
+            current_time = 0.0
             for _ in range(n_events):
-                rel_offset = np.random.choice(rel_offsets)
-                offset = rel_offset * run_dur
+                # For the first event, gap = 0; otherwise uniform gap in [min_gap, max_gap]
+                if current_time == 0:
+                    gap = 0
+                else:
+                    gap = random.uniform(min_gap_seconds, max_gap_seconds)
+
+                # Sample duration from empirical distribution
                 duration = np.random.choice(durations)
-                attempts = 0
-                while offset + duration > run_dur and attempts < attempts_per_event:
-                    rel_offset = np.random.choice(rel_offsets)
-                    offset = rel_offset * run_dur
-                    duration = np.random.choice(durations)
-                    attempts += 1
-                if offset + duration > run_dur:
-                    duration = run_dur - offset - 0.001
-                    if duration <= 0:
-                        continue
-                events.append((offset, duration))
 
-            events.sort(key=lambda x: x[0])
+                start = current_time + gap
+                # If event would exceed the run end, stop adding more events
+                if start + duration > run_dur:
+                    break
 
+                events.append((start, duration))
+                current_time = start + duration
+
+            # Generate each event in the sequence
             for offset, duration in events:
                 new_start_ts = run_real_start + timedelta(seconds=offset)
                 new_end_ts   = new_start_ts + timedelta(seconds=duration)
@@ -250,7 +234,7 @@ if __name__ == "__main__":
         distractions_file='Dataset Distractions_distraction.csv',
         output_file='Dataset Distractions_distraction.csv',
         first_run_timestamp='2026-02-21T08:52:21.858625',
-        new_users=[f'participant_{i:02d}' for i in range(19, 26)],
+        new_users=[f'participant_{i:02d}' for i in range(9, 15)],
         new_runs=[1, 2, 3, 4],
         noise_scale=0.05
     )

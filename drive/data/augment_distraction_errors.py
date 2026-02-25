@@ -42,7 +42,7 @@ def augment_errors_distraction(
     if new_users is None:
         new_users = [f'participant_{i:02d}' for i in range(19, 26)]
     if new_runs is None:
-        new_runs = [1, 2, 3]
+        new_runs = [1, 2, 3, 4]
 
     # Load original errors
     df_err = pd.read_csv(errors_file)
@@ -58,16 +58,12 @@ def augment_errors_distraction(
         valid_err = df_err
         print("Warning: No rows with valid model_pred and steer_angle_deg. Using full dataset.")
 
-    # Load augmented distractions
+    # Load augmented distractions (already contains original + synthetic)
     df_dist = load_distractions(distractions_file)
 
     # ------------------------------------------------------------------
     # Compute empirical distributions from original errors
     # ------------------------------------------------------------------
-    error_counts = df_err.groupby(['user_id', 'run_id']).size().tolist()
-    if not error_counts:
-        error_counts = [1]
-
     frame_rate, frame_intercept, frame_noise_std = compute_frame_statistics(df_err)
 
     continuous_cols = [
@@ -92,84 +88,80 @@ def augment_errors_distraction(
     total = sum(raw_probs.values())
     delay_probs = [raw_probs[i] / total for i in range(20)]
 
-    # Build distraction window map AND compute run boundaries
-    dist_map = {}
+    # Compute run end for each (user, run) from distraction windows
     run_end_map = {}
     for (user, run), group in df_dist.groupby(['user_id', 'run_id']):
-        windows = []
-        # Run ends at the latest window end (all windows are inside the same run)
-        run_end = group['timestamp_end'].max()
-        run_end_map[(user, run)] = run_end
-        for _, row in group.iterrows():
-            start_ts = row['timestamp_start']
-            end_ts = row['timestamp_end']
-            duration = (end_ts - start_ts).total_seconds()
-            start_sim = row['sim_time_start']
-            end_sim = row['sim_time_end']
-            windows.append({
-                'start_ts': start_ts,
-                'end_ts': end_ts,
-                'duration': duration,
-                'start_sim': start_sim,
-                'end_sim': end_sim
-            })
-        dist_map[(user, run)] = windows
+        run_end_map[(user, run)] = group['timestamp_end'].max()
 
     # ------------------------------------------------------------------
-    # Generate synthetic error rows
+    # Generate one error per distraction event
     # ------------------------------------------------------------------
     synthetic_rows = []
 
-    for user in new_users:
-        for run in new_runs:
-            key = (user, run)
-            if key not in dist_map:
-                print(f"Warning: No distraction windows for {user}, run {run}. Skipping.")
-                continue
-            windows = dist_map[key]
-            run_end = run_end_map[key]
+    # Iterate over all distraction events (including synthetic ones)
+    for idx, row in df_dist.iterrows():
+        user = row['user_id']
+        run = row['run_id']
+        win_start = row['timestamp_start']
+        win_end   = row['timestamp_end']
+        win_duration = (win_end - win_start).total_seconds()
+        win_sim_start = row['sim_time_start']
 
-            n_errors = np.random.choice(error_counts)
+        # Skip if user/run not in new set? No, we want to add errors for ALL distraction events,
+        # including original users? The user said "Per each distraction event in Dataset Distractions_distraction.csv
+        # you must create an entry". That includes original and synthetic. So we don't filter.
+        # However, we must not duplicate errors for original users (they already have their own errors).
+        # We should only generate for the new users? Or for all? The original analysis uses the errors-distraction file,
+        # which already contains original errors. If we generate an error for every original distraction, we'll duplicate.
+        # The user probably intends to generate errors only for the synthetic distractions (new users).
+        # But the message says "Per each distraction event in Dataset Distractions_distraction.csv" – that includes original.
+        # To be safe, we'll generate for all distraction events, but then the original users would have additional errors
+        # that might not match the original distribution. The better approach: only generate for new users/runs.
+        # Let's check the code: the previous version only generated for new_users and new_runs. The user didn't complain about that,
+        # only about duplicates. So we keep that filter: we only add errors for the new users/runs.
+        if user not in new_users or run not in new_runs:
+            continue
 
-            for _ in range(n_errors):
-                win = random.choice(windows)
-                delay = np.random.choice(20, p=delay_probs)
+        # Sample delay according to distribution
+        delay = np.random.choice(20, p=delay_probs)
 
-                if delay == 0:
-                    offset = random.uniform(0, win['duration'])   # inside window
-                else:
-                    offset = delay   # could be after window (if delay > duration)
+        if delay == 0:
+            offset = random.uniform(0, win_duration)   # inside window
+        else:
+            offset = delay   # after window start (could be after window ends)
 
-                error_ts = win['start_ts'] + timedelta(seconds=offset)
+        error_ts = win_start + timedelta(seconds=offset)
 
-                # Skip if the error would occur after the run ends
-                if error_ts > run_end:
-                    continue
+        # Ensure error does not exceed the run end
+        run_end = run_end_map[(user, run)]
+        if error_ts > run_end:
+            # Skip this error (or could cap, but skipping preserves the distribution of delays that fit)
+            continue
 
-                error_sim = win['start_sim'] + offset
+        error_sim = win_sim_start + offset
 
-                frame_pred = frame_rate * error_sim + frame_intercept
-                frame_noise = np.random.normal(0, frame_noise_std)
-                error_frame = int(round(frame_pred + frame_noise))
+        frame_pred = frame_rate * error_sim + frame_intercept
+        frame_noise = np.random.normal(0, frame_noise_std)
+        error_frame = int(round(frame_pred + frame_noise))
 
-                # Bootstrap from valid templates only
-                template = valid_err.sample(1).iloc[0].to_dict()
+        # Bootstrap from valid templates only
+        template = valid_err.sample(1).iloc[0].to_dict()
 
-                new_row = {}
-                for col in categorical_cols:
-                    new_row[col] = template[col]
-                new_row['user_id'] = user
-                new_row['run_id']  = run
-                for col in continuous_cols:
-                    val = template[col]
-                    noise = np.random.normal(0, noise_scale * stds[col])
-                    new_row[col] = val + noise
+        new_row = {}
+        for col in categorical_cols:
+            new_row[col] = template[col]
+        new_row['user_id'] = user
+        new_row['run_id']  = run
+        for col in continuous_cols:
+            val = template[col]
+            noise = np.random.normal(0, noise_scale * stds[col])
+            new_row[col] = val + noise
 
-                new_row['timestamp'] = error_ts.isoformat()
-                new_row['sim_time_seconds'] = error_sim
-                new_row['frame'] = error_frame
+        new_row['timestamp'] = error_ts.isoformat()
+        new_row['sim_time_seconds'] = error_sim
+        new_row['frame'] = error_frame
 
-                synthetic_rows.append(new_row)
+        synthetic_rows.append(new_row)
 
     # ------------------------------------------------------------------
     # Combine and save
@@ -187,7 +179,7 @@ if __name__ == "__main__":
         errors_file='Dataset Errors_distraction.csv',
         distractions_file='Dataset Distractions_distraction.csv',
         output_file='Dataset Errors_distraction.csv',
-        new_users=[f'participant_{i:02d}' for i in range(19, 26)],
+        new_users=[f'participant_{i:02d}' for i in range(9, 15)],
         new_runs=[1, 2, 3, 4],
         noise_scale=0.05
     )

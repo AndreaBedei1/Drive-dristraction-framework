@@ -99,9 +99,9 @@ errors_dist  = pd.read_csv(f'{DATA_PATH}Dataset Errors_distraction.csv')
 errors_base  = pd.read_csv(f'{DATA_PATH}Dataset Errors_baseline.csv')
 driving_base = pd.read_csv(f'{DATA_PATH}Dataset Driving Time_baseline.csv')
 
-distractions['timestamp_start'] = pd.to_datetime(distractions['timestamp_start'])
-distractions['timestamp_end']   = pd.to_datetime(distractions['timestamp_end'])
-errors_dist['timestamp']        = pd.to_datetime(errors_dist['timestamp'])
+distractions['timestamp_start'] = pd.to_datetime(distractions['timestamp_start'], format='ISO8601')
+distractions['timestamp_end']   = pd.to_datetime(distractions['timestamp_end'], format='ISO8601')
+errors_dist['timestamp']        = pd.to_datetime(errors_dist['timestamp'], format='ISO8601')
 
 log.info(f"  Distraction events       : {len(distractions)}")
 log.info(f"  Errors (distraction run) : {len(errors_dist)}")

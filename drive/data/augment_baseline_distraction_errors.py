@@ -200,7 +200,7 @@ def augment_errors_with_new_users(
             # run_dur may be slightly different from 600s due to mixup, but we cap window at 600s as requested
             # However, if run_dur < 600, we should limit to run_dur to avoid going beyond run end.
             max_offset = min(600, info['run_duration'])  # seconds
-            n_synthetic_per_run = random.randint(10,20) 
+            n_synthetic_per_run = random.randint(2,6) 
             for _ in range(n_synthetic_per_run):
                 # Bootstrap a random original error row
                 template = df_err.sample(n=1).iloc[0].to_dict()
@@ -259,7 +259,7 @@ if __name__ == "__main__":
         errors_file='Dataset Errors_baseline.csv',
         driving_time_file='Dataset Driving Time_baseline.csv',
         output_file='Dataset Errors_baseline.csv',
-        new_users=[f'participant_{i:02d}' for i in range(19, 26)],  # 19..25
+        new_users=[f'participant_{i:02d}' for i in range(9, 15)],  # 19..25
         new_runs=[1, 2, 3],
         noise_scale=0.05
     )
