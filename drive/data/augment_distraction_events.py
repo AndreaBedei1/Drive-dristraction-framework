@@ -85,8 +85,8 @@ def augment_distractions(
             df_dist[col] = df_dist[col].replace('', np.nan)
 
     # Convert timestamp columns
-    df_dist['timestamp_start'] = pd.to_datetime(df_dist['timestamp_start'])
-    df_dist['timestamp_end']   = pd.to_datetime(df_dist['timestamp_end'])
+    df_dist['timestamp_start'] = pd.to_datetime(df_dist['timestamp_start'], format="ISO8601")
+    df_dist['timestamp_end']   = pd.to_datetime(df_dist['timestamp_end'], format="ISO8601")
 
     # ------------------------------------------------------------------
     # Prepare statistics for imputation
@@ -208,6 +208,21 @@ def augment_distractions(
                     noise = np.random.normal(0, noise_scale * cont_stds[col])
                     new_row[col] = val + noise
 
+                # -------------------- Apply constraints --------------------
+                # Arousal must be in [0, 1]
+                new_row['arousal_start'] = np.clip(new_row['arousal_start'], 0.0, 1.0)
+                new_row['arousal_end']   = np.clip(new_row['arousal_end'], 0.0, 1.0)
+
+                # Probabilities must be in [0, 1]
+                for prob_col in ['model_prob_start', 'model_prob_end',
+                                 'emotion_prob_start', 'emotion_prob_end']:
+                    new_row[prob_col] = np.clip(new_row[prob_col], 0.0, 1.0)
+
+                # model_pred_start must be empty
+                new_row['model_pred_start'] = ''
+
+                # ----------------------------------------------------------
+
                 # Add generated time columns
                 new_row['timestamp_start'] = new_start_ts.isoformat()
                 new_row['timestamp_end']   = new_end_ts.isoformat()
@@ -229,12 +244,3 @@ def augment_distractions(
     print(f"Added {len(synthetic_rows)} synthetic rows. Total rows: {len(df_augmented)}")
 
 # ----------------------------------------------------------------------
-if __name__ == "__main__":
-    augment_distractions(
-        distractions_file='Dataset Distractions_distraction.csv',
-        output_file='Dataset Distractions_distraction.csv',
-        first_run_timestamp='2026-02-21T08:52:21.858625',
-        new_users=[f'participant_{i:02d}' for i in range(9, 15)],
-        new_runs=[1, 2, 3, 4],
-        noise_scale=0.05
-    )

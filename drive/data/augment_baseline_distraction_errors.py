@@ -130,8 +130,8 @@ def augment_errors_with_new_users(
     df_drive = pd.read_csv(driving_time_file)
 
     # Ensure timestamp columns are datetime
-    df_err['timestamp'] = pd.to_datetime(df_err['timestamp'])
-    df_drive['timestamp'] = pd.to_datetime(df_drive['timestamp'])
+    df_err['timestamp'] = pd.to_datetime(df_err['timestamp'], format="ISO8601")
+    df_drive['timestamp'] = pd.to_datetime(df_drive['timestamp'], format="ISO8601")
 
     # ------------------------------------------------------------------
     # Step 1: Ensure driving time contains entries for all new (user, run)
@@ -259,7 +259,7 @@ if __name__ == "__main__":
         errors_file='Dataset Errors_baseline.csv',
         driving_time_file='Dataset Driving Time_baseline.csv',
         output_file='Dataset Errors_baseline.csv',
-        new_users=[f'participant_{i:02d}' for i in range(9, 15)],  # 19..25
+        new_users=[f'participant_{i:02d}' for i in range(26, 30)],  # 19..25
         new_runs=[1, 2, 3],
         noise_scale=0.05
     )

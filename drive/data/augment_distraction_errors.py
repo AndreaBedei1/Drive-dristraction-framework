@@ -79,11 +79,11 @@ def augment_errors_distraction(
 
     # Delay probabilities (normalized)
     raw_probs = {
-        0: 0.121212, 1: 0.078788, 2: 0.055758, 3: 0.061453,
-        4: 0.045895, 5: 0.049383, 6: 0.032403, 7: 0.030505,
-        8: 0.026000, 9: 0.026344, 10: 0.020045, 11: 0.022619,
-        12: 0.016291, 13: 0.017333, 14: 0.014327, 15: 0.012579,
-        16: 0.005181, 17: 0.005976, 18: 0.009174, 19: 0.005391
+        0: 0.151212, 1: 0.10788, 2: 0.105758, 3: 0.101453,
+        4: 0.0575895, 5: 0.0669383, 6: 0.062403, 7: 0.040505,
+        8: 0.036000, 9: 0.029344, 10: 0.026045, 11: 0.022619,
+        12: 0.056291, 13: 0.057333, 14: 0.054327, 15: 0.052579,
+        16: 0.055181, 17: 0.035976, 18: 0.019174, 19: 0.015391
     }
     total = sum(raw_probs.values())
     delay_probs = [raw_probs[i] / total for i in range(20)]
@@ -107,18 +107,7 @@ def augment_errors_distraction(
         win_duration = (win_end - win_start).total_seconds()
         win_sim_start = row['sim_time_start']
 
-        # Skip if user/run not in new set? No, we want to add errors for ALL distraction events,
-        # including original users? The user said "Per each distraction event in Dataset Distractions_distraction.csv
-        # you must create an entry". That includes original and synthetic. So we don't filter.
-        # However, we must not duplicate errors for original users (they already have their own errors).
-        # We should only generate for the new users? Or for all? The original analysis uses the errors-distraction file,
-        # which already contains original errors. If we generate an error for every original distraction, we'll duplicate.
-        # The user probably intends to generate errors only for the synthetic distractions (new users).
-        # But the message says "Per each distraction event in Dataset Distractions_distraction.csv" – that includes original.
-        # To be safe, we'll generate for all distraction events, but then the original users would have additional errors
-        # that might not match the original distribution. The better approach: only generate for new users/runs.
-        # Let's check the code: the previous version only generated for new_users and new_runs. The user didn't complain about that,
-        # only about duplicates. So we keep that filter: we only add errors for the new users/runs.
+        # Only generate for new users/runs
         if user not in new_users or run not in new_runs:
             continue
 
@@ -135,7 +124,7 @@ def augment_errors_distraction(
         # Ensure error does not exceed the run end
         run_end = run_end_map[(user, run)]
         if error_ts > run_end:
-            # Skip this error (or could cap, but skipping preserves the distribution of delays that fit)
+            # Skip this error (preserves distribution of feasible delays)
             continue
 
         error_sim = win_sim_start + offset
@@ -157,9 +146,15 @@ def augment_errors_distraction(
             noise = np.random.normal(0, noise_scale * stds[col])
             new_row[col] = val + noise
 
+        # -------------------- Apply constraints --------------------
+        # Ensure probabilities are within [0, 1]
+        new_row['model_prob']   = np.clip(new_row['model_prob'], 0.0, 1.0)
+        new_row['emotion_prob'] = np.clip(new_row['emotion_prob'], 0.0, 1.0)
+        # ----------------------------------------------------------
+
         new_row['timestamp'] = error_ts.isoformat()
         new_row['sim_time_seconds'] = error_sim
-        new_row['frame'] = error_frame
+        new_row['frame'] = abs(error_frame)
 
         synthetic_rows.append(new_row)
 
@@ -173,13 +168,4 @@ def augment_errors_distraction(
     print(f"Augmented errors-distraction dataset saved to {output_file}")
     print(f"Added {len(synthetic_rows)} synthetic rows. Total rows: {len(df_augmented)}")
 
-# ----------------------------------------------------------------------
-if __name__ == "__main__":
-    augment_errors_distraction(
-        errors_file='Dataset Errors_distraction.csv',
-        distractions_file='Dataset Distractions_distraction.csv',
-        output_file='Dataset Errors_distraction.csv',
-        new_users=[f'participant_{i:02d}' for i in range(9, 15)],
-        new_runs=[1, 2, 3, 4],
-        noise_scale=0.05
-    )
+

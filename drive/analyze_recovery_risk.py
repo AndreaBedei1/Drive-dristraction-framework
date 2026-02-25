@@ -170,4 +170,21 @@ global_prob_df = pd.DataFrame({
 })
 
 print("\nGLOBAL PROBABILITY PER SECOND (Post-Distraction)")
-print(global_prob_df.head(30)['probability'])
+print(global_prob_df.head(16)['probability'])
+
+# After the global analysis, add:
+
+# Compute raw error counts per second (global)
+if len(outside_after) > 0:
+    max_offset_global = int(inter_window_gaps['gap_len'].max())
+    bins = np.arange(0, max_offset_global + 1, 1)
+    # Cut time_since into 1‑second bins, label with the right edge (i.e., second 1 means (0,1])
+    global_counts = pd.cut(outside_after['time_since'], bins=bins, labels=bins[1:], right=True).value_counts().sort_index()
+    raw_counts_df = pd.DataFrame({
+        'second_after_distraction': global_counts.index.astype(int),
+        'error_count': global_counts.values
+    })
+    print("\nRAW ERROR COUNTS PER SECOND (Post-Distraction)")
+    print(raw_counts_df.head(16).to_string(index=False))
+else:
+    print("\nNo outside errors to compute raw counts.")
