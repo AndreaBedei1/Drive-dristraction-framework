@@ -26,6 +26,7 @@ from src.datasets import (
     BaselineDrivingTimeLogger,
 )
 from src.error_monitor import ErrorMonitor
+from src.arousal_provider import ArousalSnapshot
 from src.distraction_windows import DistractionCoordinator, DistractionWindow, focus_simulation_window
 from src.camera_preview import CameraPreviewWindow, preview_available
 
@@ -630,6 +631,7 @@ def main() -> int:
         emotion_inference = None
 
     arousal_client = None
+    baseline_requires_sensor = dataset_profile == "baseline"
     if cfg.arousal_sensor.enabled:
         try:
             from src.arousal_ble import BleArousalProvider
@@ -658,15 +660,33 @@ def main() -> int:
         )
         print("[Runner] Arousal pipeline disabled by config.")
 
+    if baseline_requires_sensor and not cfg.arousal_sensor.enabled:
+        raise RuntimeError(
+            "Baseline run requires arousal sensor: set arousal_sensor.enabled=true."
+        )
+    if baseline_requires_sensor and arousal_client is None:
+        raise RuntimeError(
+            "Baseline run requires arousal sensor data, but the BLE provider is unavailable."
+        )
+
     if cfg.arousal_sensor.enabled and arousal_client is not None:
         baseline_wait = float(cfg.arousal_sensor.baseline_seconds)
         if baseline_wait > 0:
             print(f"[Runner] Waiting {baseline_wait:.0f}s for arousal baseline calibration...")
             try:
-                if not arousal_client.wait_for_baseline(timeout=baseline_wait):
-                    print("[Runner] Baseline not completed yet (no data or still calibrating).")
-            except Exception:
+                baseline_ready = bool(arousal_client.wait_for_baseline(timeout=baseline_wait))
+            except Exception as exc:
+                if baseline_requires_sensor:
+                    raise RuntimeError(
+                        f"Baseline run aborted: failed while waiting for sensor calibration ({exc})."
+                    ) from exc
                 time.sleep(baseline_wait)
+            else:
+                if not baseline_ready:
+                    msg = "Baseline not completed yet (no data or still calibrating)."
+                    if baseline_requires_sensor:
+                        raise RuntimeError(f"Baseline run aborted: {msg}")
+                    print(f"[Runner] {msg}")
 
     distractions_enabled = bool(cfg.distractions.enabled)
     if dataset_profile == "baseline":
@@ -809,6 +829,41 @@ def main() -> int:
 
     proc = None
     drive_start_monotonic: Optional[float] = None
+    baseline_pre_drive_snapshot: Optional[ArousalSnapshot] = None
+
+    def _capture_pre_drive_baseline_snapshot() -> Optional[ArousalSnapshot]:
+        if baseline_time_logger is None:
+            return None
+        if arousal_client is None:
+            raise RuntimeError("Baseline run aborted: arousal sensor provider unavailable at start.")
+
+        try:
+            snapshot = arousal_client.get_snapshot()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Baseline run aborted: failed to read arousal sensor at start ({exc})."
+            ) from exc
+
+        try:
+            hr_value = int(snapshot.hr_bpm) if snapshot.hr_bpm is not None else None
+        except Exception:
+            hr_value = None
+        try:
+            arousal_value = float(snapshot.value) if snapshot.value is not None else None
+        except Exception:
+            arousal_value = None
+
+        if hr_value is None or hr_value < 35 or hr_value > 220:
+            raise RuntimeError(
+                "Baseline run aborted: invalid heart-rate sample at start."
+            )
+        if arousal_value is None or arousal_value < 0.0 or arousal_value > 1.0:
+            raise RuntimeError(
+                "Baseline run aborted: invalid arousal sample at start."
+            )
+
+        return snapshot
+
     mc_env = os.environ.copy()
     mc_env["SIM_SHUTDOWN_FILE"] = shutdown_flag_path
     if center_rect is not None:
@@ -826,6 +881,7 @@ def main() -> int:
             if max_speed_kmh is not None and max_speed_kmh > 0:
                 if not any(str(arg).startswith("--max-speed-kmh") for arg in mc_args):
                     mc_args.append(f"--max-speed-kmh={max_speed_kmh}")
+            baseline_pre_drive_snapshot = _capture_pre_drive_baseline_snapshot()
             proc = _launch_manual_control(
                 mc_path,
                 cfg.carla.host,
@@ -859,6 +915,7 @@ def main() -> int:
                 time.sleep(0.5)
         else:
             print("[Runner] --no-launch-manual set. Scenario running; you can start manual_control separately.")
+            baseline_pre_drive_snapshot = _capture_pre_drive_baseline_snapshot()
             drive_start_monotonic = time.monotonic()
             while True:
                 if max_duration_seconds > 0.0 and drive_start_monotonic is not None:
@@ -885,7 +942,10 @@ def main() -> int:
         if baseline_time_logger is not None and drive_start_monotonic is not None:
             try:
                 run_duration_seconds = max(0.0, time.monotonic() - drive_start_monotonic)
-                total_seconds = baseline_time_logger.log_run_duration(run_duration_seconds)
+                total_seconds = baseline_time_logger.log_run_duration(
+                    run_duration_seconds,
+                    pre_drive_snapshot=baseline_pre_drive_snapshot,
+                )
                 print(
                     "[Runner] Baseline driving time saved "
                     f"(run={run_duration_seconds:.1f}s, user_total={total_seconds:.1f}s)."

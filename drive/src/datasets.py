@@ -260,6 +260,8 @@ class BaselineDrivingTimeLogger:
                 "total_duration_seconds",
                 "total_duration_minutes",
                 "timestamp",
+                "hr_baseline",
+                "arousal_baseline",
             ],
         )
         self._lock = threading.Lock()
@@ -283,11 +285,60 @@ class BaselineDrivingTimeLogger:
             return 0.0
         return total
 
-    def log_run_duration(self, run_duration_seconds: float) -> float:
+    @staticmethod
+    def _format_arousal(value: Optional[float]) -> Any:
+        if value is None:
+            return ""
+        try:
+            arousal = float(value)
+        except Exception:
+            return ""
+        if arousal < 0.0 or arousal > 1.0:
+            return ""
+        return round(arousal, 3)
+
+    @staticmethod
+    def _format_hr(value: Optional[int]) -> Any:
+        if value is None:
+            return ""
+        try:
+            hr = int(value)
+        except Exception:
+            return ""
+        if hr < 35 or hr > 220:
+            return ""
+        return hr
+
+    def _resolve_baseline_metrics(
+        self,
+        pre_drive_snapshot: Optional[ArousalSnapshot] = None,
+    ) -> Tuple[Any, Any]:
+        """Resolve baseline HR/arousal from a required pre-drive snapshot."""
+        if pre_drive_snapshot is None:
+            raise RuntimeError("Missing pre-drive arousal snapshot for baseline run.")
+
+        hr_value = self._format_hr(pre_drive_snapshot.hr_bpm)
+        arousal_value = self._format_arousal(pre_drive_snapshot.value)
+
+        if hr_value == "":
+            raise RuntimeError("Invalid baseline heart-rate sample from arousal sensor.")
+        if arousal_value == "":
+            raise RuntimeError("Invalid baseline arousal sample from arousal sensor.")
+
+        return hr_value, arousal_value
+
+    def log_run_duration(
+        self,
+        run_duration_seconds: float,
+        pre_drive_snapshot: Optional[ArousalSnapshot] = None,
+    ) -> float:
         """Append run duration and return updated cumulative user total."""
         run_seconds = max(0.0, float(run_duration_seconds))
         with self._lock:
             total_seconds = self._existing_total_for_user_seconds(self._context.user_id) + run_seconds
+            hr_baseline, arousal_baseline = self._resolve_baseline_metrics(
+                pre_drive_snapshot=pre_drive_snapshot
+            )
             row: Dict[str, Any] = {
                 "user_id": self._context.user_id,
                 "run_id": self._context.run_id,
@@ -298,6 +349,8 @@ class BaselineDrivingTimeLogger:
                 "total_duration_seconds": round(total_seconds, 3),
                 "total_duration_minutes": round(total_seconds / 60.0, 3),
                 "timestamp": _wall_time_iso(),
+                "hr_baseline": hr_baseline,
+                "arousal_baseline": arousal_baseline,
             }
             self._writer.append(row)
             return total_seconds
