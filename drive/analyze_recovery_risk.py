@@ -15,17 +15,31 @@ except FileNotFoundError as e:
     print(f"Error: Could not find files. {e}")
     exit()
 
+
 # Preprocessing
-distractions['start']    = pd.to_datetime(distractions['timestamp_start'])
-distractions['end']      = pd.to_datetime(distractions['timestamp_end'])
-errors_dist['timestamp'] = pd.to_datetime(errors_dist['timestamp'])
+distractions['start']    = pd.to_datetime(distractions['timestamp_start'], format='ISO8601')
+distractions['end']      = pd.to_datetime(distractions['timestamp_end'], format='ISO8601')
+errors_dist['timestamp'] = pd.to_datetime(errors_dist['timestamp'], format='ISO8601')
+
+# Compute distraction duration (seconds)
+distractions['duration_sec'] = (distractions['end'] - distractions['start']).dt.total_seconds()
+
+# ------------------------------------------------------------------
+# Distraction statistics per user
+# ------------------------------------------------------------------
+distraction_stats = distractions.groupby('user_id').agg(
+    num_distractions=('duration_sec', 'size'),
+    avg_duration_sec=('duration_sec', 'mean')
+).reset_index()
+
+# Global distraction statistics
+total_distractions = len(distractions)
+global_avg_duration = distractions['duration_sec'].mean()
 
 # 2. Baseline Calculation (Global and Per-User)
-# Global
 total_base_duration = driving_base['run_duration_seconds'].sum()
 p_error_baseline_global = len(errors_base) / total_base_duration
 
-# Per-User Baselines (Handling users who might have 0 errors in baseline)
 user_base_errs = errors_base.groupby('user_id').size()
 user_base_time = driving_base.groupby('user_id')['run_duration_seconds'].sum()
 user_baselines = (user_base_errs / user_base_time).fillna(0).to_dict()
@@ -51,7 +65,6 @@ outside_errors = errors_dist[~errors_dist['is_inside']].copy()
 df_sorted = distractions.sort_values(by=['user_id', 'run_id', 'start'])
 
 def get_inter_window_gaps(group):
-    # FIX: Use group.name to get the user_id and run_id safely
     user_id, run_id = group.name
     records = []
     for i in range(1, len(group)):
@@ -61,7 +74,6 @@ def get_inter_window_gaps(group):
             records.append({'user_id': user_id, 'run_id': run_id, 'gap_len': gap_len})
     return pd.DataFrame(records)
 
-# Use group_keys=True to ensure the resulting dataframe structure is consistent
 inter_window_gaps = df_sorted.groupby(['user_id', 'run_id'], group_keys=False).apply(get_inter_window_gaps)
 inter_window_gaps = inter_window_gaps.reset_index(drop=True)
 
@@ -100,11 +112,10 @@ def calculate_hangover(gap_lengths, error_times, baseline_rate):
     limit = int(above.index.max()) if not above.empty else 0
     return limit, smoothed, rates
 
-
-
 # 6. Global Analysis
-global_limit, global_smoothed, rates = calculate_hangover(inter_window_gaps['gap_len'], outside_after['time_since'], p_error_baseline_global)
-
+global_limit, global_smoothed, rates = calculate_hangover(
+    inter_window_gaps['gap_len'], outside_after['time_since'], p_error_baseline_global
+)
 
 # 7. Per-Participant Analysis
 participant_results = []
@@ -113,29 +124,42 @@ all_users = distractions['user_id'].unique()
 for user in all_users:
     user_gaps = inter_window_gaps[inter_window_gaps['user_id'] == user]['gap_len']
     user_errs = outside_after[outside_after['user_id'] == user]['time_since']
-    # Use user-specific baseline, fallback to global if user not found in baseline data
     user_baseline = user_baselines.get(user, p_error_baseline_global)
     
     limit, _, _ = calculate_hangover(user_gaps, user_errs, user_baseline)
+
+    # Retrieve distraction stats for this user
+    dist_stats = distraction_stats[distraction_stats['user_id'] == user]
+    num_dist = dist_stats['num_distractions'].values[0] if not dist_stats.empty else 0
+    avg_dur = dist_stats['avg_duration_sec'].values[0] if not dist_stats.empty else 0.0
+
     participant_results.append({
-        'User': user, 
-        'Baseline (%)': user_baseline * 100, 
+        'User': user,
+        'Baseline (%)': user_baseline * 100,
         'Hangover (s)': limit,
-        'Errors Found': len(user_errs)
+        'Errors Found': len(user_errs),
+        'Distractions': num_dist,
+        'Avg Distraction (s)': avg_dur
     })
 
 # 8. Results Reporting
-print(f"GLOBAL ANALYSIS")
-print(f"Baseline Rate: {p_error_baseline_global*100:.4f}%")
+print("=" * 100)
+print("GLOBAL ANALYSIS")
+print(f"Baseline Error Rate: {p_error_baseline_global*100:.4f}%")
 print(f"Global Hangover: {global_limit} seconds")
-print("-" * 80)
-print(f"{'User ID':<18} | {'Baseline %':<12} | {'Hangover (s)':<12} | {'Errors':<6}")
-print("-" * 80)
+print(f"Total Distractions: {total_distractions}")
+print(f"Global Avg Distraction Duration: {global_avg_duration:.2f} s")
+print("=" * 100)
+
+# Print header
+header = f"{'User ID':<18} | {'Baseline %':<10} | {'Hangover (s)':<12} | {'Errors':<6} | {'Distractions':<12} | {'Avg Dist (s)':<12}"
+print(header)
+print("-" * len(header))
 
 for res in sorted(participant_results, key=lambda x: x['User']):
-    print(f"{res['User']:<18} | {res['Baseline (%)']:<12.4f} | {res['Hangover (s)']:<12} | {res['Errors Found']:<6}")
+    print(f"{res['User']:<18} | {res['Baseline (%)']:<10.4f} | {res['Hangover (s)']:<12} | {res['Errors Found']:<6} | {res['Distractions']:<12} | {res['Avg Distraction (s)']:<12.2f}")
 
-print("-" * 80)
+print("-" * len(header))
 
 N_seconds = int(inter_window_gaps['gap_len'].max())
 
@@ -145,8 +169,5 @@ global_prob_df = pd.DataFrame({
     'probability': [rates.get(i, 0) for i in range(1, N_seconds + 1)]
 })
 
-# Display the top N seconds (e.g., first 10 seconds)
 print("\nGLOBAL PROBABILITY PER SECOND (Post-Distraction)")
 print(global_prob_df.head(30)['probability'])
-
-
