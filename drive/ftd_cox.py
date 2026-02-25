@@ -26,13 +26,18 @@ err_b = pd.read_csv(ERRORS_BASELINE_CSV, parse_dates=["timestamp"])
 
 errors = pd.concat([err_d, err_b], ignore_index=True)
 
+dist["timestamp_start"] = pd.to_datetime(dist["timestamp_start"], format="ISO8601")
+dist["timestamp_end"]   = pd.to_datetime(dist["timestamp_end"], format="ISO8601")
+errors["timestamp"]    = pd.to_datetime(errors["timestamp"], format="ISO8601")  
+
+
 # ==============================================================
 # 3) BUILD PER‑SECOND TIMELINE FOR EACH USER/RUN
 # ==============================================================
 def build_timeline(group):
-    """Create a second‑by‑second timeline for one user/run."""
-    t0 = group["timestamp"].min().floor("s")
-    t1 = group["timestamp"].max().ceil("s")
+    """Create a second-by-second timeline for one user/run."""    
+    t0 = pd.to_datetime(group["timestamp"].min(), format='ISO8601').floor("s")
+    t1 = pd.to_datetime(group["timestamp"].max(), format='ISO8601').ceil("s")
     timeline = pd.DataFrame({
         "timestamp": pd.date_range(t0, t1, freq="s")
     })
