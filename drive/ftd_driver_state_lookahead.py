@@ -79,26 +79,24 @@ BASE_FEATURE_COLS = [
     "time_since_distraction_end",
     "within_distraction",
     "hangover_decay",
-    "window_progress",
-    "window_duration",
-    "prev_window_duration",
     "model_prob",
-    "model_prob_sq",
     "model_prob_slope_decay",
     "model_pred_enc",
     "emotion_prob",
-    "emotion_prob_sq",
     "emotion_prob_slope_decay",
     "emotion_label_enc",
     "arousal",
-    "arousal_sq",
     "arousal_delta_baseline",
-    "arousal_delta_sq",
     "arousal_slope_decay",
     "hr_bpm",
     "hr_delta_baseline",
     "hr_delta_sq",
     "hr_slope_decay",
+    "time_since_hr_peak",
+    "time_since_arousal_peak",
+    "hr_frac_recovery",
+    "arousal_frac_recovery",
+    "time_since_last_error",
     "dist_density_30",
     "dist_density_60",
     "dist_density_120",
@@ -107,13 +105,11 @@ BASE_FEATURE_COLS = [
 ]
 
 ROLL_SOURCE_COLS = ["model_prob", "emotion_prob", "arousal", "hr_bpm"]
-ROLL_SPANS = [5, 15]
+ROLL_SPANS = [15]
 ROLL_FEATURE_COLS = [
     f"{col}_ema{span}" for col in ROLL_SOURCE_COLS for span in ROLL_SPANS
 ] + [
     f"{col}_dev_ema{span}" for col in ROLL_SOURCE_COLS for span in ROLL_SPANS
-] + [
-    f"{col}_diff1" for col in ROLL_SOURCE_COLS
 ] + [
     f"{col}_diff1_abs" for col in ROLL_SOURCE_COLS
 ] + [
@@ -128,9 +124,6 @@ ROLL_FEATURE_COLS = [
     "arousal_hr_coupling",
     "model_arousal_coupling",
     "emotion_hr_coupling",
-    "cum_model_prob_mean",
-    "cum_emotion_prob_mean",
-    "cum_state_load_mean",
     "model_prob_drawdown",
     "emotion_prob_drawdown",
     "arousal_drawdown",
@@ -476,6 +469,7 @@ def generate_samples(
         usr_ar = float(baselines["user_arousal"].get(uid, baselines["global_arousal"]))
         usr_hr = float(baselines["user_hr"].get(uid, baselines["global_hr"]))
         usr_er = float(baselines["user_err_rate"].get(uid, baselines["global_err_rate"]))
+        run_start_ts = wins.iloc[0]["timestamp_start"]
 
         for i in range(len(wins)):
             row = wins.iloc[i]
@@ -512,14 +506,13 @@ def generate_samples(
             mp_slope = (e_mp - s_mp) / max(win_dur, 1e-6)
             ep_slope = (e_ep - s_ep) / max(win_dur, 1e-6)
 
-            prev_win_dur = 0.0
-            if i > 0:
-                p = wins.iloc[i - 1]
-                prev_win_dur = float((p["timestamp_end"] - p["timestamp_start"]).total_seconds())
-                if not np.isfinite(prev_win_dur) or prev_win_dur < 0:
-                    prev_win_dur = 0.0
-
             sensor_missing = float(row.get("sensor_missing_flag", 0.0))
+            hr_peak = max(s_hr, e_hr)
+            ar_peak = max(s_ar, e_ar)
+            hr_peak_ts = end_ts if e_hr >= s_hr else start_ts
+            ar_peak_ts = end_ts if e_ar >= s_ar else start_ts
+            hr_peak_delta = hr_peak - usr_hr
+            ar_peak_delta = ar_peak - usr_ar
 
             for off in range(n_bins):
                 ts = start_ts + pd.Timedelta(seconds=off)
@@ -535,7 +528,6 @@ def generate_samples(
                     t_in = float(off)
                     t_after = 0.0
                     dec = 1.0
-                    progress = alpha
                     phase_sec = float(off - win_dur)
                 else:
                     t_after = float(off - win_dur)
@@ -547,7 +539,6 @@ def generate_samples(
                     cur_pr = e_pr
                     cur_em = e_em
                     t_in = 0.0
-                    progress = 1.0
                     phase_sec = t_after
 
                 j = bisect_left(err_ts, ts)
@@ -555,6 +546,14 @@ def generate_samples(
 
                 ar_dev = cur_ar - usr_ar
                 hr_dev = cur_hr - usr_hr
+                t_since_hr_peak = max(float((ts - hr_peak_ts).total_seconds()), 0.0)
+                t_since_ar_peak = max(float((ts - ar_peak_ts).total_seconds()), 0.0)
+                hr_frac_recovery = float((cur_hr - usr_hr) / hr_peak_delta) if abs(hr_peak_delta) > 1e-6 else 0.0
+                ar_frac_recovery = float((cur_ar - usr_ar) / ar_peak_delta) if abs(ar_peak_delta) > 1e-6 else 0.0
+                if j > 0:
+                    t_since_last_error = max(float((ts - err_ts[j - 1]).total_seconds()), 0.0)
+                else:
+                    t_since_last_error = max(float((ts - run_start_ts).total_seconds()), 0.0)
 
                 rows.append(
                     {
@@ -567,26 +566,24 @@ def generate_samples(
                         "time_since_distraction_end": t_after,
                         "within_distraction": inside,
                         "hangover_decay": float(dec),
-                        "window_progress": float(progress),
-                        "window_duration": float(win_dur),
-                        "prev_window_duration": float(prev_win_dur),
                         "model_prob": float(cur_mp),
-                        "model_prob_sq": float(cur_mp * cur_mp),
                         "model_prob_slope_decay": float(mp_slope * dec),
                         "model_pred_enc": float(cur_pr),
                         "emotion_prob": float(cur_ep),
-                        "emotion_prob_sq": float(cur_ep * cur_ep),
                         "emotion_prob_slope_decay": float(ep_slope * dec),
                         "emotion_label_enc": float(cur_em),
                         "arousal": float(cur_ar),
-                        "arousal_sq": float(cur_ar * cur_ar),
                         "arousal_delta_baseline": float(ar_dev),
-                        "arousal_delta_sq": float(ar_dev * ar_dev),
                         "arousal_slope_decay": float(ar_slope * dec),
                         "hr_bpm": float(cur_hr),
                         "hr_delta_baseline": float(hr_dev),
                         "hr_delta_sq": float(hr_dev * hr_dev),
                         "hr_slope_decay": float(hr_slope * dec),
+                        "time_since_hr_peak": float(t_since_hr_peak),
+                        "time_since_arousal_peak": float(t_since_ar_peak),
+                        "hr_frac_recovery": float(hr_frac_recovery),
+                        "arousal_frac_recovery": float(ar_frac_recovery),
+                        "time_since_last_error": float(t_since_last_error),
                         "dist_density_30": float(density(webs.get(key, []), ts, 30)),
                         "dist_density_60": float(density(webs.get(key, []), ts, 60)),
                         "dist_density_120": float(density(webs.get(key, []), ts, 120)),
@@ -622,14 +619,13 @@ def add_causal_session_features(df: pd.DataFrame) -> pd.DataFrame:
                 lambda s: s.rolling(window=span, min_periods=1).max()
                 - s.rolling(window=span, min_periods=1).min()
             ).fillna(0.0)
-        out[f"{col}_diff1"] = grp[col].diff().fillna(0.0)
-        out[f"{col}_diff1_abs"] = np.abs(out[f"{col}_diff1"])
+        out[f"{col}_diff1_abs"] = np.abs(grp[col].diff().fillna(0.0))
 
     out["state_energy"] = (
-        out["arousal_delta_sq"]
-        + out["hr_delta_sq"]
-        + out["model_prob_sq"]
-        + out["emotion_prob_sq"]
+        np.abs(out["arousal_delta_baseline"])
+        + np.abs(out["hr_delta_baseline"])
+        + out["model_prob"]
+        + out["emotion_prob"]
     ) / 4.0
     out["state_imbalance"] = (
         np.abs(out["arousal_delta_baseline"]) + np.abs(out["hr_delta_baseline"])
@@ -639,16 +635,6 @@ def add_causal_session_features(df: pd.DataFrame) -> pd.DataFrame:
     out["arousal_hr_coupling"] = out["arousal_delta_baseline"] * out["hr_delta_baseline"]
     out["model_arousal_coupling"] = out["model_prob"] * out["arousal_delta_baseline"]
     out["emotion_hr_coupling"] = out["emotion_prob"] * out["hr_delta_baseline"]
-
-    out["cum_model_prob_mean"] = grp["model_prob"].cumsum() / (grp.cumcount() + 1.0)
-    out["cum_emotion_prob_mean"] = grp["emotion_prob"].cumsum() / (grp.cumcount() + 1.0)
-    state_load = (
-        out["model_prob"]
-        + out["emotion_prob"]
-        + np.abs(out["arousal_delta_baseline"])
-        + np.abs(out["hr_delta_baseline"])
-    ) / 4.0
-    out["cum_state_load_mean"] = state_load.groupby([out["user_id"], out["run_id"]]).cumsum() / (grp.cumcount() + 1.0)
 
     out["model_prob_drawdown"] = grp["model_prob"].cummax() - out["model_prob"]
     out["emotion_prob_drawdown"] = grp["emotion_prob"].cummax() - out["emotion_prob"]
@@ -661,21 +647,14 @@ def add_causal_session_features(df: pd.DataFrame) -> pd.DataFrame:
         + out["hr_bpm_diff1_abs"]
     ) / 4.0
     out["signal_roll_std_energy"] = (
-        out["model_prob_roll_std5"]
-        + out["emotion_prob_roll_std5"]
-        + out["arousal_roll_std5"]
-        + out["hr_bpm_roll_std5"]
+        out["model_prob_roll_std15"]
+        + out["emotion_prob_roll_std15"]
+        + out["arousal_roll_std15"]
+        + out["hr_bpm_roll_std15"]
     ) / 4.0
 
     out = out.sort_values("_ord").drop(columns=["_ord"]).reset_index(drop=True)
     return out
-
-
-def keep_hangover_only(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    # Exclude points sampled while distraction is ongoing.
-    return df[df["within_distraction"] < 0.5].copy()
 
 
 def fit_feature_postprocess(df_train: pd.DataFrame) -> Dict[str, pd.Series]:
@@ -739,7 +718,6 @@ def quick_config_search(
     for H in H_vals:
         for T in T_vals:
             df = generate_samples(H, T, train_users, wbs, webs, errs, baselines, pred_enc, emo_enc, global_model_prob, global_emotion_prob)
-            df = keep_hangover_only(df)
             df = add_causal_session_features(df)
             if df.empty or df["target"].nunique() < 2:
                 records.append({"H": int(H), "T": int(T), "ap_mean": np.nan, "ap_std": np.nan, "brier_mean": np.nan, "n": int(len(df))})
@@ -1201,9 +1179,6 @@ def run_pipeline(args) -> Dict:
     df_tr = generate_samples(best_h, best_t, train_users, wbs, webs, errs, baselines, pred_enc, emo_enc, global_model_prob, global_emotion_prob)
     df_ca = generate_samples(best_h, best_t, cal_users, wbs, webs, errs, baselines, pred_enc, emo_enc, global_model_prob, global_emotion_prob)
     df_te = generate_samples(best_h, best_t, test_users, wbs, webs, errs, baselines, pred_enc, emo_enc, global_model_prob, global_emotion_prob)
-    df_tr = keep_hangover_only(df_tr)
-    df_ca = keep_hangover_only(df_ca)
-    df_te = keep_hangover_only(df_te)
     df_tr = add_causal_session_features(df_tr)
     df_ca = add_causal_session_features(df_ca)
     df_te = add_causal_session_features(df_te)

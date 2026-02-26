@@ -1,0 +1,500 @@
+{
+  "constraints": {
+    "driver_state_only": true,
+    "excluded_sources": [
+      "speed_kmh",
+      "steer_angle_deg",
+      "map_name",
+      "weather",
+      "frame",
+      "sim_time_seconds",
+      "x/y/z position",
+      "road_id",
+      "lane_id"
+    ],
+    "leakage_controls": [
+      "user-level train/cal/test split",
+      "train-only imputation",
+      "train-only encoders",
+      "train-only feature clipping",
+      "H/T search on train only",
+      "calibration + threshold on calibration only",
+      "single locked test evaluation"
+    ]
+  },
+  "device": {
+    "xgb_requested": "auto",
+    "xgb_resolved": "cuda",
+    "xgb_n_jobs": 1
+  },
+  "users": {
+    "train": [
+      "participant_17",
+      "participant_06",
+      "participant_14",
+      "participant_12",
+      "participant_23",
+      "participant_02",
+      "participant_03",
+      "participant_26",
+      "participant_04",
+      "participant_22",
+      "participant_27",
+      "participant_19",
+      "participant_30",
+      "participant_21",
+      "participant_08",
+      "participant_11",
+      "participant_15",
+      "participant_20",
+      "participant_07"
+    ],
+    "cal": [
+      "participant_29",
+      "participant_25",
+      "participant_13",
+      "participant_01",
+      "participant_05"
+    ],
+    "test": [
+      "participant_28",
+      "participant_16",
+      "participant_24",
+      "participant_18",
+      "participant_09",
+      "participant_10"
+    ]
+  },
+  "best_config": {
+    "H": 4,
+    "T": 4
+  },
+  "best_model": {
+    "name": "blend_calibrated",
+    "calibration": "weighted_average",
+    "threshold_f1_on_cal": 0.2097529530665479,
+    "kind": "blend",
+    "blend_weights": {
+      "xgb_tuned": 0.5,
+      "logreg_tuned": 0.0,
+      "hgb_tuned": 0.5
+    }
+  },
+  "model_selection_on_cal": [
+    {
+      "model": "xgb_tuned",
+      "calibration": "isotonic",
+      "ap_cal": 0.349488505267478,
+      "brier_cal": 0.14919051884290457
+    },
+    {
+      "model": "logreg_tuned",
+      "calibration": "isotonic",
+      "ap_cal": 0.2657593809747201,
+      "brier_cal": 0.15792541735904292
+    },
+    {
+      "model": "hgb_tuned",
+      "calibration": "sigmoid",
+      "ap_cal": 0.3489900230563763,
+      "brier_cal": 0.151260550273333
+    },
+    {
+      "model": "blend_calibrated",
+      "calibration": "weighted_average",
+      "ap_cal": 0.35920873060641145,
+      "brier_cal": 0.1498944635318421,
+      "weights": {
+        "xgb_tuned": 0.5,
+        "logreg_tuned": 0.0,
+        "hgb_tuned": 0.5
+      }
+    }
+  ],
+  "samples": {
+    "train": 17244,
+    "cal": 4174,
+    "test": 5416
+  },
+  "positive_rate": {
+    "train": 0.26554163767107397,
+    "cal": 0.20627695256348827,
+    "test": 0.27307976366322007
+  },
+  "metrics_test": {
+    "AUC-PR": 0.5450445291416279,
+    "AUC-ROC": 0.8046978244057909,
+    "Brier": 0.1643126946033946,
+    "LogLoss": 0.4854615006551729,
+    "F1": 0.6067357512953367,
+    "Precision": 0.49181016379672404,
+    "Recall": 0.7917511832319134,
+    "MCC": 0.43483186150611497,
+    "Kappa": 0.40693723227737744,
+    "Precision@Recall>=0.80": 0.4837000814995925,
+    "Precision@Recall>=0.85": 0.4594594594594595,
+    "Precision@Recall>=0.90": 0.4475008386447501,
+    "Precision@Recall>=0.95": 0.410323709536308
+  },
+  "ci_test": {
+    "AUC-PR": {
+      "mean": 0.5453553212958737,
+      "low": 0.5192765048307829,
+      "high": 0.5726373686187014
+    },
+    "AUC-ROC": {
+      "mean": 0.8046214003972719,
+      "low": 0.7921377968622626,
+      "high": 0.8171934440641418
+    },
+    "Brier": {
+      "mean": 0.1642623188786865,
+      "low": 0.15855829473894648,
+      "high": 0.17007321744953527
+    }
+  },
+  "search_results": [
+    {
+      "H": 4,
+      "T": 1,
+      "ap_mean": 0.18693434980563697,
+      "ap_std": 0.038649370614990915,
+      "brier_mean": 0.19501276065436826,
+      "n": 17244
+    },
+    {
+      "H": 4,
+      "T": 2,
+      "ap_mean": 0.31387704407689454,
+      "ap_std": 0.059148296410198795,
+      "brier_mean": 0.20183368928751802,
+      "n": 17244
+    },
+    {
+      "H": 4,
+      "T": 3,
+      "ap_mean": 0.40977845108923555,
+      "ap_std": 0.06045413034828438,
+      "brier_mean": 0.19973949929237717,
+      "n": 17244
+    },
+    {
+      "H": 4,
+      "T": 4,
+      "ap_mean": 0.46740414977196104,
+      "ap_std": 0.07175973167797452,
+      "brier_mean": 0.19957955908581607,
+      "n": 17244
+    },
+    {
+      "H": 4,
+      "T": 5,
+      "ap_mean": 0.5157179348083517,
+      "ap_std": 0.0716073020709222,
+      "brier_mean": 0.20052807914742526,
+      "n": 17244
+    },
+    {
+      "H": 6,
+      "T": 1,
+      "ap_mean": 0.1815336580180485,
+      "ap_std": 0.03657570887448717,
+      "brier_mean": 0.18862353686100203,
+      "n": 21262
+    },
+    {
+      "H": 6,
+      "T": 2,
+      "ap_mean": 0.3095835156844355,
+      "ap_std": 0.04960058304688132,
+      "brier_mean": 0.19568091534582724,
+      "n": 21262
+    },
+    {
+      "H": 6,
+      "T": 3,
+      "ap_mean": 0.39886566724059375,
+      "ap_std": 0.06648814849527572,
+      "brier_mean": 0.19691048707307482,
+      "n": 21262
+    },
+    {
+      "H": 6,
+      "T": 4,
+      "ap_mean": 0.4628837619640219,
+      "ap_std": 0.065414321696587,
+      "brier_mean": 0.19847890455667377,
+      "n": 21262
+    },
+    {
+      "H": 6,
+      "T": 5,
+      "ap_mean": 0.5114564155388367,
+      "ap_std": 0.06960850224732328,
+      "brier_mean": 0.20107554573374484,
+      "n": 21262
+    },
+    {
+      "H": 8,
+      "T": 1,
+      "ap_mean": 0.17233133311324478,
+      "ap_std": 0.03391311976862686,
+      "brier_mean": 0.1863484073708094,
+      "n": 24704
+    },
+    {
+      "H": 8,
+      "T": 2,
+      "ap_mean": 0.30582267935887203,
+      "ap_std": 0.049949376530579806,
+      "brier_mean": 0.19257584050516593,
+      "n": 24704
+    },
+    {
+      "H": 8,
+      "T": 3,
+      "ap_mean": 0.39646312909007975,
+      "ap_std": 0.05635869147662773,
+      "brier_mean": 0.19445350542274206,
+      "n": 24704
+    },
+    {
+      "H": 8,
+      "T": 4,
+      "ap_mean": 0.45714340164551676,
+      "ap_std": 0.05772625075630603,
+      "brier_mean": 0.1979989863338129,
+      "n": 24704
+    },
+    {
+      "H": 8,
+      "T": 5,
+      "ap_mean": 0.4975296000878072,
+      "ap_std": 0.05630411103759282,
+      "brier_mean": 0.20377646316672393,
+      "n": 24704
+    },
+    {
+      "H": 10,
+      "T": 1,
+      "ap_mean": 0.17023800836940006,
+      "ap_std": 0.037335622526584754,
+      "brier_mean": 0.1814954067671924,
+      "n": 27681
+    },
+    {
+      "H": 10,
+      "T": 2,
+      "ap_mean": 0.2864914229426374,
+      "ap_std": 0.05439012528413457,
+      "brier_mean": 0.19006250963564042,
+      "n": 27681
+    },
+    {
+      "H": 10,
+      "T": 3,
+      "ap_mean": 0.3741281359337767,
+      "ap_std": 0.06986715254187868,
+      "brier_mean": 0.19429768320479585,
+      "n": 27681
+    },
+    {
+      "H": 10,
+      "T": 4,
+      "ap_mean": 0.4311590989654259,
+      "ap_std": 0.07000824940598792,
+      "brier_mean": 0.20100759707538637,
+      "n": 27681
+    },
+    {
+      "H": 10,
+      "T": 5,
+      "ap_mean": 0.47299387436159024,
+      "ap_std": 0.0705819477836912,
+      "brier_mean": 0.20735099014159392,
+      "n": 27681
+    },
+    {
+      "H": 12,
+      "T": 1,
+      "ap_mean": 0.1669981848245497,
+      "ap_std": 0.02896150491410961,
+      "brier_mean": 0.17710420405529592,
+      "n": 30182
+    },
+    {
+      "H": 12,
+      "T": 2,
+      "ap_mean": 0.28740322401209417,
+      "ap_std": 0.04020847916380978,
+      "brier_mean": 0.18757308239981027,
+      "n": 30182
+    },
+    {
+      "H": 12,
+      "T": 3,
+      "ap_mean": 0.3707572189272139,
+      "ap_std": 0.05460456258119221,
+      "brier_mean": 0.19419733053661098,
+      "n": 30182
+    },
+    {
+      "H": 12,
+      "T": 4,
+      "ap_mean": 0.4253633554214147,
+      "ap_std": 0.05624019411449189,
+      "brier_mean": 0.20312136525961866,
+      "n": 30182
+    },
+    {
+      "H": 12,
+      "T": 5,
+      "ap_mean": 0.4652487436336331,
+      "ap_std": 0.05742966731574426,
+      "brier_mean": 0.21030784018680493,
+      "n": 30182
+    },
+    {
+      "H": 15,
+      "T": 1,
+      "ap_mean": 0.16416064896936355,
+      "ap_std": 0.0308475797568476,
+      "brier_mean": 0.17326442995704913,
+      "n": 32989
+    },
+    {
+      "H": 15,
+      "T": 2,
+      "ap_mean": 0.2774604780430455,
+      "ap_std": 0.04501342455022635,
+      "brier_mean": 0.18469014135969414,
+      "n": 32989
+    },
+    {
+      "H": 15,
+      "T": 3,
+      "ap_mean": 0.36283450011734386,
+      "ap_std": 0.05197810815971709,
+      "brier_mean": 0.19340585899235566,
+      "n": 32989
+    },
+    {
+      "H": 15,
+      "T": 4,
+      "ap_mean": 0.41214137842081966,
+      "ap_std": 0.059729477361094234,
+      "brier_mean": 0.20466775031504253,
+      "n": 32989
+    },
+    {
+      "H": 15,
+      "T": 5,
+      "ap_mean": 0.4535541073170855,
+      "ap_std": 0.06298686356589807,
+      "brier_mean": 0.2126807051147535,
+      "n": 32989
+    },
+    {
+      "H": 18,
+      "T": 1,
+      "ap_mean": 0.16256129853719048,
+      "ap_std": 0.029290899455156675,
+      "brier_mean": 0.17301333703610672,
+      "n": 34758
+    },
+    {
+      "H": 18,
+      "T": 2,
+      "ap_mean": 0.27341201260207587,
+      "ap_std": 0.04396548486360134,
+      "brier_mean": 0.186177587610455,
+      "n": 34758
+    },
+    {
+      "H": 18,
+      "T": 3,
+      "ap_mean": 0.3569574129356118,
+      "ap_std": 0.04907614027048209,
+      "brier_mean": 0.19732150232205203,
+      "n": 34758
+    },
+    {
+      "H": 18,
+      "T": 4,
+      "ap_mean": 0.41037701281403677,
+      "ap_std": 0.054896271385220165,
+      "brier_mean": 0.2075375516336041,
+      "n": 34758
+    },
+    {
+      "H": 18,
+      "T": 5,
+      "ap_mean": 0.45466405717058966,
+      "ap_std": 0.04786888087750252,
+      "brier_mean": 0.21443508106584025,
+      "n": 34758
+    }
+  ],
+  "feature_cols": [
+    "time_in_distraction",
+    "time_since_distraction_end",
+    "within_distraction",
+    "hangover_decay",
+    "model_prob",
+    "model_prob_slope_decay",
+    "model_pred_enc",
+    "emotion_prob",
+    "emotion_prob_slope_decay",
+    "emotion_label_enc",
+    "arousal",
+    "arousal_delta_baseline",
+    "arousal_slope_decay",
+    "hr_bpm",
+    "hr_delta_baseline",
+    "hr_delta_sq",
+    "hr_slope_decay",
+    "time_since_hr_peak",
+    "time_since_arousal_peak",
+    "hr_frac_recovery",
+    "arousal_frac_recovery",
+    "time_since_last_error",
+    "dist_density_30",
+    "dist_density_60",
+    "dist_density_120",
+    "sensor_missing_flag",
+    "baseline_error_rate",
+    "model_prob_ema15",
+    "emotion_prob_ema15",
+    "arousal_ema15",
+    "hr_bpm_ema15",
+    "model_prob_dev_ema15",
+    "emotion_prob_dev_ema15",
+    "arousal_dev_ema15",
+    "hr_bpm_dev_ema15",
+    "model_prob_diff1_abs",
+    "emotion_prob_diff1_abs",
+    "arousal_diff1_abs",
+    "hr_bpm_diff1_abs",
+    "model_prob_roll_std15",
+    "emotion_prob_roll_std15",
+    "arousal_roll_std15",
+    "hr_bpm_roll_std15",
+    "model_prob_roll_range15",
+    "emotion_prob_roll_range15",
+    "arousal_roll_range15",
+    "hr_bpm_roll_range15",
+    "state_energy",
+    "state_imbalance",
+    "model_emotion_gap_abs",
+    "model_emotion_product",
+    "arousal_hr_coupling",
+    "model_arousal_coupling",
+    "emotion_hr_coupling",
+    "model_prob_drawdown",
+    "emotion_prob_drawdown",
+    "arousal_drawdown",
+    "hr_drawdown",
+    "signal_diff_abs_energy",
+    "signal_roll_std_energy"
+  ]
+}

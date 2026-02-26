@@ -1,0 +1,525 @@
+{
+  "constraints": {
+    "driver_state_only": true,
+    "excluded_sources": [
+      "speed_kmh",
+      "steer_angle_deg",
+      "map_name",
+      "weather",
+      "frame",
+      "sim_time_seconds",
+      "x/y/z position",
+      "road_id",
+      "lane_id"
+    ],
+    "leakage_controls": [
+      "user-level train/cal/test split",
+      "train-only imputation",
+      "train-only encoders",
+      "train-only feature clipping",
+      "H/T search on train only",
+      "calibration + threshold on calibration only",
+      "single locked test evaluation"
+    ]
+  },
+  "device": {
+    "xgb_requested": "auto",
+    "xgb_resolved": "cuda",
+    "xgb_n_jobs": 1
+  },
+  "users": {
+    "train": [
+      "participant_17",
+      "participant_06",
+      "participant_14",
+      "participant_12",
+      "participant_23",
+      "participant_02",
+      "participant_03",
+      "participant_26",
+      "participant_04",
+      "participant_22",
+      "participant_27",
+      "participant_19",
+      "participant_30",
+      "participant_21",
+      "participant_08",
+      "participant_11",
+      "participant_15",
+      "participant_20",
+      "participant_07"
+    ],
+    "cal": [
+      "participant_29",
+      "participant_25",
+      "participant_13",
+      "participant_01",
+      "participant_05"
+    ],
+    "test": [
+      "participant_28",
+      "participant_16",
+      "participant_24",
+      "participant_18",
+      "participant_09",
+      "participant_10"
+    ]
+  },
+  "best_config": {
+    "H": 18,
+    "T": 5
+  },
+  "best_model": {
+    "name": "blend_calibrated",
+    "calibration": "weighted_average",
+    "threshold_f1_on_cal": 0.15042780002977635,
+    "kind": "blend",
+    "blend_weights": {
+      "xgb_tuned": 0.1,
+      "logreg_tuned": 0.6000000000000001,
+      "hgb_tuned": 0.29999999999999993
+    }
+  },
+  "model_selection_on_cal": [
+    {
+      "model": "xgb_tuned",
+      "calibration": "sigmoid",
+      "ap_cal": 0.17987656281582431,
+      "brier_cal": 0.13247985832580278
+    },
+    {
+      "model": "logreg_tuned",
+      "calibration": "isotonic",
+      "ap_cal": 0.18449007023311706,
+      "brier_cal": 0.13166433712329711
+    },
+    {
+      "model": "hgb_tuned",
+      "calibration": "isotonic",
+      "ap_cal": 0.16808854170647672,
+      "brier_cal": 0.13213466835062543
+    },
+    {
+      "model": "blend_calibrated",
+      "calibration": "weighted_average",
+      "ap_cal": 0.20079513752070338,
+      "brier_cal": 0.13158639128896554,
+      "weights": {
+        "xgb_tuned": 0.1,
+        "logreg_tuned": 0.6000000000000001,
+        "hgb_tuned": 0.29999999999999993
+      }
+    }
+  ],
+  "samples": {
+    "train": 25834,
+    "cal": 6716,
+    "test": 8553
+  },
+  "positive_rate": {
+    "train": 0.19505303088952544,
+    "cal": 0.15753424657534246,
+    "test": 0.20893253829065825
+  },
+  "metrics_test": {
+    "AUC-PR": 0.26731802198070787,
+    "AUC-ROC": 0.5649996087948217,
+    "Brier": 0.16646124923946362,
+    "LogLoss": 0.5171425035931454,
+    "F1": 0.3254954652334565,
+    "Precision": 0.23254139668826493,
+    "Recall": 0.5422495803021824,
+    "MCC": 0.05660341357976213,
+    "Kappa": 0.04670486857907141,
+    "Precision@Recall>=0.80": 0.22359182399750352,
+    "Precision@Recall>=0.85": 0.22084931117738957,
+    "Precision@Recall>=0.90": 0.21831937314239394,
+    "Precision@Recall>=0.95": 0.21322976697569532
+  },
+  "ci_test": {
+    "AUC-PR": {
+      "mean": 0.2677246220716024,
+      "low": 0.25118774079486333,
+      "high": 0.28440787656583405
+    },
+    "AUC-ROC": {
+      "mean": 0.5648223960748341,
+      "low": 0.5497152519143458,
+      "high": 0.5789448409514171
+    },
+    "Brier": {
+      "mean": 0.16657136284870439,
+      "low": 0.16104513328209852,
+      "high": 0.1722037365677694
+    }
+  },
+  "search_results": [
+    {
+      "H": 4,
+      "T": 1,
+      "ap_mean": 0.06847590923639943,
+      "ap_std": 0.004024471926906701,
+      "brier_mean": 0.15532262020793158,
+      "n": 8320
+    },
+    {
+      "H": 4,
+      "T": 2,
+      "ap_mean": 0.10326204124634117,
+      "ap_std": 0.007372246535271513,
+      "brier_mean": 0.18053533515748682,
+      "n": 8320
+    },
+    {
+      "H": 4,
+      "T": 3,
+      "ap_mean": 0.14507970276137702,
+      "ap_std": 0.008247006399361637,
+      "brier_mean": 0.19365535427706246,
+      "n": 8320
+    },
+    {
+      "H": 4,
+      "T": 4,
+      "ap_mean": 0.1790953147329884,
+      "ap_std": 0.004120917752718096,
+      "brier_mean": 0.20541217176533438,
+      "n": 8320
+    },
+    {
+      "H": 4,
+      "T": 5,
+      "ap_mean": 0.19430029278043237,
+      "ap_std": 0.019314230450248337,
+      "brier_mean": 0.2199323077626989,
+      "n": 8320
+    },
+    {
+      "H": 6,
+      "T": 1,
+      "ap_mean": 0.06113602994934483,
+      "ap_std": 0.006728643066782223,
+      "brier_mean": 0.16427002633926446,
+      "n": 12338
+    },
+    {
+      "H": 6,
+      "T": 2,
+      "ap_mean": 0.10076880294408103,
+      "ap_std": 0.007290045572427184,
+      "brier_mean": 0.1888442268478073,
+      "n": 12338
+    },
+    {
+      "H": 6,
+      "T": 3,
+      "ap_mean": 0.1371220088722226,
+      "ap_std": 0.008942755882320153,
+      "brier_mean": 0.2044026407263748,
+      "n": 12338
+    },
+    {
+      "H": 6,
+      "T": 4,
+      "ap_mean": 0.16068567319155536,
+      "ap_std": 0.018071439653839533,
+      "brier_mean": 0.22131017570688943,
+      "n": 12338
+    },
+    {
+      "H": 6,
+      "T": 5,
+      "ap_mean": 0.19241661867320545,
+      "ap_std": 0.02872443087717869,
+      "brier_mean": 0.23096896343415596,
+      "n": 12338
+    },
+    {
+      "H": 8,
+      "T": 1,
+      "ap_mean": 0.05731899612088631,
+      "ap_std": 0.0033141444861312834,
+      "brier_mean": 0.16336393418575845,
+      "n": 15780
+    },
+    {
+      "H": 8,
+      "T": 2,
+      "ap_mean": 0.09434092161705254,
+      "ap_std": 0.008428682685113759,
+      "brier_mean": 0.18966498930480746,
+      "n": 15780
+    },
+    {
+      "H": 8,
+      "T": 3,
+      "ap_mean": 0.12992016070522572,
+      "ap_std": 0.005917964396521785,
+      "brier_mean": 0.20775586462361229,
+      "n": 15780
+    },
+    {
+      "H": 8,
+      "T": 4,
+      "ap_mean": 0.15810001486860575,
+      "ap_std": 0.010888532263999665,
+      "brier_mean": 0.22240118483271837,
+      "n": 15780
+    },
+    {
+      "H": 8,
+      "T": 5,
+      "ap_mean": 0.189120764866396,
+      "ap_std": 0.011341612147037357,
+      "brier_mean": 0.23286072216600268,
+      "n": 15780
+    },
+    {
+      "H": 10,
+      "T": 1,
+      "ap_mean": 0.05575449042145719,
+      "ap_std": 0.007466314717786703,
+      "brier_mean": 0.15786891910516854,
+      "n": 18757
+    },
+    {
+      "H": 10,
+      "T": 2,
+      "ap_mean": 0.09025146709966925,
+      "ap_std": 0.011796654336952973,
+      "brier_mean": 0.19019835421427425,
+      "n": 18757
+    },
+    {
+      "H": 10,
+      "T": 3,
+      "ap_mean": 0.12558609334738918,
+      "ap_std": 0.017212750835987844,
+      "brier_mean": 0.20975520796251765,
+      "n": 18757
+    },
+    {
+      "H": 10,
+      "T": 4,
+      "ap_mean": 0.15452058346133354,
+      "ap_std": 0.02191566655359907,
+      "brier_mean": 0.22138210161750532,
+      "n": 18757
+    },
+    {
+      "H": 10,
+      "T": 5,
+      "ap_mean": 0.18293647507065336,
+      "ap_std": 0.027931618292110688,
+      "brier_mean": 0.23377274288591268,
+      "n": 18757
+    },
+    {
+      "H": 12,
+      "T": 1,
+      "ap_mean": 0.05564375751860342,
+      "ap_std": 0.004729374061525269,
+      "brier_mean": 0.1662183100667599,
+      "n": 21258
+    },
+    {
+      "H": 12,
+      "T": 2,
+      "ap_mean": 0.08684805017303951,
+      "ap_std": 0.00947784473190923,
+      "brier_mean": 0.2005475244675764,
+      "n": 21258
+    },
+    {
+      "H": 12,
+      "T": 3,
+      "ap_mean": 0.12296311450403705,
+      "ap_std": 0.011890756126367237,
+      "brier_mean": 0.21990701716215574,
+      "n": 21258
+    },
+    {
+      "H": 12,
+      "T": 4,
+      "ap_mean": 0.15461459881842987,
+      "ap_std": 0.019555002171527416,
+      "brier_mean": 0.23359484803963834,
+      "n": 21258
+    },
+    {
+      "H": 12,
+      "T": 5,
+      "ap_mean": 0.1918157111239183,
+      "ap_std": 0.028367640186727546,
+      "brier_mean": 0.2415335961939576,
+      "n": 21258
+    },
+    {
+      "H": 15,
+      "T": 1,
+      "ap_mean": 0.054741930968508976,
+      "ap_std": 0.006496395196742524,
+      "brier_mean": 0.1597775520960008,
+      "n": 24065
+    },
+    {
+      "H": 15,
+      "T": 2,
+      "ap_mean": 0.08411602175180077,
+      "ap_std": 0.006959986168455034,
+      "brier_mean": 0.1984793086170788,
+      "n": 24065
+    },
+    {
+      "H": 15,
+      "T": 3,
+      "ap_mean": 0.12075234011725608,
+      "ap_std": 0.013657604396387179,
+      "brier_mean": 0.22264587194744062,
+      "n": 24065
+    },
+    {
+      "H": 15,
+      "T": 4,
+      "ap_mean": 0.15622847187450725,
+      "ap_std": 0.014408302858164575,
+      "brier_mean": 0.23564046561036003,
+      "n": 24065
+    },
+    {
+      "H": 15,
+      "T": 5,
+      "ap_mean": 0.20663459098017747,
+      "ap_std": 0.022916294480265404,
+      "brier_mean": 0.24381517526907154,
+      "n": 24065
+    },
+    {
+      "H": 18,
+      "T": 1,
+      "ap_mean": 0.05437242116698011,
+      "ap_std": 0.011661469860573304,
+      "brier_mean": 0.1676980170871078,
+      "n": 25834
+    },
+    {
+      "H": 18,
+      "T": 2,
+      "ap_mean": 0.07903684417930333,
+      "ap_std": 0.008179344148427387,
+      "brier_mean": 0.2070812006247901,
+      "n": 25834
+    },
+    {
+      "H": 18,
+      "T": 3,
+      "ap_mean": 0.1215387799870811,
+      "ap_std": 0.011438073305851847,
+      "brier_mean": 0.23190014028616324,
+      "n": 25834
+    },
+    {
+      "H": 18,
+      "T": 4,
+      "ap_mean": 0.16975649657370095,
+      "ap_std": 0.029812428435320733,
+      "brier_mean": 0.24523493867874938,
+      "n": 25834
+    },
+    {
+      "H": 18,
+      "T": 5,
+      "ap_mean": 0.22979083833060057,
+      "ap_std": 0.040371541793709505,
+      "brier_mean": 0.2497065617697556,
+      "n": 25834
+    }
+  ],
+  "feature_cols": [
+    "time_in_distraction",
+    "time_since_distraction_end",
+    "within_distraction",
+    "hangover_decay",
+    "window_progress",
+    "window_duration",
+    "prev_window_duration",
+    "model_prob",
+    "model_prob_sq",
+    "model_prob_slope_decay",
+    "model_pred_enc",
+    "emotion_prob",
+    "emotion_prob_sq",
+    "emotion_prob_slope_decay",
+    "emotion_label_enc",
+    "arousal",
+    "arousal_sq",
+    "arousal_delta_baseline",
+    "arousal_delta_sq",
+    "arousal_slope_decay",
+    "hr_bpm",
+    "hr_delta_baseline",
+    "hr_delta_sq",
+    "hr_slope_decay",
+    "dist_density_30",
+    "dist_density_60",
+    "dist_density_120",
+    "sensor_missing_flag",
+    "baseline_error_rate",
+    "model_prob_ema5",
+    "model_prob_ema15",
+    "emotion_prob_ema5",
+    "emotion_prob_ema15",
+    "arousal_ema5",
+    "arousal_ema15",
+    "hr_bpm_ema5",
+    "hr_bpm_ema15",
+    "model_prob_dev_ema5",
+    "model_prob_dev_ema15",
+    "emotion_prob_dev_ema5",
+    "emotion_prob_dev_ema15",
+    "arousal_dev_ema5",
+    "arousal_dev_ema15",
+    "hr_bpm_dev_ema5",
+    "hr_bpm_dev_ema15",
+    "model_prob_diff1",
+    "emotion_prob_diff1",
+    "arousal_diff1",
+    "hr_bpm_diff1",
+    "model_prob_diff1_abs",
+    "emotion_prob_diff1_abs",
+    "arousal_diff1_abs",
+    "hr_bpm_diff1_abs",
+    "model_prob_roll_std5",
+    "model_prob_roll_std15",
+    "emotion_prob_roll_std5",
+    "emotion_prob_roll_std15",
+    "arousal_roll_std5",
+    "arousal_roll_std15",
+    "hr_bpm_roll_std5",
+    "hr_bpm_roll_std15",
+    "model_prob_roll_range5",
+    "model_prob_roll_range15",
+    "emotion_prob_roll_range5",
+    "emotion_prob_roll_range15",
+    "arousal_roll_range5",
+    "arousal_roll_range15",
+    "hr_bpm_roll_range5",
+    "hr_bpm_roll_range15",
+    "state_energy",
+    "state_imbalance",
+    "model_emotion_gap_abs",
+    "model_emotion_product",
+    "arousal_hr_coupling",
+    "model_arousal_coupling",
+    "emotion_hr_coupling",
+    "cum_model_prob_mean",
+    "cum_emotion_prob_mean",
+    "cum_state_load_mean",
+    "model_prob_drawdown",
+    "emotion_prob_drawdown",
+    "arousal_drawdown",
+    "hr_drawdown",
+    "signal_diff_abs_energy",
+    "signal_roll_std_energy"
+  ]
+}
