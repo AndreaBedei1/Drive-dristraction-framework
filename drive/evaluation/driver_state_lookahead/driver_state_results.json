@@ -84,8 +84,8 @@
     {
       "model": "logreg_tuned",
       "calibration": "isotonic",
-      "ap_cal": 0.2948661356470855,
-      "brier_cal": 0.1550556208755865
+      "ap_cal": 0.2947949411409629,
+      "brier_cal": 0.15505562087558653
     }
   ],
   "samples": {

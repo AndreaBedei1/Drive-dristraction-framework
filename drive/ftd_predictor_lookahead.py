@@ -78,8 +78,8 @@ DATA_PATH   = 'data/'
 OUTPUT_DIR  = 'evaluation/'
 RANDOM_SEED = 42
 
-H_CANDIDATES = [10]    # hangover length (seconds)
-T_CANDIDATES = [3, 5]  # lookahead window for target (seconds)
+H_CANDIDATES = [6, 8, 10, 12]    # hangover length (seconds)
+T_CANDIDATES = [3, 5, 7]  # lookahead window for target (seconds)
 
 RECALL_LEVELS = [0.80, 0.85, 0.90, 0.95]
 N_BOOTSTRAP   = 500

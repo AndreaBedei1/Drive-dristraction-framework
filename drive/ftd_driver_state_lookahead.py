@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     PrecisionRecallDisplay,
@@ -40,6 +41,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import GridSearchCV, GroupKFold, RandomizedSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.frozen import FrozenEstimator
 
 
 RANDOM_SEED = 42
@@ -72,7 +74,7 @@ DRIVER_STATE_LABEL_COLS = [
     "emotion_label_end",
 ]
 
-FEATURE_COLS = [
+BASE_FEATURE_COLS = [
     "time_in_distraction",
     "time_since_distraction_end",
     "within_distraction",
@@ -103,6 +105,41 @@ FEATURE_COLS = [
     "sensor_missing_flag",
     "baseline_error_rate",
 ]
+
+ROLL_SOURCE_COLS = ["model_prob", "emotion_prob", "arousal", "hr_bpm"]
+ROLL_SPANS = [5, 15]
+ROLL_FEATURE_COLS = [
+    f"{col}_ema{span}" for col in ROLL_SOURCE_COLS for span in ROLL_SPANS
+] + [
+    f"{col}_dev_ema{span}" for col in ROLL_SOURCE_COLS for span in ROLL_SPANS
+] + [
+    f"{col}_diff1" for col in ROLL_SOURCE_COLS
+] + [
+    f"{col}_diff1_abs" for col in ROLL_SOURCE_COLS
+] + [
+    f"{col}_roll_std{span}" for col in ROLL_SOURCE_COLS for span in ROLL_SPANS
+] + [
+    f"{col}_roll_range{span}" for col in ROLL_SOURCE_COLS for span in ROLL_SPANS
+] + [
+    "state_energy",
+    "state_imbalance",
+    "model_emotion_gap_abs",
+    "model_emotion_product",
+    "arousal_hr_coupling",
+    "model_arousal_coupling",
+    "emotion_hr_coupling",
+    "cum_model_prob_mean",
+    "cum_emotion_prob_mean",
+    "cum_state_load_mean",
+    "model_prob_drawdown",
+    "emotion_prob_drawdown",
+    "arousal_drawdown",
+    "hr_drawdown",
+    "signal_diff_abs_energy",
+    "signal_roll_std_energy",
+]
+
+FEATURE_COLS = BASE_FEATURE_COLS + ROLL_FEATURE_COLS
 
 
 def parse_int_list(raw: str) -> List[int]:
@@ -167,6 +204,12 @@ def resolve_xgb_device(requested: str) -> str:
 
 def load_data(data_path: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     path = Path(data_path)
+    if not path.exists():
+        alt = Path(__file__).resolve().parent / str(data_path)
+        if alt.exists():
+            path = alt
+    if not path.exists():
+        raise FileNotFoundError(f"Data path not found: {data_path}")
     d = pd.read_csv(path / "Dataset Distractions_distraction.csv")
     e = pd.read_csv(path / "Dataset Errors_distraction.csv")
     eb = pd.read_csv(path / "Dataset Errors_baseline.csv")
@@ -200,7 +243,7 @@ def load_data(data_path: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame,
     to_numeric(e, ["model_prob", "emotion_prob"])
     to_numeric(db, ["run_duration_seconds", "hr_baseline", "arousal_baseline"])
 
-    d["model_pred_start"] = d["model_pred_start"].replace(UNKNOWN_LABEL, np.nan)
+    d["model_pred_start"] = d["model_pred_start"].where(d["model_pred_start"] != UNKNOWN_LABEL, np.nan)
     d["model_pred_start"] = d["model_pred_start"].fillna(d["model_pred_end"])
     d["model_pred_start"] = norm_label(d["model_pred_start"])
 
@@ -518,6 +561,7 @@ def generate_samples(
                         "user_id": uid,
                         "run_id": int(rid),
                         "target": int(target),
+                        "sample_ts": ts,
                         "phase_sec": float(phase_sec),
                         "time_in_distraction": t_in,
                         "time_since_distraction_end": t_after,
@@ -556,6 +600,82 @@ def generate_samples(
         return df
     df = df.replace([np.inf, -np.inf], np.nan)
     return df
+
+
+def add_causal_session_features(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    out["_ord"] = np.arange(len(out))
+    out = out.sort_values(["user_id", "run_id", "sample_ts", "_ord"]).reset_index(drop=True)
+    grp = out.groupby(["user_id", "run_id"], sort=False)
+
+    for col in ROLL_SOURCE_COLS:
+        for span in ROLL_SPANS:
+            ema = grp[col].transform(lambda s: s.ewm(span=span, adjust=False).mean())
+            out[f"{col}_ema{span}"] = ema
+            out[f"{col}_dev_ema{span}"] = out[col] - ema
+            out[f"{col}_roll_std{span}"] = grp[col].transform(
+                lambda s: s.rolling(window=span, min_periods=1).std(ddof=0)
+            ).fillna(0.0)
+            out[f"{col}_roll_range{span}"] = grp[col].transform(
+                lambda s: s.rolling(window=span, min_periods=1).max()
+                - s.rolling(window=span, min_periods=1).min()
+            ).fillna(0.0)
+        out[f"{col}_diff1"] = grp[col].diff().fillna(0.0)
+        out[f"{col}_diff1_abs"] = np.abs(out[f"{col}_diff1"])
+
+    out["state_energy"] = (
+        out["arousal_delta_sq"]
+        + out["hr_delta_sq"]
+        + out["model_prob_sq"]
+        + out["emotion_prob_sq"]
+    ) / 4.0
+    out["state_imbalance"] = (
+        np.abs(out["arousal_delta_baseline"]) + np.abs(out["hr_delta_baseline"])
+    )
+    out["model_emotion_gap_abs"] = np.abs(out["model_prob"] - out["emotion_prob"])
+    out["model_emotion_product"] = out["model_prob"] * out["emotion_prob"]
+    out["arousal_hr_coupling"] = out["arousal_delta_baseline"] * out["hr_delta_baseline"]
+    out["model_arousal_coupling"] = out["model_prob"] * out["arousal_delta_baseline"]
+    out["emotion_hr_coupling"] = out["emotion_prob"] * out["hr_delta_baseline"]
+
+    out["cum_model_prob_mean"] = grp["model_prob"].cumsum() / (grp.cumcount() + 1.0)
+    out["cum_emotion_prob_mean"] = grp["emotion_prob"].cumsum() / (grp.cumcount() + 1.0)
+    state_load = (
+        out["model_prob"]
+        + out["emotion_prob"]
+        + np.abs(out["arousal_delta_baseline"])
+        + np.abs(out["hr_delta_baseline"])
+    ) / 4.0
+    out["cum_state_load_mean"] = state_load.groupby([out["user_id"], out["run_id"]]).cumsum() / (grp.cumcount() + 1.0)
+
+    out["model_prob_drawdown"] = grp["model_prob"].cummax() - out["model_prob"]
+    out["emotion_prob_drawdown"] = grp["emotion_prob"].cummax() - out["emotion_prob"]
+    out["arousal_drawdown"] = grp["arousal"].cummax() - out["arousal"]
+    out["hr_drawdown"] = grp["hr_bpm"].cummax() - out["hr_bpm"]
+    out["signal_diff_abs_energy"] = (
+        out["model_prob_diff1_abs"]
+        + out["emotion_prob_diff1_abs"]
+        + out["arousal_diff1_abs"]
+        + out["hr_bpm_diff1_abs"]
+    ) / 4.0
+    out["signal_roll_std_energy"] = (
+        out["model_prob_roll_std5"]
+        + out["emotion_prob_roll_std5"]
+        + out["arousal_roll_std5"]
+        + out["hr_bpm_roll_std5"]
+    ) / 4.0
+
+    out = out.sort_values("_ord").drop(columns=["_ord"]).reset_index(drop=True)
+    return out
+
+
+def keep_hangover_only(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    # Exclude points sampled while distraction is ongoing.
+    return df[df["within_distraction"] < 0.5].copy()
 
 
 def fit_feature_postprocess(df_train: pd.DataFrame) -> Dict[str, pd.Series]:
@@ -619,6 +739,8 @@ def quick_config_search(
     for H in H_vals:
         for T in T_vals:
             df = generate_samples(H, T, train_users, wbs, webs, errs, baselines, pred_enc, emo_enc, global_model_prob, global_emotion_prob)
+            df = keep_hangover_only(df)
+            df = add_causal_session_features(df)
             if df.empty or df["target"].nunique() < 2:
                 records.append({"H": int(H), "T": int(T), "ap_mean": np.nan, "ap_std": np.nan, "brier_mean": np.nan, "n": int(len(df))})
                 continue
@@ -735,7 +857,38 @@ def tune_models(
     )
     lr_grid.fit(X_tr, y_tr, groups=groups)
     LOG.info("tuned_logreg cv_ap=%.4f", float(lr_grid.best_score_))
-    return {"xgb_tuned": xgb_search.best_estimator_, "logreg_tuned": lr_grid.best_estimator_}
+
+    hgb = HistGradientBoostingClassifier(
+        loss="log_loss",
+        random_state=RANDOM_SEED,
+        learning_rate=0.05,
+        max_iter=350,
+        max_depth=6,
+        min_samples_leaf=40,
+        l2_regularization=1.0,
+    )
+    hgb_grid = GridSearchCV(
+        estimator=hgb,
+        param_grid={
+            "learning_rate": [0.03, 0.05],
+            "max_iter": [250, 350, 500],
+            "max_depth": [4, 6, None],
+            "min_samples_leaf": [20, 40],
+            "l2_regularization": [0.0, 1.0],
+        },
+        scoring="average_precision",
+        cv=GroupKFold(n_splits=n_splits),
+        n_jobs=1,
+        refit=True,
+    )
+    hgb_grid.fit(X_tr, y_tr, groups=groups)
+    LOG.info("tuned_hgb cv_ap=%.4f", float(hgb_grid.best_score_))
+
+    return {
+        "xgb_tuned": xgb_search.best_estimator_,
+        "logreg_tuned": lr_grid.best_estimator_,
+        "hgb_tuned": hgb_grid.best_estimator_,
+    }
 
 
 def select_threshold_f1(y_true: np.ndarray, prob: np.ndarray) -> float:
@@ -792,7 +945,7 @@ def calibrate_candidate(model, X_cal: np.ndarray, y_cal: np.ndarray):
     candidates.append(("none", model, p_raw))
     for method in ["sigmoid", "isotonic"]:
         try:
-            cal = CalibratedClassifierCV(estimator=model, method=method, cv="prefit")
+            cal = CalibratedClassifierCV(estimator=FrozenEstimator(model), method=method)
             cal.fit(X_cal, y_cal)
             p = cal.predict_proba(X_cal)[:, 1]
             candidates.append((method, cal, p))
@@ -812,9 +965,69 @@ def calibrate_candidate(model, X_cal: np.ndarray, y_cal: np.ndarray):
     return best
 
 
+def optimize_blend_candidate(
+    cal_probs: Dict[str, np.ndarray],
+    test_probs: Dict[str, np.ndarray],
+    y_cal: np.ndarray,
+    step: float = 0.05,
+):
+    names = list(cal_probs.keys())
+    if len(names) < 2:
+        return None
+
+    # Keep blend search tractable.
+    if len(names) > 3:
+        ranked = sorted(
+            names,
+            key=lambda n: float(average_precision_score(y_cal, cal_probs[n])),
+            reverse=True,
+        )
+        names = ranked[:3]
+
+    step = float(step)
+    if step <= 0.0 or step > 1.0:
+        step = 0.05
+    grid = np.arange(0.0, 1.0 + 1e-9, step)
+
+    best = None
+    best_key = None
+    if len(names) == 2:
+        n0, n1 = names
+        for w0 in grid:
+            w1 = 1.0 - w0
+            p_cal = w0 * cal_probs[n0] + w1 * cal_probs[n1]
+            ap = float(average_precision_score(y_cal, p_cal))
+            br = float(brier_score_loss(y_cal, p_cal))
+            key = (ap, -br)
+            if best is None or key > best_key:
+                p_te = w0 * test_probs[n0] + w1 * test_probs[n1]
+                best = {"names": names, "weights": [float(w0), float(w1)], "p_cal": p_cal, "p_test": p_te, "ap_cal": ap, "brier_cal": br}
+                best_key = key
+    else:
+        n0, n1, n2 = names
+        for w0 in grid:
+            for w1 in grid:
+                w2 = 1.0 - w0 - w1
+                if w2 < -1e-12:
+                    continue
+                w2 = max(0.0, float(w2))
+                p_cal = w0 * cal_probs[n0] + w1 * cal_probs[n1] + w2 * cal_probs[n2]
+                ap = float(average_precision_score(y_cal, p_cal))
+                br = float(brier_score_loss(y_cal, p_cal))
+                key = (ap, -br)
+                if best is None or key > best_key:
+                    p_te = w0 * test_probs[n0] + w1 * test_probs[n1] + w2 * test_probs[n2]
+                    best = {"names": names, "weights": [float(w0), float(w1), float(w2)], "p_cal": p_cal, "p_test": p_te, "ap_cal": ap, "brier_cal": br}
+                    best_key = key
+    return best
+
+
 def unwrap_estimator(model):
     if isinstance(model, CalibratedClassifierCV):
-        return model.estimator
+        est = model.estimator
+        if isinstance(est, FrozenEstimator):
+            return est.estimator
+        return est
     return model
 
 
@@ -890,7 +1103,7 @@ def plot_risk_profile(df_test: pd.DataFrame, prob_test: np.ndarray, best_h: int,
     dfp = df_test.copy()
     dfp["pred"] = prob_test
     dfp["phase_bin"] = np.round(dfp["phase_sec"]).astype(int)
-    lo = int(max(-10, np.floor(dfp["phase_bin"].min())))
+    lo = 0
     hi = int(min(best_h, np.ceil(dfp["phase_bin"].max())))
     dfp = dfp[(dfp["phase_bin"] >= lo) & (dfp["phase_bin"] <= hi)].copy()
     if dfp.empty:
@@ -904,10 +1117,9 @@ def plot_risk_profile(df_test: pd.DataFrame, prob_test: np.ndarray, best_h: int,
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.plot(grp["phase_bin"], grp["target_rate"], "o-", label=f"Empirical P(error in next {best_t}s)")
     ax.plot(grp["phase_bin"], grp["pred_rate"], "s-", label="Predicted impairment probability")
-    ax.axvline(0, color="k", linestyle="--", linewidth=1, label="Distraction end")
-    ax.set_xlabel("Seconds relative to distraction end (negative: during distraction)")
+    ax.set_xlabel("Seconds since distraction end (hangover only)")
     ax.set_ylabel("Probability")
-    ax.set_title(f"Risk profile around distraction end (H={best_h}, T={best_t})")
+    ax.set_title(f"Hangover risk profile (H={best_h}, T={best_t})")
     ax.grid(alpha=0.3)
     ax.legend()
     fig.tight_layout()
@@ -989,6 +1201,12 @@ def run_pipeline(args) -> Dict:
     df_tr = generate_samples(best_h, best_t, train_users, wbs, webs, errs, baselines, pred_enc, emo_enc, global_model_prob, global_emotion_prob)
     df_ca = generate_samples(best_h, best_t, cal_users, wbs, webs, errs, baselines, pred_enc, emo_enc, global_model_prob, global_emotion_prob)
     df_te = generate_samples(best_h, best_t, test_users, wbs, webs, errs, baselines, pred_enc, emo_enc, global_model_prob, global_emotion_prob)
+    df_tr = keep_hangover_only(df_tr)
+    df_ca = keep_hangover_only(df_ca)
+    df_te = keep_hangover_only(df_te)
+    df_tr = add_causal_session_features(df_tr)
+    df_ca = add_causal_session_features(df_ca)
+    df_te = add_causal_session_features(df_te)
 
     for name, df in [("train", df_tr), ("cal", df_ca), ("test", df_te)]:
         if df.empty or df["target"].nunique() < 2:
@@ -1019,8 +1237,20 @@ def run_pipeline(args) -> Dict:
 
     model_selection = []
     best_pack = None
+    cal_prob_map: Dict[str, np.ndarray] = {}
+    test_prob_map: Dict[str, np.ndarray] = {}
+    raw_test_prob_map: Dict[str, np.ndarray] = {}
+    calibrated_models: Dict[str, object] = {}
+
     for name, model in models.items():
         cal_name, cal_model, p_cal, ap_cal, brier_cal = calibrate_candidate(model, X_ca, y_ca)
+        p_te_cal = cal_model.predict_proba(X_te)[:, 1]
+        p_te_raw = model.predict_proba(X_te)[:, 1]
+        cal_prob_map[name] = p_cal
+        test_prob_map[name] = p_te_cal
+        raw_test_prob_map[name] = p_te_raw
+        calibrated_models[name] = cal_model
+
         rec = {
             "model": name,
             "calibration": cal_name,
@@ -1031,23 +1261,56 @@ def run_pipeline(args) -> Dict:
         key = (ap_cal, -brier_cal)
         if best_pack is None or key > best_pack["key"]:
             best_pack = {
+                "kind": "single",
                 "key": key,
                 "name": name,
                 "calibration": cal_name,
                 "model": cal_model,
+                "base_model": model,
                 "p_cal": p_cal,
+                "p_test": p_te_cal,
+                "p_test_raw": p_te_raw,
+            }
+
+    blend = optimize_blend_candidate(
+        cal_probs=cal_prob_map,
+        test_probs=test_prob_map,
+        y_cal=y_ca,
+        step=args.blend_step,
+    )
+    if blend is not None:
+        raw_blend = np.zeros_like(next(iter(raw_test_prob_map.values())))
+        for nm, w in zip(blend["names"], blend["weights"]):
+            raw_blend += float(w) * raw_test_prob_map[nm]
+        blend_rec = {
+            "model": "blend_calibrated",
+            "calibration": "weighted_average",
+            "ap_cal": float(blend["ap_cal"]),
+            "brier_cal": float(blend["brier_cal"]),
+            "weights": {str(nm): float(w) for nm, w in zip(blend["names"], blend["weights"])},
+        }
+        model_selection.append(blend_rec)
+        key = (float(blend["ap_cal"]), -float(blend["brier_cal"]))
+        if best_pack is None or key > best_pack["key"]:
+            best_pack = {
+                "kind": "blend",
+                "key": key,
+                "name": "blend_calibrated",
+                "calibration": "weighted_average",
+                "weights": {str(nm): float(w) for nm, w in zip(blend["names"], blend["weights"])},
+                "component_models": {nm: calibrated_models[nm] for nm in blend["names"]},
+                "p_cal": blend["p_cal"],
+                "p_test": blend["p_test"],
+                "p_test_raw": raw_blend,
             }
 
     assert best_pack is not None
-    chosen_model = best_pack["model"]
     chosen_name = str(best_pack["name"])
     chosen_cal = str(best_pack["calibration"])
     p_cal = np.asarray(best_pack["p_cal"], dtype=float)
     threshold = select_threshold_f1(y_ca, p_cal)
-
-    chosen_base = models[chosen_name]
-    p_te_raw = chosen_base.predict_proba(X_te)[:, 1]
-    p_te = chosen_model.predict_proba(X_te)[:, 1]
+    p_te_raw = np.asarray(best_pack["p_test_raw"], dtype=float)
+    p_te = np.asarray(best_pack["p_test"], dtype=float)
 
     metrics_test = eval_metrics(y_te, p_te, threshold)
     ci_ap = bootstrap_ci(y_te, p_te, average_precision_score, n_boot=args.bootstrap)
@@ -1061,11 +1324,30 @@ def run_pipeline(args) -> Dict:
     plot_roc_pr(y_te, p_te, output_dir / "roc_pr_curves.png", f"(H={best_h}, T={best_t})")
     plot_calibration(y_te, p_te_raw, p_te, output_dir / "calibration_curve.png", f"(H={best_h}, T={best_t})")
     plot_risk_profile(df_te, p_te, best_h, best_t, output_dir / "risk_profile.png")
-    plot_feature_importance(chosen_model, output_dir / "feature_importance.png")
+
+    if best_pack["kind"] == "single":
+        importance_model = best_pack["model"]
+        model_artifact = best_pack["model"]
+        base_model_artifact = best_pack["base_model"]
+    else:
+        w = best_pack["weights"]
+        main_component = max(w.keys(), key=lambda k: float(w[k]))
+        importance_model = best_pack["component_models"][main_component]
+        model_artifact = {
+            "kind": "blend_calibrated",
+            "weights": best_pack["weights"],
+            "component_models": best_pack["component_models"],
+        }
+        base_model_artifact = {
+            "kind": "blend_calibrated",
+            "weights": best_pack["weights"],
+            "component_names": list(best_pack["component_models"].keys()),
+        }
+    plot_feature_importance(importance_model, output_dir / "feature_importance.png")
 
     artifact = {
-        "model": chosen_model,
-        "base_model": chosen_base,
+        "model": model_artifact,
+        "base_model": base_model_artifact,
         "feature_postprocess": pp,
         "label_encoders": {"model_pred": le_pred, "emotion": le_emo},
         "encoding_maps": {"model_pred": pred_enc, "emotion": emo_enc},
@@ -1132,6 +1414,8 @@ def run_pipeline(args) -> Dict:
             "name": chosen_name,
             "calibration": chosen_cal,
             "threshold_f1_on_cal": float(threshold),
+            "kind": best_pack["kind"],
+            "blend_weights": best_pack.get("weights"),
         },
         "model_selection_on_cal": model_selection,
         "samples": {"train": int(len(df_tr)), "cal": int(len(df_ca)), "test": int(len(df_te))},
@@ -1164,6 +1448,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--t-values", default="1,2,3,4,5")
     ap.add_argument("--t-parsimony-tol", type=float, default=0.05, help="Allow AP drop up to this value to prefer smaller T.")
     ap.add_argument("--search-iter", type=int, default=20, help="RandomizedSearchCV iterations for final model tuning.")
+    ap.add_argument("--blend-step", type=float, default=0.05, help="Weight step for calibrated model blending on calibration users.")
     ap.add_argument("--bootstrap", type=int, default=300)
     ap.add_argument("--seed", type=int, default=RANDOM_SEED)
     ap.add_argument("--xgb-device", choices=["auto", "cpu", "cuda"], default="auto")
