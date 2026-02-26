@@ -24,13 +24,23 @@ Fixes applied vs original:
       non-negative + explicit flag        used -1.0 as a sentinel mixing sign with magnitude)
   #10 RandomizedSearchCV (n_iter=30)     (original XGB_PARAM_GRID had ~52k combinations per
       replaces full GridSearchCV          fold, making runtime impractical)
+  #11 model_pred_enc removed             (label-encoded integer interpolated as a continuous
+                                          feature — meaningless midpoints, dominated importance
+                                          chart; dropped entirely from FEATURE_COLS and
+                                          generate_samples; fit_label_encoders replaced by
+                                          fit_emotion_encoder returning only the emotion encoder)
+  #12 Sigmoid calibration forced always  (isotonic was triggered for cal sets >1000 samples
+                                          but overfits small-to-medium sets, producing a
+                                          non-monotonic calibrated curve that underperforms
+                                          the raw model on test; sigmoid (2 params) is always
+                                          safe and sufficient here)
 """
 
 import os
 import logging
 import warnings
 from bisect import bisect_left
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 import joblib
 import matplotlib.pyplot as plt
@@ -68,8 +78,8 @@ DATA_PATH   = 'data/'
 OUTPUT_DIR  = 'evaluation/'
 RANDOM_SEED = 42
 
-H_CANDIDATES  = [10]       # hangover length (seconds)
-T_CANDIDATES  = [3, 5]     # lookahead window for target (seconds)
+H_CANDIDATES = [10]    # hangover length (seconds)
+T_CANDIDATES = [3, 5]  # lookahead window for target (seconds)
 
 RECALL_LEVELS = [0.80, 0.85, 0.90, 0.95]
 N_BOOTSTRAP   = 500
@@ -90,14 +100,15 @@ XGB_PARAM_DIST = {
 }
 XGB_SEARCH_ITER = 30
 
-# Fix #9: has_prior_error (binary flag) + time_since_last_error (non-negative seconds)
+# Fix #11: model_pred_enc removed — interpolating an arbitrary integer label
+# encoding produces meaningless midpoint values and dominated feature importance
+# without adding genuine signal.
 FEATURE_COLS = [
     'time_since_last_dist',
     'time_in_current_dist',
     'time_since_dist_end',
     'cognitive_load_decay',
     'model_prob',
-    'model_pred_enc',
     'model_prob_sq',
     'emotion_prob',
     'emotion_label_enc',
@@ -111,10 +122,10 @@ FEATURE_COLS = [
     'distraction_density_rate_60',
     'distraction_density_rate_120',
     'prev_dist_duration',
-    'has_prior_error',        # Fix #9: explicit binary flag
-    'time_since_last_error',  # Fix #9: always non-negative (0.0 when no prior error)
-    'arousal_change_rate',    # Fix #8: decays in hangover
-    'cognitive_load_change_rate',  # Fix #8: decays in hangover
+    'has_prior_error',            # Fix #9: explicit binary flag
+    'time_since_last_error',      # Fix #9: always non-negative (0.0 when no prior error)
+    'arousal_change_rate',        # Fix #8: decays in hangover
+    'cognitive_load_change_rate', # Fix #8: decays in hangover
     'user_hr_baseline',
     'baseline_error_rate',
 ]
@@ -293,7 +304,7 @@ def build_session_lookups(
 # Fix #7: precompute next-window start times once per session
 def precompute_next_starts(wbs: Dict) -> Dict:
     """
-    Returns {key: [next_start_0, next_start_1, ..., None]} parallel to wbs[key].
+    Returns {key: [next_start_0, ..., None]} parallel to wbs[key].
     Eliminates the O(n²) re-scan inside generate_samples.
     """
     next_starts: Dict = {}
@@ -332,10 +343,7 @@ def compute_user_arousal_baseline(
     users_set: Set,
     driving_base: pd.DataFrame,
 ) -> Tuple[Dict, float]:
-    """
-    Fix #5: Use arousal_baseline from driving_base (resting-state measure).
-    Original used distraction-window arousal values which are systematically elevated.
-    """
+    """Fix #5: Use arousal_baseline from driving_base (resting-state measure)."""
     if 'arousal_baseline' not in driving_base.columns:
         log.warning("'arousal_baseline' not in driving_base; defaulting to 0.5")
         return {}, 0.5
@@ -351,9 +359,7 @@ def compute_user_hr_baseline(
     users_set: Set,
     driving_base: pd.DataFrame,
 ) -> Tuple[Dict, float]:
-    """
-    Fix #5: Use hr_baseline from driving_base (resting-state measure).
-    """
+    """Fix #5: Use hr_baseline from driving_base (resting-state measure)."""
     if 'hr_baseline' not in driving_base.columns:
         log.warning("'hr_baseline' not in driving_base; defaulting to 70.0")
         return {}, 70.0
@@ -365,11 +371,12 @@ def compute_user_hr_baseline(
     return {str(k): float(v) for k, v in per_user.items() if pd.notna(v)}, global_med
 
 
-def fit_label_encoders(
+# Fix #11: only the emotion encoder is fitted and used — model_pred_enc dropped entirely
+def fit_emotion_encoder(
     train_users: Set,
     distractions: pd.DataFrame,
     errors_dist: pd.DataFrame,
-) -> Tuple[LabelEncoder, LabelEncoder]:
+) -> LabelEncoder:
     dist_tr = distractions[distractions['user_id'].isin(train_users)]
     err_tr  = errors_dist[errors_dist['user_id'].isin(train_users)]
     emo_vocab = sorted(set(
@@ -379,14 +386,7 @@ def fit_label_encoders(
             err_tr['emotion_label'],
         ]).dropna().tolist() + [UNKNOWN_LABEL]
     ))
-    pred_vocab = sorted(set(
-        pd.concat([
-            dist_tr['model_pred_start'],
-            dist_tr['model_pred_end'],
-            err_tr['model_pred'],
-        ]).dropna().tolist() + [UNKNOWN_LABEL]
-    ))
-    return LabelEncoder().fit(emo_vocab), LabelEncoder().fit(pred_vocab)
+    return LabelEncoder().fit(emo_vocab)
 
 
 def _safe_encode(label, le: LabelEncoder) -> int:
@@ -426,6 +426,7 @@ def _get_prev_dist_duration(uid, rid, ts: pd.Timestamp, wbs: Dict) -> float:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 4. Sample generator
+# Fix #11: le_pred parameter and all model_pred_enc computation removed
 # ──────────────────────────────────────────────────────────────────────────────
 def generate_samples(
     H: int,
@@ -433,7 +434,7 @@ def generate_samples(
     users_set: Set,
     wbs: Dict,
     webs: Dict,
-    next_starts: Dict,          # Fix #7: precomputed per-run list
+    next_starts: Dict,      # Fix #7: precomputed per-run list
     error_dict: Dict,
     arousal_bl_dict: Dict,
     hr_bl_dict: Dict,
@@ -441,8 +442,7 @@ def generate_samples(
     global_arousal_bl: float,
     global_hr_bl: float,
     global_baseline_rate: float,
-    le_emo: LabelEncoder,
-    le_pred: LabelEncoder,
+    le_emo: LabelEncoder,   # Fix #11: only emotion encoder needed
 ) -> pd.DataFrame:
     """
     Generate per-second samples for users_set.
@@ -492,8 +492,7 @@ def generate_samples(
             e_mp = float(row['model_prob_end'])
             s_ep = float(row['emotion_prob_start'])
             e_ep = float(row['emotion_prob_end'])
-            s_pr = _safe_encode(row['model_pred_start'],    le_pred)
-            e_pr = _safe_encode(row['model_pred_end'],      le_pred)
+            # Fix #11: only encode emotion label; model_pred_enc removed entirely
             s_em = _safe_encode(row['emotion_label_start'], le_emo)
             e_em = _safe_encode(row['emotion_label_end'],   le_emo)
 
@@ -506,49 +505,50 @@ def generate_samples(
                 inside_window = float(offset_sec) < win_dur
 
                 if inside_window:
-                    alpha   = float(offset_sec) / max(win_dur, 1e-6)
-                    cur_ar  = s_ar + (e_ar - s_ar) * alpha
-                    cur_hr  = s_hr + (e_hr - s_hr) * alpha
-                    cur_mp  = s_mp + (e_mp - s_mp) * alpha
-                    cur_ep  = s_ep + (e_ep - s_ep) * alpha
-                    # Hold categorical label at start-of-window value until window ends
-                    cur_pr  = s_pr
-                    cur_em  = s_em
-                    time_in   = float(offset_sec)
-                    t_since   = 0.0
-                    t_end     = 0.0
-                    cld       = cur_mp
-                    ar_decay  = cur_ar
+                    alpha    = float(offset_sec) / max(win_dur, 1e-6)
+                    cur_ar   = s_ar + (e_ar - s_ar) * alpha
+                    cur_hr   = s_hr + (e_hr - s_hr) * alpha
+                    cur_mp   = s_mp + (e_mp - s_mp) * alpha
+                    cur_ep   = s_ep + (e_ep - s_ep) * alpha
+                    # Hold categorical emotion label at start value until window ends
+                    cur_em   = s_em
+                    time_in  = float(offset_sec)
+                    t_since  = 0.0
+                    t_end    = 0.0
+                    cld      = cur_mp
+                    ar_decay = cur_ar
                     # Fix #8: change rates are valid inside the window
-                    aro_rate  = aro_rate_window
-                    cld_rate  = cld_rate_window
+                    aro_rate = aro_rate_window
+                    cld_rate = cld_rate_window
                 else:
-                    t_end     = float(offset_sec) - win_dur
-                    dec       = float(np.exp(-t_end / H_f))
-                    cur_ar    = e_ar
-                    cur_hr    = e_hr
-                    cur_mp    = e_mp
-                    cur_ep    = e_ep
-                    cur_pr    = e_pr
-                    cur_em    = e_em
-                    time_in   = 0.0
-                    t_since   = t_end
-                    cld       = cur_mp * dec
-                    ar_decay  = u_aro_bl + (cur_ar - u_aro_bl) * dec
+                    t_end    = float(offset_sec) - win_dur
+                    dec      = float(np.exp(-t_end / H_f))
+                    cur_ar   = e_ar
+                    cur_hr   = e_hr
+                    cur_mp   = e_mp
+                    cur_ep   = e_ep
+                    cur_em   = e_em
+                    time_in  = 0.0
+                    t_since  = t_end
+                    cld      = cur_mp * dec
+                    ar_decay = u_aro_bl + (cur_ar - u_aro_bl) * dec
                     # Fix #8: decay the change rate exponentially in the hangover
-                    aro_rate  = aro_rate_window * dec
-                    cld_rate  = cld_rate_window * dec
+                    aro_rate = aro_rate_window * dec
+                    cld_rate = cld_rate_window * dec
 
                 # Target
-                target    = 0
-                idx_err   = bisect_left(err_ts, bin_start)
+                target  = 0
+                idx_err = bisect_left(err_ts, bin_start)
                 if idx_err < len(err_ts) and err_ts[idx_err] < bin_start + pd.Timedelta(seconds=T):
                     target = 1
 
                 # Fix #9: explicit binary flag + non-negative elapsed time
-                idx_prev       = bisect_left(err_ts, bin_start) - 1
-                has_prior      = 1.0 if idx_prev >= 0 else 0.0
-                t_since_err    = float((bin_start - err_ts[idx_prev]).total_seconds()) if idx_prev >= 0 else 0.0
+                idx_prev    = bisect_left(err_ts, bin_start) - 1
+                has_prior   = 1.0 if idx_prev >= 0 else 0.0
+                t_since_err = (
+                    float((bin_start - err_ts[idx_prev]).total_seconds())
+                    if idx_prev >= 0 else 0.0
+                )
 
                 arousal_dev = cur_ar - u_aro_bl
                 d30  = _get_distraction_density(uid, rid, bin_start, 30,  webs)
@@ -562,12 +562,11 @@ def generate_samples(
                     'offset_sec':           offset_sec,
                     'target':               int(target),
 
-                    'time_since_last_dist':       t_since,
+                    'time_since_last_dist':        t_since,
                     'time_in_current_dist':        time_in,
                     'time_since_dist_end':         t_end,
                     'cognitive_load_decay':        cld,
                     'model_prob':                  cur_mp,
-                    'model_pred_enc':              float(cur_pr),
                     'model_prob_sq':               cur_mp ** 2,
                     'emotion_prob':                cur_ep,
                     'emotion_label_enc':           float(cur_em),
@@ -609,7 +608,7 @@ def compute_user_strat_labels(
 ) -> np.ndarray:
     """
     Binary label per user: 1 if the user's error-per-distraction-second rate
-    is at or above the median across all users.  Gives StratifiedGroupKFold
+    is at or above the median across all users. Gives StratifiedGroupKFold
     a meaningful signal to balance (original passed all-zero y).
     """
     user_err = (
@@ -617,9 +616,12 @@ def compute_user_strat_labels(
         .reindex(all_users, fill_value=0)
         .values.astype(float)
     )
-    dur_col = (distractions['timestamp_end'] - distractions['timestamp_start']).dt.total_seconds().clip(lower=0)
-    dist_copy = distractions.copy()
-    dist_copy['dur'] = dur_col
+    dist_copy        = distractions.copy()
+    dist_copy['dur'] = (
+        (distractions['timestamp_end'] - distractions['timestamp_start'])
+        .dt.total_seconds()
+        .clip(lower=0)
+    )
     user_dur = (
         dist_copy.groupby('user_id')['dur'].sum()
         .reindex(all_users, fill_value=1.0)
@@ -642,7 +644,7 @@ def build_and_tune_pipeline(
     n_inner_splits: int = 3,
     verbose: int = 0,
 ) -> Pipeline:
-    spw = max((1.0 - pos_rate) / max(pos_rate, 1e-6), 1.0)
+    spw      = max((1.0 - pos_rate) / max(pos_rate, 1e-6), 1.0)
     pipeline = Pipeline([
         ('scaler', StandardScaler()),
         ('xgb', xgb.XGBClassifier(
@@ -784,6 +786,9 @@ def main() -> int:
     # Fix #6: per-user stratification labels for StratifiedGroupKFold
     user_strat_y = compute_user_strat_labels(all_users, errors_dist, distractions)
 
+    # Fix #11: emotion encoder only (model_pred_enc dropped)
+    le_emotion_f = fit_emotion_encoder(train_users, distractions, errors_dist)
+
     # ──────────────────────────────────────────────────────────────────────────
     # 5. Nested CV over H × T
     # ──────────────────────────────────────────────────────────────────────────
@@ -820,12 +825,13 @@ def main() -> int:
                 fold_err  = apply_imputation(errors_dist,  fold_imp['err'])
 
                 # Fix #5: baselines from driving_base
-                wbs_tr, webs_tr              = build_session_lookups(train_f, fold_dist)
-                ns_tr                        = precompute_next_starts(wbs_tr)
-                bsl_dict, gr                 = compute_user_baselines(train_f, errors_base, driving_base)
-                aro_dict, aro_gl             = compute_user_arousal_baseline(train_f, driving_base)
-                hr_dict,  hr_gl              = compute_user_hr_baseline(train_f, driving_base)
-                le_emo_f, le_pred_f          = fit_label_encoders(train_f, fold_dist, fold_err)
+                wbs_tr, webs_tr  = build_session_lookups(train_f, fold_dist)
+                ns_tr            = precompute_next_starts(wbs_tr)
+                bsl_dict, gr     = compute_user_baselines(train_f, errors_base, driving_base)
+                aro_dict, aro_gl = compute_user_arousal_baseline(train_f, driving_base)
+                hr_dict,  hr_gl  = compute_user_hr_baseline(train_f, driving_base)
+                # Fix #11: emotion encoder only, fitted on fold-train users
+                le_emo_fold = fit_emotion_encoder(train_f, fold_dist, fold_err)
 
                 fold_err_dict: Dict = {}
                 for (uid, rid), grp in fold_err.groupby(['user_id', 'run_id']):
@@ -837,7 +843,7 @@ def main() -> int:
                     fold_err_dict,
                     aro_dict, hr_dict, bsl_dict,
                     aro_gl, hr_gl, gr,
-                    le_emo_f, le_pred_f,
+                    le_emo_fold,
                 )
                 if df_tr_f.empty or df_tr_f['target'].nunique() < 2:
                     log.warning("  Fold %d: skipped (train insufficient diversity)", fold_i)
@@ -861,7 +867,7 @@ def main() -> int:
                     fold_err_dict,
                     aro_dict, hr_dict, bsl_dict,
                     aro_gl, hr_gl, gr,
-                    le_emo_f, le_pred_f,
+                    le_emo_fold,
                 )
                 if df_te_f.empty or df_te_f['target'].nunique() < 2:
                     log.warning("  Fold %d: skipped (test insufficient diversity)", fold_i)
@@ -912,7 +918,6 @@ def main() -> int:
     train_baselines, train_gr = compute_user_baselines(train_users, errors_base, driving_base)
     train_aro_bl, train_aro_g = compute_user_arousal_baseline(train_users, driving_base)
     train_hr_bl,  train_hr_g  = compute_user_hr_baseline(train_users, driving_base)
-    le_emotion_f, le_pred_f   = fit_label_encoders(train_users, distractions, errors_dist)
 
     df_train_final = generate_samples(
         best_H, best_T, train_users,
@@ -920,7 +925,7 @@ def main() -> int:
         error_dict_all,
         train_aro_bl, train_hr_bl, train_baselines,
         train_aro_g, train_hr_g, train_gr,
-        le_emotion_f, le_pred_f,
+        le_emotion_f,
     )
 
     wbs_cal_f, webs_cal_f = build_session_lookups(cal_users, distractions)
@@ -931,7 +936,7 @@ def main() -> int:
         error_dict_all,
         train_aro_bl, train_hr_bl, train_baselines,
         train_aro_g, train_hr_g, train_gr,
-        le_emotion_f, le_pred_f,
+        le_emotion_f,
     )
 
     for split_name, df in [('train', df_train_final), ('calibration', df_cal_final)]:
@@ -955,15 +960,16 @@ def main() -> int:
         verbose=1,
     )
 
-    # Fix #2: split calibration set — fit calibrator on 70 %, select threshold on 30 %
     # Fix #1: cv="prefit" — keep the tuned weights from best_model
-    n_cal_fit  = max(2, int(0.70 * len(X_ca_f)))
-    X_cal_fit,  X_cal_eval  = X_ca_f[:n_cal_fit],  X_ca_f[n_cal_fit:]
-    y_cal_fit,  y_cal_eval  = y_ca_f[:n_cal_fit],  y_ca_f[n_cal_fit:]
+    # Fix #2: split calibration set — fit on 70 %, select threshold on 30 %
+    # Fix #12: sigmoid always — isotonic overfits small-to-medium cal sets and produced
+    #          a non-monotonic test curve that underperformed the raw model
+    n_cal_fit               = max(2, int(0.70 * len(X_ca_f)))
+    X_cal_fit, X_cal_eval   = X_ca_f[:n_cal_fit], X_ca_f[n_cal_fit:]
+    y_cal_fit, y_cal_eval   = y_ca_f[:n_cal_fit], y_ca_f[n_cal_fit:]
 
-    cal_method = 'isotonic' if n_cal_fit > 1000 else 'sigmoid'
-    log.info("  Using %s calibration (fit set: %d samples)", cal_method, n_cal_fit)
-    calibrated_model = CalibratedClassifierCV(best_model, method=cal_method, cv="prefit")  # Fix #1
+    log.info("  Using sigmoid calibration (fit set: %d samples)", n_cal_fit)
+    calibrated_model = CalibratedClassifierCV(best_model, method='sigmoid', cv='prefit')
     calibrated_model.fit(X_cal_fit, y_cal_fit)
 
     # Fix #2: threshold selected on the held-out eval portion
@@ -985,7 +991,7 @@ def main() -> int:
         error_dict_all,
         train_aro_bl, train_hr_bl, train_baselines,
         train_aro_g, train_hr_g, train_gr,
-        le_emotion_f, le_pred_f,
+        le_emotion_f,
     )
     if df_test_final.empty or df_test_final['target'].nunique() < 2:
         log.error("Test set has insufficient class diversity — metrics will be unreliable.")
@@ -1093,6 +1099,7 @@ def main() -> int:
 
     # ──────────────────────────────────────────────────────────────────────────
     # 9. Save artifacts
+    # Fix #11: le_pred removed from artifact (feature no longer exists)
     # ──────────────────────────────────────────────────────────────────────────
     try:
         artifact = {
@@ -1106,9 +1113,8 @@ def main() -> int:
             'best_H':               best_H,
             'best_T':               best_T,
             'feature_cols':         FEATURE_COLS,
-            # Encoders
+            # Encoders (Fix #11: emotion only, le_pred removed)
             'le_emotion':           le_emotion_f,
-            'le_pred':              le_pred_f,
             # Baselines (training users only)
             'train_baselines':      train_baselines,
             'train_global_rate':    train_gr,
