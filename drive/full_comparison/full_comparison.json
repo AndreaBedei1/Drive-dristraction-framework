@@ -1,0 +1,30 @@
+[
+  {
+    "name": "HMM (no-time)",
+    "auc_roc": 0.7076464710256403,
+    "avg_precision": 0.1115196049436022,
+    "calibration_r": 0.9,
+    "c_index": 0.9206,
+    "kendall_tau": -0.5224,
+    "onset_effect_r": 0.9987,
+    "recovery_tau_median": 12.84,
+    "recovery_r2_median": 0.762,
+    "recovery_n_events": 657,
+    "delta_auc_vs_time": -0.0199,
+    "delta_ap_vs_time": -0.0086
+  },
+  {
+    "name": "Time-only LR",
+    "auc_roc": 0.7275499901392594,
+    "avg_precision": 0.12012619752020107,
+    "calibration_r": 0.9833333333333333,
+    "c_index": 1.0,
+    "kendall_tau": -1.0,
+    "onset_effect_r": 1.0,
+    "recovery_tau_median": 14.14,
+    "recovery_r2_median": 0.993,
+    "recovery_n_events": 657,
+    "delta_auc_vs_time": 0.0,
+    "delta_ap_vs_time": 0.0
+  }
+]

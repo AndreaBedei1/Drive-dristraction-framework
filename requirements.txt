@@ -26,3 +26,6 @@ pandas
 scipy
 scikit-learn
 xgboost
+lifelines
+seaborn
+tqdm

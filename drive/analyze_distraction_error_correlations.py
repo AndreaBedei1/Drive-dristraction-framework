@@ -42,13 +42,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--distractions",
         type=Path,
-        default=Path("data") / "Dataset Distractions.csv",
+        default=Path("data") / "Dataset Distractions_distraction.csv",
         help="Path to Dataset Distractions CSV.",
     )
     parser.add_argument(
         "--errors",
         type=Path,
-        default=Path("data") / "Dataset Errors.csv",
+        default=Path("data") / "Dataset Errors_distraction.csv",
         help="Path to Dataset Errors CSV.",
     )
     parser.add_argument(
