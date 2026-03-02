@@ -1,6 +1,6 @@
 [
   {
-    "name": "HMM (no-time)",
+    "name": "HMM",
     "auc_roc": 0.7076464710256403,
     "avg_precision": 0.1115196049436022,
     "calibration_r": 0.9,

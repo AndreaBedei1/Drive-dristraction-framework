@@ -47,10 +47,10 @@ from sklearn.metrics import (
 )
 
 # Import the no‑time HMM module – contains the data generation pipeline
-import ftd_hmm_no_time as notime_module
+import ftd_hmm as notime_module
 
 # Import construct‑validity functions from evaluation scripts
-from evaluation_no_time import (
+from evaluation import (
     compute_cindex,
     compute_onset_discrimination,
     fit_recovery_curves,
@@ -117,7 +117,7 @@ def score_model(name: str, proba: np.ndarray, target: np.ndarray) -> dict:
 # Plotting functions
 # ------------------------------------------------------------------------------
 COLORS = {
-    "HMM (no-time)":    "#2ecc71",
+    "HMM":    "#2ecc71",
     "Time-only LR":     "#3498db",
 }
 
@@ -422,7 +422,7 @@ def run(args):
 
     # ---- Collect predictive metrics (keep proba & df for later) ----
     models = [
-        {**score_model("HMM (no-time)", ftd_notime, target_te), "proba": ftd_notime, "df": df_te_notime},
+        {**score_model("HMM", ftd_notime, target_te), "proba": ftd_notime, "df": df_te_notime},
         {**score_model("Time-only LR", lr_proba_te, target_te), "proba": lr_proba_te, "df": df_te_notime},
     ]
 
@@ -473,7 +473,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(
         description="Full evaluation: HMM vs time‑only LR including construct validity"
     )
-    p.add_argument("--artifact-notime", default="result_no_time/impairment_hmm.joblib",
+    p.add_argument("--artifact-notime", default="result/impairment_hmm.joblib",
                    help="Path to the no‑time HMM artifact")
     p.add_argument("--data-path", default="data", help="Path to data directory")
     p.add_argument("--output-dir", default="full_comparison/",

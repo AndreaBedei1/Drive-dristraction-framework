@@ -1356,7 +1356,7 @@ def run_pipeline(args):
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Driver Impairment HMM with PIC labels (physiological only, no time features)")
     p.add_argument("--data-path", default="data", help="Path to data directory")
-    p.add_argument("--output-dir", default="result_no_time/")
+    p.add_argument("--output-dir", default="result/")
     p.add_argument("--lookahead-t", type=int, default=1, help="T (seconds)")
     p.add_argument("--seed", type=int, default=RANDOM_SEED)
     p.add_argument("--n-states", type=int, default=3, help="Number of impairment states")

@@ -45,7 +45,7 @@ import pandas as pd
 from scipy.optimize import curve_fit
 from scipy.stats import kendalltau, mannwhitneyu, spearmanr
 from hmmlearn.hmm import GaussianHMM
-from ftd_hmm_no_time import *
+from ftd_hmm import *
 
 LOG = logging.getLogger("construct_validity")
 logging.basicConfig(level=logging.INFO,
@@ -1011,9 +1011,9 @@ def run_standalone(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Construct validity evaluation for FTD score")
-    p.add_argument("--artifact",    default="result_no_time/impairment_hmm.joblib",
+    p.add_argument("--artifact",    default="result/impairment_hmm.joblib",
                    help="Path to impairment_hmm.joblib")
     p.add_argument("--data-path",   default="data")
-    p.add_argument("--output-dir",  default="result_no_time/construct_validity/")
+    p.add_argument("--output-dir",  default="result/construct_validity/")
     p.add_argument("--seed",        type=int, default=42)
     raise SystemExit(run_standalone(p.parse_args()))
