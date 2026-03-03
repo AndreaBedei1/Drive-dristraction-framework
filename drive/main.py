@@ -24,6 +24,7 @@ from src.datasets import (
     ErrorDatasetLogger,
     DistractionDatasetLogger,
     BaselineDrivingTimeLogger,
+    TimelineDatasetLogger,
 )
 from src.error_monitor import ErrorMonitor
 from src.arousal_provider import ArousalSnapshot
@@ -111,13 +112,15 @@ def _compute_next_run_id(
     run_mode = str(mode or "").strip().lower()
     participant = str(user_id or "").strip()
 
-    filenames = [f"Dataset Errors{suffix}.csv"]
+    filenames = [
+        f"Dataset Errors{suffix}.csv",
+        f"Dataset Distractions{suffix}.csv",
+        f"Dataset Timeline{suffix}.csv",
+    ]
     if run_mode == "test":
-        filenames.append(f"Dataset Distractions{suffix}.csv")
+        pass
     elif profile == "baseline":
         filenames.append(f"Dataset Driving Time{suffix}.csv")
-    else:
-        filenames.append(f"Dataset Distractions{suffix}.csv")
 
     max_run_id = 0
     for filename in dict.fromkeys(filenames):
@@ -692,12 +695,21 @@ def main() -> int:
     if dataset_profile == "baseline":
         distractions_enabled = False
 
+    timeline_logger = TimelineDatasetLogger(
+        output_dir=output_dir,
+        context=context,
+        suffix=dataset_suffix,
+        model_provider=model_inference,
+        arousal_provider=arousal_client,
+        emotion_provider=emotion_inference,
+    )
     error_logger = ErrorDatasetLogger(
         output_dir=output_dir,
         context=context,
         suffix=dataset_suffix,
         model_provider=model_inference,
         emotion_provider=emotion_inference,
+        timeline_logger=timeline_logger,
     )
     baseline_time_logger = None
     if dataset_profile == "baseline":
@@ -706,16 +718,15 @@ def main() -> int:
             context=context,
             suffix=dataset_suffix,
         )
-    distraction_logger = None
-    if distractions_enabled:
-        distraction_logger = DistractionDatasetLogger(
-            output_dir=output_dir,
-            context=context,
-            suffix=dataset_suffix,
-            model_provider=model_inference,
-            arousal_provider=arousal_client,
-            emotion_provider=emotion_inference,
-        )
+    distraction_logger = DistractionDatasetLogger(
+        output_dir=output_dir,
+        context=context,
+        suffix=dataset_suffix,
+        model_provider=model_inference,
+        arousal_provider=arousal_client,
+        emotion_provider=emotion_inference,
+        timeline_logger=timeline_logger,
+    )
 
     error_monitor = ErrorMonitor(
         world=world,
@@ -723,6 +734,7 @@ def main() -> int:
         config=cfg.errors,
         preferred_role_name="hero",
         tick_source=ticker,
+        timeline_logger=timeline_logger,
     )
     print(
         "[Runner] Error monitor frequencies: "
@@ -753,8 +765,6 @@ def main() -> int:
     distraction_windows = []
 
     if distractions_enabled:
-        if distraction_logger is None:
-            raise RuntimeError("Distraction logger is required when distractions are enabled.")
         coord = DistractionCoordinator(cfg.distractions.min_gap_between_windows_seconds)
         window_titles = list(cfg.distractions.window_titles)
         while len(window_titles) < 2:
@@ -955,6 +965,18 @@ def main() -> int:
 
         monitor.stop()
         error_monitor.stop()
+        try:
+            monitor.join(timeout=2.0)
+        except Exception:
+            pass
+        try:
+            error_monitor.join(timeout=2.0)
+        except Exception:
+            pass
+        try:
+            timeline_logger.flush_pending()
+        except Exception:
+            pass
         for w in distraction_windows:
             w.stop()
         for w in distraction_windows:

@@ -10,7 +10,7 @@ from typing import Dict, Optional, List, Tuple
 import carla
 
 from src.agents.tools.misc import get_trafficlight_trigger_location, is_within_distance
-from src.datasets import ErrorDatasetLogger
+from src.datasets import ErrorDatasetLogger, TimelineDatasetLogger
 from src.utils import find_hero_vehicle
 
 
@@ -24,6 +24,7 @@ class ErrorMonitor(threading.Thread):
         config,
         preferred_role_name: str = "hero",
         tick_source: Optional[object] = None,
+        timeline_logger: Optional[TimelineDatasetLogger] = None,
     ) -> None:
         """Create a monitor bound to a CARLA world and logger."""
         super().__init__(daemon=True)
@@ -32,6 +33,7 @@ class ErrorMonitor(threading.Thread):
         self._cfg = config
         self._role = preferred_role_name
         self._tick_source = tick_source
+        self._timeline_logger = timeline_logger
         self._stop_event = threading.Event()
 
         self._hero: Optional[carla.Vehicle] = None
@@ -833,6 +835,11 @@ class ErrorMonitor(threading.Thread):
 
             sim_time = float(snapshot.timestamp.elapsed_seconds)
             self._last_sim_time = sim_time
+            if self._timeline_logger is not None:
+                try:
+                    self._timeline_logger.update(self._world, hero)
+                except Exception:
+                    pass
             if self._last_time is None:
                 self._last_time = sim_time
                 continue
@@ -854,6 +861,12 @@ class ErrorMonitor(threading.Thread):
                 if sim_time >= self._next_stop_sign_check_time:
                     self._next_stop_sign_check_time = sim_time + self._stop_sign_check_period
                     self._check_stop_sign(hero, speed_kmh, sim_time)
+            except Exception:
+                pass
+
+        if self._timeline_logger is not None:
+            try:
+                self._timeline_logger.flush_pending()
             except Exception:
                 pass
 
