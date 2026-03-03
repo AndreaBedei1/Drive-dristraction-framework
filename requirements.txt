@@ -25,6 +25,7 @@ matplotlib
 pandas
 scipy
 scikit-learn
+hmmlearn
 xgboost
 lifelines
 seaborn

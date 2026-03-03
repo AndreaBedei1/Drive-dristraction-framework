@@ -3,6 +3,7 @@ import json
 import logging
 import math
 from bisect import bisect_left
+from itertools import islice
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -17,6 +18,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.calibration import calibration_curve
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.inspection import permutation_importance
 
 from utils import *   # assumed to contain compute_global_probabilities and ROLLING_WINDOW
 
@@ -30,6 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # Constants (defaults)
 # ------------------------------------------------------------------------------
 RANDOM_SEED = 42
+DEFAULT_BENCHMARK_DATA_PATH = str(Path(__file__).resolve().parent / "data_hmm_synth_v2")
 UNKNOWN_LABEL = "unknown"
 BWD_FLOOR = 1e-10
 FTD_IMPAIRED = 0.50
@@ -119,7 +123,36 @@ def to_numeric(df: pd.DataFrame, cols: Sequence[str]) -> None:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-def load_data(data_path: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _has_data_rows(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            lines = list(islice(f, 2))
+        return len(lines) >= 2
+    except Exception:
+        return False
+
+def _resolve_dataset_file(path: Path, filename: str, use_old_files: bool) -> Path:
+    stem = filename[:-4] if filename.lower().endswith(".csv") else filename
+    candidates: List[str] = []
+    if use_old_files:
+        candidates.append(f"{stem}_old.csv")
+    candidates.append(f"{stem}.csv")
+    if not use_old_files:
+        candidates.append(f"{stem}_old.csv")
+
+    for candidate in candidates:
+        file_path = path / candidate
+        if _has_data_rows(file_path):
+            return file_path
+
+    existing = [path / candidate for candidate in candidates if (path / candidate).exists()]
+    if existing:
+        return existing[0]
+    raise FileNotFoundError(f"Missing dataset file for {filename}. Tried: {candidates}")
+
+def load_data(data_path: str, use_old_files: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     path = Path(data_path)
     if not path.exists():
         alt = Path(__file__).resolve().parent / str(data_path)
@@ -127,10 +160,15 @@ def load_data(data_path: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame,
             path = alt
     if not path.exists():
         raise FileNotFoundError(f"Data path not found: {data_path}")
-    d = pd.read_csv(path / "Dataset Distractions_distraction.csv")
-    e = pd.read_csv(path / "Dataset Errors_distraction.csv")
-    eb = pd.read_csv(path / "Dataset Errors_baseline.csv")
-    db = pd.read_csv(path / "Dataset Driving Time_baseline.csv")
+    d_path = _resolve_dataset_file(path, "Dataset Distractions_distraction.csv", use_old_files)
+    e_path = _resolve_dataset_file(path, "Dataset Errors_distraction.csv", use_old_files)
+    eb_path = _resolve_dataset_file(path, "Dataset Errors_baseline.csv", use_old_files)
+    db_path = _resolve_dataset_file(path, "Dataset Driving Time_baseline.csv", use_old_files)
+    LOG.info("Loading datasets from: %s, %s, %s, %s", d_path.name, e_path.name, eb_path.name, db_path.name)
+    d = pd.read_csv(d_path)
+    e = pd.read_csv(e_path)
+    eb = pd.read_csv(eb_path)
+    db = pd.read_csv(db_path)
 
     d["timestamp_start"] = pd.to_datetime(d["timestamp_start"], errors="coerce", format="ISO8601")
     d["timestamp_end"] = pd.to_datetime(d["timestamp_end"], errors="coerce", format="ISO8601")
@@ -259,13 +297,23 @@ def fit_label_encoders(train_users: Iterable[str], d: pd.DataFrame, e: pd.DataFr
     dtr = d[d["user_id"].isin(users)]
     etr = e[e["user_id"].isin(users)]
 
+    def _series_vocab(series: pd.Series) -> List[str]:
+        values = norm_label(series).tolist() if series is not None else [UNKNOWN_LABEL]
+        cleaned = {UNKNOWN_LABEL}
+        for value in values:
+            text = str(value).strip()
+            cleaned.add(text if text else UNKNOWN_LABEL)
+        return sorted(cleaned)
+
     pred_vocab = sorted(
-        set(dtr["model_pred_start"].tolist()) | set(dtr["model_pred_end"].tolist()) |
-        set(etr["model_pred"].tolist()) | {UNKNOWN_LABEL}
+        set(_series_vocab(dtr["model_pred_start"]) if "model_pred_start" in dtr.columns else [UNKNOWN_LABEL]) |
+        set(_series_vocab(dtr["model_pred_end"]) if "model_pred_end" in dtr.columns else [UNKNOWN_LABEL]) |
+        set(_series_vocab(etr["model_pred"]) if "model_pred" in etr.columns else [UNKNOWN_LABEL])
     )
     emo_vocab = sorted(
-        set(dtr["emotion_label_start"].tolist()) | set(dtr["emotion_label_end"].tolist()) |
-        set(etr["emotion_label"].tolist()) | {UNKNOWN_LABEL}
+        set(_series_vocab(dtr["emotion_label_start"]) if "emotion_label_start" in dtr.columns else [UNKNOWN_LABEL]) |
+        set(_series_vocab(dtr["emotion_label_end"]) if "emotion_label_end" in dtr.columns else [UNKNOWN_LABEL]) |
+        set(_series_vocab(etr["emotion_label"]) if "emotion_label" in etr.columns else [UNKNOWN_LABEL])
     )
 
     le_pred = LabelEncoder()
@@ -983,6 +1031,18 @@ def evaluate_risk_score(score: np.ndarray, target: np.ndarray,
     LOG.info(f"{tag}: AUC-ROC = {auc:.4f}, Average Precision = {ap:.4f}")
     return {"auc_roc": auc, "avg_precision": ap, "n_samples": int(len(score))}
 
+def summarize_scores(score: np.ndarray, target: np.ndarray) -> dict:
+    valid = ~(np.isnan(score) | np.isnan(target))
+    score = score[valid]
+    target = target[valid].astype(int)
+    if len(score) == 0:
+        return {"auc_roc": float("nan"), "avg_precision": float("nan"), "n_samples": 0}
+    return {
+        "auc_roc": float(roc_auc_score(target, score)),
+        "avg_precision": float(average_precision_score(target, score)),
+        "n_samples": int(len(score)),
+    }
+
 def derive_state_profile(gamma: np.ndarray, true_labels: np.ndarray, viterbi_path: np.ndarray) -> Dict:
     """Determine state semantics by mean impairment label per raw state."""
     K = gamma.shape[1]
@@ -1133,6 +1193,70 @@ def plot_feature_importance(means, feat_names, risk_order, out, top_n=20):
 
 
 # ------------------------------------------------------------------------------
+# Extra importance plots
+# ------------------------------------------------------------------------------
+def plot_permutation_feature_importance(model, X, y, feat_names, out, top_n=20):
+    perm = permutation_importance(
+        model,
+        X,
+        y,
+        n_repeats=5,
+        random_state=RANDOM_SEED,
+        scoring="roc_auc",
+    )
+    order = np.argsort(perm.importances_mean)[::-1][:top_n]
+    names = [feat_names[i] for i in order]
+    values = perm.importances_mean[order]
+    fig, ax = plt.subplots(figsize=(10, max(6, len(names) * 0.35)))
+    y_pos = np.arange(len(names))
+    ax.barh(y_pos, values[::-1], color="#2e86de")
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(names[::-1], fontsize=8)
+    ax.set_xlabel("Permutation importance (validation AUC drop)")
+    ax.set_title(f"Top {len(names)} validation permutation importances")
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    LOG.info("Permutation feature importance -> %s", out)
+    return {names[i]: float(values[i]) for i in range(len(names))}
+
+
+def _feature_family(name: str) -> str:
+    if name.startswith("hr_") or "hr_" in name:
+        return "heart_rate"
+    if name.startswith("emotion_") or "emotion" in name:
+        return "emotion"
+    if name.startswith("model_") or "distraction" in name or name == "dist_density_5":
+        return "distraction"
+    if name.startswith("arousal") or "arousal" in name:
+        return "arousal"
+    if "baseline" in name or "sensor_missing" in name:
+        return "baseline"
+    return "other"
+
+
+def plot_grouped_feature_importance(importance_map: Dict[str, float], out: Path):
+    grouped: Dict[str, float] = {}
+    for feat, value in importance_map.items():
+        family = _feature_family(feat)
+        grouped[family] = grouped.get(family, 0.0) + max(0.0, float(value))
+    items = sorted(grouped.items(), key=lambda kv: kv[1], reverse=True)
+    if not items:
+        return grouped
+    labels = [k for k, _ in items]
+    values = [v for _, v in items]
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.bar(labels, values, color="#27ae60")
+    ax.set_ylabel("Grouped importance")
+    ax.set_title("Feature-family importance")
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    LOG.info("Grouped feature importance -> %s", out)
+    return grouped
+
+
+# ------------------------------------------------------------------------------
 # Sequence helpers
 # ------------------------------------------------------------------------------
 def sort_for_hmm(df):
@@ -1156,18 +1280,146 @@ def last_index_above(series: pd.Series, threshold: float):
     else:
         return None
 
+
+def _candidate_sort_key(metrics: Dict[str, float]) -> Tuple[float, float]:
+    auc = float(metrics.get("auc_roc", float("-inf")))
+    ap = float(metrics.get("avg_precision", float("-inf")))
+    return (auc, ap)
+
+
+def fit_hmm_candidate(df_tr, df_va, df_te, feature_cols, train_p_error_baseline, args) -> Dict:
+    pic_labeler = PICLabeler(
+        n_bins=getattr(args, "pic_n_bins", 30),
+        random_state=args.seed,
+    )
+    pic_labeler.fit(
+        df_tr,
+        df_tr,
+        train_p_error_baseline=train_p_error_baseline,
+        lookahead_t=args.lookahead_t,
+        n_states=args.n_states,
+        min_samples_per_bin=10,
+    )
+    lbl_tr = pic_labeler.predict(df_tr)
+
+    scaler = StandardScaler()
+    X_tr = scaler.fit_transform(df_tr[feature_cols].astype(float))
+    X_va = scaler.transform(df_va[feature_cols].astype(float))
+    X_te = scaler.transform(df_te[feature_cols].astype(float))
+
+    b_tr = sequence_bounds(df_tr)
+    b_va = sequence_bounds(df_va)
+    b_te = sequence_bounds(df_te)
+
+    hmm = ImpairmentHMM(
+        n_states=args.n_states,
+        covariance_type=args.hmm_cov,
+        n_iter=args.hmm_max_iter,
+        tol=args.hmm_tol,
+        random_state=args.seed,
+        constrain_backward=args.constrain_backward,
+        transmat_prior_scale=args.transmat_prior_scale,
+        variance_floor=1e-3,
+    )
+    hmm.fit(X_tr, b_tr, lbl_tr)
+
+    gamma_tr, ll_tr = hmm.predict_posteriors(X_tr, b_tr)
+    gamma_va, ll_va = hmm.predict_posteriors(X_va, b_va)
+    gamma_te, ll_te = hmm.predict_posteriors(X_te, b_te)
+
+    viterbi_tr = hmm.predict_viterbi(X_tr, b_tr)
+    profile = derive_state_profile(gamma_tr, lbl_tr, viterbi_tr)
+    risk_order = np.array(profile["risk_order"])
+    hmm.risk_order_ = risk_order
+
+    target_tr = df_tr["target"].values.astype(int)
+    target_va = df_va["target"].values.astype(int)
+    target_te = df_te["target"].values.astype(int)
+
+    risk_lr = LogisticRegression(C=1.0, class_weight="balanced", random_state=args.seed)
+    risk_lr.fit(gamma_tr[:, risk_order], target_tr)
+
+    val_pred = risk_lr.predict_proba(gamma_va[:, risk_order])[:, 1]
+    test_pred = risk_lr.predict_proba(gamma_te[:, risk_order])[:, 1]
+
+    return {
+        "family": "hmm",
+        "feature_cols": list(feature_cols),
+        "model": hmm,
+        "pic_labeler": pic_labeler,
+        "scaler": scaler,
+        "risk_lr": risk_lr,
+        "profile": profile,
+        "risk_order": risk_order,
+        "val_pred": val_pred,
+        "test_pred": test_pred,
+        "val_metrics": summarize_scores(val_pred, target_va),
+        "test_metrics": summarize_scores(test_pred, target_te),
+        "ll": {"train": float(ll_tr), "val": float(ll_va), "test": float(ll_te)},
+    }
+
+
+def fit_hgb_candidate(df_tr, df_va, df_te, feature_cols, args) -> Dict:
+    target_tr = df_tr["target"].values.astype(int)
+    target_va = df_va["target"].values.astype(int)
+    target_te = df_te["target"].values.astype(int)
+
+    grid = [
+        {"max_depth": 4, "learning_rate": 0.05, "max_iter": 300, "min_samples_leaf": 50, "l2_regularization": 0.0},
+        {"max_depth": 6, "learning_rate": 0.05, "max_iter": 300, "min_samples_leaf": 50, "l2_regularization": 0.0},
+        {"max_depth": 6, "learning_rate": 0.03, "max_iter": 500, "min_samples_leaf": 30, "l2_regularization": 0.0},
+        {"max_depth": 8, "learning_rate": 0.03, "max_iter": 500, "min_samples_leaf": 30, "l2_regularization": 0.1},
+    ]
+
+    best = None
+    X_tr = df_tr[feature_cols].astype(float).values
+    X_va = df_va[feature_cols].astype(float).values
+    X_te = df_te[feature_cols].astype(float).values
+
+    for cfg in grid:
+        model = HistGradientBoostingClassifier(random_state=args.seed, **cfg)
+        model.fit(X_tr, target_tr)
+        val_pred = model.predict_proba(X_va)[:, 1]
+        metrics = summarize_scores(val_pred, target_va)
+        if best is None or _candidate_sort_key(metrics) > _candidate_sort_key(best["val_metrics"]):
+            best = {
+                "model": model,
+                "config": dict(cfg),
+                "val_pred": val_pred,
+                "val_metrics": metrics,
+            }
+
+    if best is None:
+        raise RuntimeError("Failed to fit any HistGradientBoosting candidate.")
+
+    test_pred = best["model"].predict_proba(X_te)[:, 1]
+    return {
+        "family": "hgb",
+        "feature_cols": list(feature_cols),
+        "model": best["model"],
+        "config": best["config"],
+        "val_pred": best["val_pred"],
+        "test_pred": test_pred,
+        "val_metrics": best["val_metrics"],
+        "test_metrics": summarize_scores(test_pred, target_te),
+    }
+
 # ------------------------------------------------------------------------------
 # Main pipeline
 # ------------------------------------------------------------------------------
 def run_pipeline(args):
-    d_raw, e_raw, eb_raw, db_raw = load_data(args.data_path)
+    d_raw, e_raw, eb_raw, db_raw = load_data(args.data_path, use_old_files=args.use_old_files)
     run_integrity_checks(d_raw, e_raw)
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     users = sorted(set(d_raw["user_id"].unique()) | set(e_raw["user_id"].unique()))
-    train_users, cal_users, test_users = split_users(users, seed=args.seed)
+    train_users, val_users, test_users = split_users(users, seed=args.seed)
+    LOG.info("User split: train=%d val=%d test=%d", len(train_users), len(val_users), len(test_users))
+    LOG.info("Train users: %s", train_users)
+    LOG.info("Val users: %s", val_users)
+    LOG.info("Test users: %s", test_users)
 
     # Estimate hangover horizon H from training users
     subset_e = e_raw[e_raw['user_id'].isin(train_users)].copy()
@@ -1183,6 +1435,8 @@ def run_pipeline(args):
     global_results = compute_global_probabilities(subset_d, subset_e, subset_eb, subset_db, rolling_window=ROLLING_WINDOW)
     rates = global_results['rates_series']
     H = last_index_above(rates, train_p_error_baseline)
+    if H is None:
+        H = max(1, int(args.lookahead_t))
     LOG.info("Estimated hangover horizon H = %d seconds (last point where error rate exceeds baseline)", H)
 
     # Prepare data
@@ -1214,7 +1468,7 @@ def run_pipeline(args):
         return df
 
     df_tr = gen(train_users)
-    df_ca = gen(cal_users)
+    df_ca = gen(val_users)
     df_te = gen(test_users)
 
     pp = fit_feature_postprocess(df_tr)
@@ -1226,30 +1480,6 @@ def run_pipeline(args):
     df_ca = sort_for_hmm(df_ca)
     df_te = sort_for_hmm(df_te)
 
-    # --- PIC labeler (always used) ---
-    LOG.info("Label mode: PIC (physiological impairment composite)")
-    pic_labeler = PICLabeler(
-        n_bins=getattr(args, "pic_n_bins", 30),
-        random_state=args.seed,
-    )
-    pic_labeler.fit(
-        df_tr,
-        df_ca,                               # calibration set for thresholds
-        train_p_error_baseline=train_p_error_baseline,
-        lookahead_t=T,
-        n_states=args.n_states,
-        min_samples_per_bin=10,
-    )
-    lbl_tr = pic_labeler.predict(df_tr)
-    lbl_ca = pic_labeler.predict(df_ca)
-    lbl_te = pic_labeler.predict(df_te)
-
-    state_names = [f"I{i}" for i in range(args.n_states-1, -1, -1)]
-    log_label_distribution(lbl_tr, "train", state_names)
-    log_label_distribution(lbl_ca, "cal", state_names)
-    log_label_distribution(lbl_te, "test", state_names)
-
-    # Features for HMM: physiological only (BASE_PHYSIO_FEATURES)
     available = [c for c in BASE_PHYSIO_FEATURES if c in df_tr.columns]
     LOG.info("Using %d physiological features (time-free): %s", len(available), available)
 
@@ -1257,97 +1487,128 @@ def run_pipeline(args):
         LOG.error("Too few features available. Check your data.")
         return
 
-    scaler = StandardScaler()
-    X_tr = scaler.fit_transform(df_tr[available].astype(float))
-    X_ca = scaler.transform(df_ca[available].astype(float))
-    X_te = scaler.transform(df_te[available].astype(float))
+    requested_family = str(getattr(args, "model_family", "auto")).strip().lower()
+    candidate_families = ["hmm", "hgb"] if requested_family == "auto" else [requested_family]
+    candidates: List[Dict] = []
+    for family in candidate_families:
+        if family == "hmm":
+            LOG.info("Fitting candidate model: HMM")
+            candidates.append(
+                fit_hmm_candidate(
+                    df_tr=df_tr,
+                    df_va=df_ca,
+                    df_te=df_te,
+                    feature_cols=available,
+                    train_p_error_baseline=train_p_error_baseline,
+                    args=args,
+                )
+            )
+        elif family == "hgb":
+            LOG.info("Fitting candidate model: HistGradientBoosting")
+            candidates.append(
+                fit_hgb_candidate(
+                    df_tr=df_tr,
+                    df_va=df_ca,
+                    df_te=df_te,
+                    feature_cols=available,
+                    args=args,
+                )
+            )
+        else:
+            raise ValueError(f"Unsupported model family: {family}")
 
-    b_tr = sequence_bounds(df_tr)
-    b_ca = sequence_bounds(df_ca)
-    b_te = sequence_bounds(df_te)
+    for cand in candidates:
+        LOG.info(
+            "Candidate %s  val_auc=%.4f  val_ap=%.4f  test_auc=%.4f  test_ap=%.4f",
+            cand["family"],
+            cand["val_metrics"]["auc_roc"],
+            cand["val_metrics"]["avg_precision"],
+            cand["test_metrics"]["auc_roc"],
+            cand["test_metrics"]["avg_precision"],
+        )
 
-    # Train HMM
-    hmm = ImpairmentHMM(
-        n_states=args.n_states,
-        covariance_type=args.hmm_cov,
-        n_iter=args.hmm_max_iter,
-        tol=args.hmm_tol,
-        random_state=args.seed,
-        constrain_backward=args.constrain_backward,
-        transmat_prior_scale=args.transmat_prior_scale,
-        variance_floor=1e-3,
-    )
-    hmm.fit(X_tr, b_tr, lbl_tr)
+    best = max(candidates, key=lambda cand: _candidate_sort_key(cand["val_metrics"]))
+    LOG.info("Selected model family: %s", best["family"])
 
-    # Compute posteriors
-    gamma_tr, ll_tr = hmm.predict_posteriors(X_tr, b_tr)
-    gamma_ca, ll_ca = hmm.predict_posteriors(X_ca, b_ca)
-    gamma_te, ll_te = hmm.predict_posteriors(X_te, b_te)
-
-    LOG.info("HMM ll  train=%.1f  cal=%.1f  test=%.1f", ll_tr, ll_ca, ll_te)
-
-    # Derive state semantics (risk order)
-    viterbi_tr = hmm.predict_viterbi(X_tr, b_tr)
-    profile = derive_state_profile(gamma_tr, lbl_tr, viterbi_tr)
-    risk_order = np.array(profile["risk_order"])
-    hmm.risk_order_ = risk_order
-
-    # Learn risk weights on calibration set
-    target_ca = df_ca["target"].values.astype(int)
     target_te = df_te["target"].values.astype(int)
+    eval_risk = evaluate_risk_score(best["test_pred"], target_te, "Risk (test)", Path(args.output_dir), prefix="risk_")
+    LOG.info(
+        "Selected model test metrics: AUC-ROC = %.4f, Average Precision = %.4f",
+        eval_risk["auc_roc"],
+        eval_risk["avg_precision"],
+    )
 
-    LOG.info("Learning risk weights from calibration set posteriors...")
-    gamma_ordered_ca = gamma_ca[:, risk_order]
-    lr = LogisticRegression(C=1.0, class_weight='balanced', random_state=args.seed)
-    lr.fit(gamma_ordered_ca, target_ca)
-    learned_weights = lr.coef_.ravel()
-    learned_intercept = lr.intercept_[0]
-    LOG.info(f"Learned weights: {learned_weights}, intercept: {learned_intercept:.4f}")
-
-    # Compute risk scores
-    risk_tr = compute_risk_score(gamma_tr, risk_order, learned_weights, learned_intercept)
-    risk_ca = compute_risk_score(gamma_ca, risk_order, learned_weights, learned_intercept)
-    risk_te = compute_risk_score(gamma_te, risk_order, learned_weights, learned_intercept)
-
-    # Evaluate risk score on test set
-    eval_risk = evaluate_risk_score(risk_te, target_te, "Risk (test)", Path(args.output_dir), prefix="risk_")
-    LOG.info(f"Test set: AUC-ROC = {eval_risk['auc_roc']:.4f}, Average Precision = {eval_risk['avg_precision']:.4f}")
-
-    # Generate evaluation plot with empirical rates from test users
     test_rates = compute_empirical_rates_for_users(d_raw, e_raw, test_users, max_seconds=15)
     ts_te = df_te["time_since_distraction_end"].fillna(0.0).values.astype(float)
-    corr = plot_risk_vs_error_rate(risk_te, ts_te, out_dir / "risk_vs_error_rate.png", test_rates)
-    plot_feature_importance(hmm.model_.means_, available, risk_order, out_dir / "feature_importance.png", top_n=20)
+    corr = plot_risk_vs_error_rate(best["test_pred"], ts_te, out_dir / "risk_vs_error_rate.png", test_rates)
 
-    # Save artifact
+    feature_family_importance = {}
+    if best["family"] == "hmm":
+        plot_feature_importance(best["model"].model_.means_, available, best["risk_order"], out_dir / "feature_importance.png", top_n=20)
+        hmm_importance = {
+            available[i]: float(best["model"].model_.means_[best["risk_order"], i].var())
+            for i in range(len(available))
+        }
+        feature_family_importance = plot_grouped_feature_importance(hmm_importance, out_dir / "feature_family_importance.png")
+    else:
+        importance_map = plot_permutation_feature_importance(
+            best["model"],
+            df_ca[available].astype(float).values,
+            df_ca["target"].astype(int).values,
+            available,
+            out_dir / "feature_importance.png",
+            top_n=min(20, len(available)),
+        )
+        feature_family_importance = plot_grouped_feature_importance(importance_map, out_dir / "feature_family_importance.png")
+
     artifact = {
-        "hmm": hmm.to_dict(),
-        "state_profile": profile,
-        "scaler": scaler,
+        "model_family": best["family"],
         "feature_cols": available,
-        "risk_weights": learned_weights.tolist(),
-        "risk_intercept": learned_intercept,
-        "ftd_thresholds": {"impaired": FTD_IMPAIRED, "caution": FTD_CAUTION},
-        "config": {"H": H, "T": T, "n_states": args.n_states},
         "postprocess": pp,
-        "pic_labeler": pic_labeler.to_dict(),
+        "config": {"H": H, "T": T, "n_states": args.n_states},
+        "ftd_thresholds": {"impaired": FTD_IMPAIRED, "caution": FTD_CAUTION},
     }
+    if best["family"] == "hmm":
+        artifact.update(
+            {
+                "hmm": best["model"].to_dict(),
+                "state_profile": best["profile"],
+                "scaler": best["scaler"],
+                "risk_lr": best["risk_lr"],
+                "pic_labeler": best["pic_labeler"].to_dict(),
+            }
+        )
+    else:
+        artifact.update(
+            {
+                "model": best["model"],
+                "model_config": best.get("config", {}),
+            }
+        )
     joblib.dump(artifact, out_dir / "impairment_hmm.joblib")
 
-    # Save results
     result = {
         "config": {"H": H, "T": T, "n_states": args.n_states},
+        "selected_model_family": best["family"],
+        "candidate_metrics": {cand["family"]: {"val": cand["val_metrics"], "test": cand["test_metrics"]} for cand in candidates},
+        "split_sizes": {"train_users": len(train_users), "val_users": len(val_users), "test_users": len(test_users)},
         "n_features": len(available),
-        "trajectory_stats": profile["trajectory_stats"],
         "risk_vs_error_corr": float(corr) if corr is not None else None,
+        "val_auc_roc": best["val_metrics"]["auc_roc"],
+        "val_avg_precision": best["val_metrics"]["avg_precision"],
         "test_auc_roc": eval_risk["auc_roc"],
         "test_avg_precision": eval_risk["avg_precision"],
-        "pic_labeler": pic_labeler.to_dict(),
+        "feature_family_importance": feature_family_importance,
     }
+    if best["family"] == "hmm":
+        result["trajectory_stats"] = best["profile"]["trajectory_stats"]
     with open(out_dir / "results.json", "w") as f:
         json.dump(result, f, indent=2)
 
-    LOG.info("DONE  fwd/bwd=%.2f  risk_corr=%.3f", profile["trajectory_stats"]["fwd_vs_bwd_ratio"], corr)
+    if best["family"] == "hmm":
+        LOG.info("DONE  family=%s  fwd/bwd=%.2f  risk_corr=%.3f", best["family"], best["profile"]["trajectory_stats"]["fwd_vs_bwd_ratio"], corr)
+    else:
+        LOG.info("DONE  family=%s  risk_corr=%.3f", best["family"], corr)
     return result
 
 # ------------------------------------------------------------------------------
@@ -1355,11 +1616,22 @@ def run_pipeline(args):
 # ------------------------------------------------------------------------------
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Driver Impairment HMM with PIC labels (physiological only, no time features)")
-    p.add_argument("--data-path", default="data", help="Path to data directory")
+    p.add_argument(
+        "--data-path",
+        default=DEFAULT_BENCHMARK_DATA_PATH,
+        help="Path to data directory. Defaults to the synthetic benchmark dataset.",
+    )
     p.add_argument("--output-dir", default="result/")
+    p.add_argument(
+        "--use-old-files",
+        action="store_true",
+        default=False,
+        help="Prefer *_old.csv datasets and fall back to them when the new CSVs are empty.",
+    )
     p.add_argument("--lookahead-t", type=int, default=1, help="T (seconds)")
     p.add_argument("--seed", type=int, default=RANDOM_SEED)
     p.add_argument("--n-states", type=int, default=3, help="Number of impairment states")
+    p.add_argument("--model-family", default="auto", choices=["auto", "hmm", "hgb"])
     p.add_argument("--hmm-cov", default="diag", choices=["diag","spherical","tied"])
     p.add_argument("--hmm-max-iter", type=int, default=150)
     p.add_argument("--hmm-tol", type=float, default=1e-4)

@@ -1,0 +1,76 @@
+{
+  "config": {
+    "H": 14,
+    "T": 1,
+    "n_states": 3
+  },
+  "split_sizes": {
+    "train_users": 19,
+    "val_users": 5,
+    "test_users": 6
+  },
+  "n_features": 21,
+  "trajectory_stats": {
+    "forward_rate": 0.0628,
+    "backward_rate": 0.1113,
+    "fwd_vs_bwd_ratio": 0.5642
+  },
+  "risk_vs_error_corr": 0.8030827849898728,
+  "test_auc_roc": 0.7076776923681336,
+  "test_avg_precision": 0.11154766720524353,
+  "pic_labeler": {
+    "n_states": 3,
+    "feature_cols": [
+      "hr_bpm",
+      "arousal",
+      "model_prob",
+      "emotion_prob",
+      "hr_delta_baseline",
+      "arousal_delta_baseline",
+      "hr_delta_sq",
+      "arousal_hr_coupling",
+      "model_arousal_coupling",
+      "emotion_hr_coupling",
+      "state_energy",
+      "state_imbalance",
+      "model_emotion_gap_abs",
+      "model_emotion_product",
+      "model_pred_enc",
+      "emotion_label_enc",
+      "signal_diff_abs_energy",
+      "dist_density_5",
+      "baseline_error_rate",
+      "sensor_missing_flag",
+      "distraction_intensity"
+    ],
+    "coef": [
+      0.21597254409981204,
+      -0.688458070459722,
+      -0.2009621368469131,
+      -0.6289583011265176,
+      -0.22213587478287267,
+      0.28820177234492966,
+      -0.16755060145882078,
+      0.0009169739031145811,
+      0.4311093496556362,
+      0.07196419034996036,
+      0.15857128142693194,
+      0.05318113945607934,
+      0.16762251067069234,
+      0.8188764472076276,
+      0.05302323831103844,
+      0.004865261890044199,
+      -0.11733493393531119,
+      0.3989120544957363,
+      0.03432032306111171,
+      0.0,
+      0.8621455817432734
+    ],
+    "intercept": -0.28270340781014525,
+    "pic_thresholds": [
+      0.473522089846451,
+      0.2647287116866934
+    ],
+    "n_bins": 30
+  }
+}
