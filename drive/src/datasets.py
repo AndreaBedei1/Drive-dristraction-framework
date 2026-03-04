@@ -7,12 +7,14 @@ import os
 import threading
 from dataclasses import dataclass
 import datetime
+import time
 from typing import Any, Dict, Optional, List, Protocol, Tuple
 
 import carla
 
 from src.arousal_provider import ArousalProvider, ArousalSnapshot
 from src.emotion_provider import EmotionProvider, EmotionSnapshot
+from src.synchronized_inference import SynchronizedInferenceProvider, SynchronizedInferenceSample
 
 @dataclass(frozen=True)
 class DatasetContext:
@@ -286,6 +288,72 @@ def _format_float_timestamp(value: Optional[float]) -> Any:
         return ""
 
 
+def _format_baseline_arousal(value: Optional[float]) -> Any:
+    if value is None:
+        return ""
+    try:
+        arousal = float(value)
+    except Exception:
+        return ""
+    if arousal < 0.0 or arousal > 1.0:
+        return ""
+    return round(arousal, 3)
+
+
+def _format_baseline_hr(value: Optional[int]) -> Any:
+    if value is None:
+        return ""
+    try:
+        hr = int(value)
+    except Exception:
+        return ""
+    if hr < 35 or hr > 220:
+        return ""
+    return hr
+
+
+def _run_baseline_fields(pre_drive_snapshot: Optional[ArousalSnapshot]) -> Dict[str, Any]:
+    return {
+        "hr_baseline": _format_baseline_hr(
+            None if pre_drive_snapshot is None else pre_drive_snapshot.hr_bpm
+        ),
+        "arousal_baseline": _format_baseline_arousal(
+            None if pre_drive_snapshot is None else pre_drive_snapshot.value
+        ),
+        "arousal_baseline_timestamp_ms": ""
+        if pre_drive_snapshot is None or pre_drive_snapshot.timestamp_ms is None
+        else pre_drive_snapshot.timestamp_ms,
+    }
+
+
+def _baseline_fields_complete(fields: Dict[str, Any]) -> bool:
+    return str(fields.get("hr_baseline", "")).strip() != "" and str(fields.get("arousal_baseline", "")).strip() != ""
+
+
+def _resolve_run_baseline_fields_from_snapshot(snapshot: Optional[ArousalSnapshot]) -> Optional[Dict[str, Any]]:
+    if snapshot is None:
+        return None
+    method = str(snapshot.method).strip().lower() if snapshot.method else ""
+    if method == "calibrating":
+        return None
+    resolved = _run_baseline_fields(snapshot)
+    if not _baseline_fields_complete(resolved):
+        return None
+    return resolved
+
+
+def _merge_run_baseline_fields(
+    existing_fields: Dict[str, Any],
+    snapshot: Optional[ArousalSnapshot],
+) -> Dict[str, Any]:
+    if _baseline_fields_complete(existing_fields):
+        return dict(existing_fields)
+    resolved = _resolve_run_baseline_fields_from_snapshot(snapshot)
+    if resolved is None:
+        return dict(existing_fields)
+    return resolved
+
+
 class BaselineDrivingTimeLogger:
     """Logger for baseline driving time and cumulative user totals."""
 
@@ -338,27 +406,11 @@ class BaselineDrivingTimeLogger:
 
     @staticmethod
     def _format_arousal(value: Optional[float]) -> Any:
-        if value is None:
-            return ""
-        try:
-            arousal = float(value)
-        except Exception:
-            return ""
-        if arousal < 0.0 or arousal > 1.0:
-            return ""
-        return round(arousal, 3)
+        return _format_baseline_arousal(value)
 
     @staticmethod
     def _format_hr(value: Optional[int]) -> Any:
-        if value is None:
-            return ""
-        try:
-            hr = int(value)
-        except Exception:
-            return ""
-        if hr < 35 or hr > 220:
-            return ""
-        return hr
+        return _format_baseline_hr(value)
 
     def _resolve_baseline_metrics(
         self,
@@ -421,11 +473,13 @@ class TimelineDatasetLogger:
         model_provider: Optional[ModelInferenceProvider] = None,
         arousal_provider: Optional[ArousalProvider] = None,
         emotion_provider: Optional[EmotionProvider] = None,
+        sync_provider: Optional[SynchronizedInferenceProvider] = None,
     ) -> None:
         self._context = context
         self._model_provider = model_provider
         self._arousal_provider = arousal_provider
         self._emotion_provider = emotion_provider
+        self._sync_provider = sync_provider
         path = os.path.join(output_dir, f"Dataset Timeline{suffix}.csv")
         self._writer = _CsvWriter(
             path,
@@ -434,6 +488,9 @@ class TimelineDatasetLogger:
                 "run_id",
                 "weather",
                 "map_name",
+                "hr_baseline",
+                "arousal_baseline",
+                "arousal_baseline_timestamp_ms",
                 "second_index",
                 "wall_second_bucket",
                 "wall_time_seconds",
@@ -499,6 +556,11 @@ class TimelineDatasetLogger:
         self._distraction_start_history: List[Tuple[float, str]] = []
         self._distraction_finish_history: List[Tuple[float, str, Any]] = []
         self._active_distractions: Dict[str, float] = {}
+        self._run_baseline_fields = _run_baseline_fields(None)
+
+    def set_run_baseline_snapshot(self, pre_drive_snapshot: Optional[ArousalSnapshot]) -> None:
+        with self._lock:
+            self._run_baseline_fields = _run_baseline_fields(pre_drive_snapshot)
 
     def _model_snapshot(self) -> Tuple[str, float, Optional[float]]:
         if self._model_provider is None:
@@ -528,6 +590,14 @@ class TimelineDatasetLogger:
             return self._emotion_provider.get_snapshot()
         except Exception:
             return EmotionSnapshot(None, None, None)
+
+    def _sync_sample(self) -> Optional[SynchronizedInferenceSample]:
+        if self._sync_provider is None:
+            return None
+        try:
+            return self._sync_provider.capture_sample()
+        except Exception:
+            return None
 
     @staticmethod
     def _format_arousal(value: Optional[float]) -> Any:
@@ -589,16 +659,30 @@ class TimelineDatasetLogger:
         if sim_time is None:
             return None
         sim_bucket = int(sim_time)
-        model_pred, model_prob, model_timestamp = self._model_snapshot()
-        emotion = self._emotion_snapshot()
-        arousal = self._arousal_snapshot()
+        sync_sample = self._sync_sample()
+        if sync_sample is not None:
+            model_pred = sync_sample.model_label
+            model_prob = 1.0 if sync_sample.model_prob is None else float(sync_sample.model_prob)
+            model_timestamp = sync_sample.model_timestamp
+            emotion = EmotionSnapshot(
+                label=sync_sample.emotion_label,
+                prob=sync_sample.emotion_prob,
+                timestamp=sync_sample.emotion_timestamp,
+            )
+            arousal = sync_sample.arousal_snapshot
+            record_timestamp = sync_sample.request_timestamp_iso
+        else:
+            model_pred, model_prob, model_timestamp = self._model_snapshot()
+            emotion = self._emotion_snapshot()
+            arousal = self._arousal_snapshot()
+            record_timestamp = _wall_time_iso()
 
         row: Dict[str, Any] = {
             "user_id": self._context.user_id,
             "run_id": self._context.run_id,
             "weather": self._context.weather_label,
             "map_name": self._context.map_name,
-            "timestamp": _wall_time_iso(),
+            "timestamp": record_timestamp,
             "sim_second_bucket": sim_bucket,
             "speed_kmh": round(_speed_kmh(vehicle), 3),
             "steer_angle_deg": round(_steer_angle_deg(vehicle), 3),
@@ -614,30 +698,35 @@ class TimelineDatasetLogger:
             "arousal_timestamp_ms": arousal.timestamp_ms if arousal.timestamp_ms is not None else "",
             "hr_bpm": self._format_hr(arousal.hr_bpm),
         }
+        with self._lock:
+            self._run_baseline_fields = _merge_run_baseline_fields(self._run_baseline_fields, arousal)
+            row.update(self._run_baseline_fields)
         row.update(snap)
         row.update(_location_info(world, location))
         row.update(_vehicle_control_info(vehicle))
         return wall_monotonic, row
 
     def update(self, world: carla.World, vehicle: carla.Actor) -> None:
+        wall_monotonic = time.monotonic()
+        with self._lock:
+            wall_elapsed, bucket = self._ensure_wall_time_locked(wall_monotonic)
+            if self._first_bucket is None:
+                self._first_bucket = bucket
+            should_capture = self._current_bucket is None or bucket != self._current_bucket
+            if self._current_bucket is not None and bucket != self._current_bucket:
+                self._flush_locked(second_complete=True)
+        if not should_capture:
+            return
         captured = self._capture_state(world, vehicle)
         if captured is None:
             return
-        wall_monotonic, state = captured
-
+        _captured_wall_monotonic, state = captured
+        state["wall_second_bucket"] = bucket
+        state["wall_time_seconds"] = round(wall_elapsed, 3)
         with self._lock:
-            wall_elapsed, bucket = self._ensure_wall_time_locked(wall_monotonic)
-            state["wall_second_bucket"] = bucket
-            state["wall_time_seconds"] = round(wall_elapsed, 3)
             if self._first_bucket is None:
                 self._first_bucket = bucket
-            if self._current_bucket is None:
-                self._current_bucket = bucket
-                self._current_state = state
-                return
-            if bucket != self._current_bucket:
-                self._flush_locked(second_complete=True)
-                self._current_bucket = bucket
+            self._current_bucket = bucket
             self._current_state = state
 
     def record_error(self, error_type: str, details: str = "", sim_time_seconds: Any = None) -> None:
@@ -748,15 +837,18 @@ class ErrorDatasetLogger:
         context: DatasetContext,
         suffix: str = "",
         model_provider: Optional[ModelInferenceProvider] = None,
+        arousal_provider: Optional[ArousalProvider] = None,
         emotion_provider: Optional[EmotionProvider] = None,
         timeline_logger: Optional[TimelineDatasetLogger] = None,
+        sync_provider: Optional[SynchronizedInferenceProvider] = None,
     ) -> None:
         """Create a logger with a destination folder and context."""
         path = os.path.join(output_dir, f"Dataset Errors{suffix}.csv")
         self._context = context
-        self._model_provider = model_provider
-        self._emotion_provider = emotion_provider
+        self._arousal_provider = arousal_provider
         self._timeline_logger = timeline_logger
+        self._baseline_lock = threading.Lock()
+        self._run_baseline_fields = _run_baseline_fields(None)
         self._writer = _CsvWriter(
             path,
             [
@@ -764,13 +856,10 @@ class ErrorDatasetLogger:
                 "run_id",
                 "weather",
                 "map_name",
+                "hr_baseline",
+                "arousal_baseline",
+                "arousal_baseline_timestamp_ms",
                 "error_type",
-                "model_pred",
-                "model_prob",
-                "model_timestamp",
-                "emotion_label",
-                "emotion_prob",
-                "emotion_timestamp",
                 "speed_kmh",
                 "steer_angle_deg",
                 "timestamp",
@@ -785,28 +874,20 @@ class ErrorDatasetLogger:
             ],
         )
 
-    def _model_snapshot(self) -> Tuple[str, float, Optional[float]]:
-        """Return the latest aggregated model label and probability."""
-        if self._model_provider is None:
-            return "None", 1.0, None
-        try:
-            label, prob, timestamp = self._model_provider.get_window_summary_with_timestamp()
-            return str(label), float(prob), timestamp
-        except Exception:
-            try:
-                label, prob = self._model_provider.get_window_summary()
-                return str(label), float(prob), None
-            except Exception:
-                return "None", 1.0, None
+    def set_run_baseline_snapshot(self, pre_drive_snapshot: Optional[ArousalSnapshot]) -> None:
+        with self._baseline_lock:
+            self._run_baseline_fields = _run_baseline_fields(pre_drive_snapshot)
 
-    def _emotion_snapshot(self) -> EmotionSnapshot:
-        """Return the latest emotion snapshot."""
-        if self._emotion_provider is None:
-            return EmotionSnapshot(None, None, None)
-        try:
-            return self._emotion_provider.get_snapshot()
-        except Exception:
-            return EmotionSnapshot(None, None, None)
+    def _current_run_baseline_fields(self) -> Dict[str, Any]:
+        snapshot = None
+        if self._arousal_provider is not None:
+            try:
+                snapshot = self._arousal_provider.get_snapshot()
+            except Exception:
+                snapshot = None
+        with self._baseline_lock:
+            self._run_baseline_fields = _merge_run_baseline_fields(self._run_baseline_fields, snapshot)
+            return dict(self._run_baseline_fields)
 
     def log(
         self,
@@ -821,26 +902,18 @@ class ErrorDatasetLogger:
         except Exception:
             return
 
-        pred_label, pred_prob, model_timestamp = self._model_snapshot()
-        emotion = self._emotion_snapshot()
-
         row: Dict[str, Any] = {
             "user_id": self._context.user_id,
             "run_id": self._context.run_id,
             "weather": self._context.weather_label,
             "map_name": self._context.map_name,
             "error_type": error_type,
-            "model_pred": pred_label,
-            "model_prob": round(pred_prob, 3),
-            "model_timestamp": _format_float_timestamp(model_timestamp),
-            "emotion_label": _format_emotion_label(emotion.label),
-            "emotion_prob": _format_emotion_prob(emotion.prob),
-            "emotion_timestamp": _format_float_timestamp(emotion.timestamp),
             "speed_kmh": round(_speed_kmh(vehicle), 3),
             "steer_angle_deg": round(_steer_angle_deg(vehicle), 3),
             "timestamp": _wall_time_iso(),
             "details": details,
         }
+        row.update(self._current_run_baseline_fields())
 
         snap = _snapshot_info(world)
         row.update(snap)
@@ -866,14 +939,15 @@ class DistractionDatasetLogger:
         arousal_provider: Optional[ArousalProvider] = None,
         emotion_provider: Optional[EmotionProvider] = None,
         timeline_logger: Optional[TimelineDatasetLogger] = None,
+        sync_provider: Optional[SynchronizedInferenceProvider] = None,
     ) -> None:
         """Create a logger with a destination folder and context."""
         path = os.path.join(output_dir, f"Dataset Distractions{suffix}.csv")
         self._context = context
-        self._model_provider = model_provider
         self._arousal_provider = arousal_provider
-        self._emotion_provider = emotion_provider
         self._timeline_logger = timeline_logger
+        self._baseline_lock = threading.Lock()
+        self._run_baseline_fields = _run_baseline_fields(None)
         self._writer = _CsvWriter(
             path,
             [
@@ -881,6 +955,9 @@ class DistractionDatasetLogger:
                 "run_id",
                 "weather",
                 "map_name",
+                "hr_baseline",
+                "arousal_baseline",
+                "arousal_baseline_timestamp_ms",
                 "start_x",
                 "start_y",
                 "start_z",
@@ -891,24 +968,6 @@ class DistractionDatasetLogger:
                 "speed_kmh_end",
                 "steer_angle_deg_start",
                 "steer_angle_deg_end",
-                "arousal_start",
-                "arousal_end",
-                "hr_bpm_start",
-                "hr_bpm_end",
-                "model_pred_start",
-                "model_prob_start",
-                "model_timestamp_start",
-                "model_pred_end",
-                "model_prob_end",
-                "model_timestamp_end",
-                "emotion_label_start",
-                "emotion_prob_start",
-                "emotion_timestamp_start",
-                "emotion_label_end",
-                "emotion_prob_end",
-                "emotion_timestamp_end",
-                "arousal_timestamp_ms_start",
-                "arousal_timestamp_ms_end",
                 "timestamp_start",
                 "timestamp_end",
                 "frame_start",
@@ -921,55 +980,20 @@ class DistractionDatasetLogger:
         self._active: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
-    def _model_snapshot(self) -> Tuple[str, float, Optional[float]]:
-        """Return the latest aggregated model label and probability."""
-        if self._model_provider is None:
-            return "None", 1.0, None
-        try:
-            label, prob, timestamp = self._model_provider.get_window_summary_with_timestamp()
-            return str(label), float(prob), timestamp
-        except Exception:
+    def set_run_baseline_snapshot(self, pre_drive_snapshot: Optional[ArousalSnapshot]) -> None:
+        with self._baseline_lock:
+            self._run_baseline_fields = _run_baseline_fields(pre_drive_snapshot)
+
+    def _current_run_baseline_fields(self) -> Dict[str, Any]:
+        snapshot = None
+        if self._arousal_provider is not None:
             try:
-                label, prob = self._model_provider.get_window_summary()
-                return str(label), float(prob), None
+                snapshot = self._arousal_provider.get_snapshot()
             except Exception:
-                return "None", 1.0, None
-
-    def _arousal_snapshot(self) -> ArousalSnapshot:
-        """Return the latest arousal snapshot."""
-        if self._arousal_provider is None:
-            return ArousalSnapshot(None, None, None, None, None)
-        try:
-            return self._arousal_provider.get_snapshot()
-        except Exception:
-            return ArousalSnapshot(None, None, None, None, None)
-
-    def _emotion_snapshot(self) -> EmotionSnapshot:
-        """Return the latest emotion snapshot."""
-        if self._emotion_provider is None:
-            return EmotionSnapshot(None, None, None)
-        try:
-            return self._emotion_provider.get_snapshot()
-        except Exception:
-            return EmotionSnapshot(None, None, None)
-
-    @staticmethod
-    def _format_arousal(value: Optional[float]) -> Any:
-        if value is None:
-            return ""
-        try:
-            return round(float(value), 3)
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _format_hr(value: Optional[int]) -> Any:
-        if value is None:
-            return ""
-        try:
-            return int(value)
-        except Exception:
-            return ""
+                snapshot = None
+        with self._baseline_lock:
+            self._run_baseline_fields = _merge_run_baseline_fields(self._run_baseline_fields, snapshot)
+            return dict(self._run_baseline_fields)
 
     def start(self, window_id: str, world: carla.World, vehicle: carla.Actor) -> None:
         """Record the start of a distraction window."""
@@ -981,27 +1005,13 @@ class DistractionDatasetLogger:
             except Exception:
                 return
             snap = _snapshot_info(world)
-            pred_label, pred_prob, model_timestamp = self._model_snapshot()
-            arousal = self._arousal_snapshot()
-            emotion = self._emotion_snapshot()
             self._active[window_id] = {
                 "start_location": location,
                 "frame_start": snap.get("frame", ""),
                 "sim_time_start": snap.get("sim_time_seconds", ""),
                 "timestamp_start": _wall_time_iso(),
-                "model_pred_start": pred_label,
-                "model_prob_start": round(pred_prob, 3),
-                "model_timestamp_start": _format_float_timestamp(model_timestamp),
                 "speed_kmh_start": round(_speed_kmh(vehicle), 3),
                 "steer_angle_deg_start": round(_steer_angle_deg(vehicle), 3),
-                "arousal_start": self._format_arousal(arousal.value),
-                "arousal_timestamp_ms_start": ""
-                if arousal.timestamp_ms is None
-                else arousal.timestamp_ms,
-                "hr_bpm_start": self._format_hr(arousal.hr_bpm),
-                "emotion_label_start": _format_emotion_label(emotion.label),
-                "emotion_prob_start": _format_emotion_prob(emotion.prob),
-                "emotion_timestamp_start": _format_float_timestamp(emotion.timestamp),
             }
             if self._timeline_logger is not None:
                 self._timeline_logger.record_distraction_start(
@@ -1020,9 +1030,6 @@ class DistractionDatasetLogger:
         except Exception:
             return
         snap = _snapshot_info(world)
-        end_pred_label, end_pred_prob, end_model_timestamp = self._model_snapshot()
-        end_arousal = self._arousal_snapshot()
-        end_emotion = self._emotion_snapshot()
 
         start_loc: carla.Location = start_info["start_location"]
         row: Dict[str, Any] = {
@@ -1040,26 +1047,6 @@ class DistractionDatasetLogger:
             "speed_kmh_end": round(_speed_kmh(vehicle), 3),
             "steer_angle_deg_start": start_info.get("steer_angle_deg_start", ""),
             "steer_angle_deg_end": round(_steer_angle_deg(vehicle), 3),
-            "arousal_start": start_info.get("arousal_start", ""),
-            "arousal_end": self._format_arousal(end_arousal.value),
-            "hr_bpm_start": start_info.get("hr_bpm_start", ""),
-            "hr_bpm_end": self._format_hr(end_arousal.hr_bpm),
-            "model_pred_start": start_info.get("model_pred_start", ""),
-            "model_prob_start": start_info.get("model_prob_start", ""),
-            "model_timestamp_start": start_info.get("model_timestamp_start", ""),
-            "model_pred_end": end_pred_label,
-            "model_prob_end": round(end_pred_prob, 3),
-            "model_timestamp_end": _format_float_timestamp(end_model_timestamp),
-            "emotion_label_start": start_info.get("emotion_label_start", ""),
-            "emotion_prob_start": start_info.get("emotion_prob_start", ""),
-            "emotion_timestamp_start": start_info.get("emotion_timestamp_start", ""),
-            "emotion_label_end": _format_emotion_label(end_emotion.label),
-            "emotion_prob_end": _format_emotion_prob(end_emotion.prob),
-            "emotion_timestamp_end": _format_float_timestamp(end_emotion.timestamp),
-            "arousal_timestamp_ms_start": start_info.get("arousal_timestamp_ms_start", ""),
-            "arousal_timestamp_ms_end": ""
-            if end_arousal.timestamp_ms is None
-            else end_arousal.timestamp_ms,
             "timestamp_start": start_info.get("timestamp_start", ""),
             "timestamp_end": _wall_time_iso(),
             "frame_start": start_info.get("frame_start", ""),
@@ -1068,6 +1055,7 @@ class DistractionDatasetLogger:
             "sim_time_end": snap.get("sim_time_seconds", ""),
             "details": window_id,
         }
+        row.update(self._current_run_baseline_fields())
         self._writer.append(row)
         if self._timeline_logger is not None:
             self._timeline_logger.record_distraction_finish(

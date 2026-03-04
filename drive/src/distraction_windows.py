@@ -258,14 +258,14 @@ class DistractionWindow(threading.Thread):
             font_size = 46
         self._label.configure(text=self._format_prompt(), font=("Arial", font_size, "bold"))
         self._awaiting_ack = True
-        self._on_start(self._id)
+        self._root.bind("<Key>", self._on_key)
         self._start_beep()
         if self._steal_focus:
             try:
                 self._root.focus_force()
             except Exception:
                 pass
-        self._root.bind("<Key>", self._on_key)
+        self._run_callback_async(self._on_start, self._id)
 
     def _on_key(self, event) -> None:
         """Handle a keyboard acknowledgment."""
@@ -316,6 +316,17 @@ class DistractionWindow(threading.Thread):
                 parts.append(ch)
         return " ".join(parts)
 
+    def _run_callback_async(self, callback: Callable[[str], None], window_id: str) -> None:
+        """Run callbacks off the Tk thread to keep the UI responsive."""
+
+        def _target() -> None:
+            try:
+                callback(window_id)
+            except Exception:
+                pass
+
+        threading.Thread(target=_target, daemon=True).start()
+
     def _acknowledge(self) -> None:
         """Clear the alarm state and schedule the next alert."""
         if self._root is None:
@@ -331,11 +342,11 @@ class DistractionWindow(threading.Thread):
             winsound.PlaySound(None, winsound.SND_ASYNC)
         except Exception:
             pass
-        self._on_finish(self._id)
         self._coord.finish(self._id)
         self._set_idle()
         self._focus_callback()
         self._schedule_next()
+        self._run_callback_async(self._on_finish, self._id)
 
     def _start_key_listener(self) -> None:
         """Listen for the expected key globally on Windows."""

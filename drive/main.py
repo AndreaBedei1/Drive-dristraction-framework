@@ -3,6 +3,7 @@ from __future__ import annotations
 """Scenario runner for the driving distraction framework."""
 
 import argparse
+import multiprocessing as mp
 import os
 import subprocess
 import sys
@@ -30,6 +31,15 @@ from src.error_monitor import ErrorMonitor
 from src.arousal_provider import ArousalSnapshot
 from src.distraction_windows import DistractionCoordinator, DistractionWindow, focus_simulation_window
 from src.camera_preview import CameraPreviewWindow, preview_available
+from src.synchronized_inference import (
+    FrameCaptureService,
+    DistractionInferenceWorker,
+    EmotionInferenceWorker,
+    DistractionInferenceProcessWorker,
+    EmotionInferenceProcessWorker,
+    SynchronizedInferenceCoordinator,
+    SynchronizedEmotionPreviewProvider,
+)
 
 
 def _resolve_manual_control_path(path: str) -> str:
@@ -598,40 +608,8 @@ def main() -> int:
         weather_label=cfg.experiment.weather_label,
         map_name=map_name,
     )
-    model_inference = None
-    if cfg.inference.enable_model:
-        try:
-            if cfg.inference.use_process:
-                from src.model_inference import ModelInferenceProcess as ModelInferenceProvider
-                model_inference = ModelInferenceProvider()
-                model_inference.start()
-                print("[Runner] Model inference started (process, 2 Hz, window=3).")
-            else:
-                from src.model_inference import ModelInferenceService as ModelInferenceProvider
-                model_inference = ModelInferenceProvider()
-                model_inference.start()
-                print("[Runner] Model inference started (thread, 2 Hz, window=3).")
-        except Exception as exc:
-            print(f"[Runner] Model inference unavailable: {exc}")
-            model_inference = None
-    else:
-        print("[Runner] Model inference disabled by config.")
-
-    emotion_inference = None
-    try:
-        from src.emotion_inference import EmotionInferenceService
-
-        if not cfg.inference.enable_emotion:
-            print("[Runner] Emotion inference disabled by config.")
-        elif model_inference is not None:
-            emotion_inference = EmotionInferenceService(frame_provider=model_inference)
-            emotion_inference.start()
-            print("[Runner] Emotion inference started (1 Hz).")
-        else:
-            print("[Runner] Emotion inference disabled (model inference unavailable).")
-    except Exception as exc:
-        print(f"[Runner] Emotion inference unavailable: {exc}")
-        emotion_inference = None
+    sync_inference = None
+    preview_emotion_provider = None
 
     arousal_client = None
     baseline_requires_sensor = dataset_profile == "baseline"
@@ -691,6 +669,50 @@ def main() -> int:
                         raise RuntimeError(f"Baseline run aborted: {msg}")
                     print(f"[Runner] {msg}")
 
+    try:
+        capture_service = None
+        distraction_worker = None
+        emotion_worker = None
+        needs_camera = bool(
+            cfg.inference.enable_model
+            or cfg.inference.enable_emotion
+            or cfg.inference.enable_preview
+        )
+        if needs_camera:
+            capture_service = FrameCaptureService(target_hz=max(15.0, float(cfg.inference.preview_hz)))
+        use_process_workers = bool(cfg.inference.use_process)
+        if cfg.inference.enable_model:
+            if use_process_workers:
+                distraction_worker = DistractionInferenceProcessWorker()
+            else:
+                distraction_worker = DistractionInferenceWorker()
+        else:
+            print("[Runner] Distraction inference disabled by config.")
+        if cfg.inference.enable_emotion:
+            if use_process_workers:
+                emotion_worker = EmotionInferenceProcessWorker()
+            else:
+                emotion_worker = EmotionInferenceWorker()
+        else:
+            print("[Runner] Emotion inference disabled by config.")
+        if capture_service is not None or distraction_worker is not None or emotion_worker is not None:
+            sync_inference = SynchronizedInferenceCoordinator(
+                frame_capture=capture_service,
+                distraction_worker=distraction_worker,
+                emotion_worker=emotion_worker,
+                arousal_provider=arousal_client,
+            )
+            sync_inference.start()
+            preview_emotion_provider = SynchronizedEmotionPreviewProvider(sync_inference)
+            worker_mode = "process" if use_process_workers else "thread"
+            print(f"[Runner] Synchronized inference pipeline started (shared frame, event-driven {worker_mode} workers).")
+        else:
+            print("[Runner] Synchronized inference pipeline disabled (no active detectors).")
+    except Exception as exc:
+        print(f"[Runner] Synchronized inference unavailable: {exc}")
+        sync_inference = None
+        preview_emotion_provider = None
+
     distractions_enabled = bool(cfg.distractions.enabled)
     if dataset_profile == "baseline":
         distractions_enabled = False
@@ -699,17 +721,20 @@ def main() -> int:
         output_dir=output_dir,
         context=context,
         suffix=dataset_suffix,
-        model_provider=model_inference,
+        model_provider=sync_inference,
         arousal_provider=arousal_client,
-        emotion_provider=emotion_inference,
+        emotion_provider=preview_emotion_provider,
+        sync_provider=sync_inference,
     )
     error_logger = ErrorDatasetLogger(
         output_dir=output_dir,
         context=context,
         suffix=dataset_suffix,
-        model_provider=model_inference,
-        emotion_provider=emotion_inference,
+        model_provider=sync_inference,
+        arousal_provider=arousal_client,
+        emotion_provider=preview_emotion_provider,
         timeline_logger=timeline_logger,
+        sync_provider=sync_inference,
     )
     baseline_time_logger = None
     if dataset_profile == "baseline":
@@ -722,10 +747,11 @@ def main() -> int:
         output_dir=output_dir,
         context=context,
         suffix=dataset_suffix,
-        model_provider=model_inference,
+        model_provider=sync_inference,
         arousal_provider=arousal_client,
-        emotion_provider=emotion_inference,
+        emotion_provider=preview_emotion_provider,
         timeline_logger=timeline_logger,
+        sync_provider=sync_inference,
     )
 
     error_monitor = ErrorMonitor(
@@ -746,13 +772,13 @@ def main() -> int:
     monitor_rects = _get_monitor_rects()
     left_rect, center_rect, right_rect = _pick_monitor_layout(monitor_rects)
     preview_window = None
-    if cfg.inference.enable_preview and model_inference is not None:
+    if cfg.inference.enable_preview and sync_inference is not None:
         if preview_available():
             try:
                 preview_window = CameraPreviewWindow(
-                    model_provider=model_inference,
+                    model_provider=sync_inference,
                     arousal_provider=arousal_client,
-                    emotion_provider=emotion_inference,
+                    emotion_provider=preview_emotion_provider,
                     target_hz=cfg.inference.preview_hz,
                 )
                 preview_window.start()
@@ -845,18 +871,23 @@ def main() -> int:
     drive_start_monotonic: Optional[float] = None
     baseline_pre_drive_snapshot: Optional[ArousalSnapshot] = None
 
-    def _capture_pre_drive_baseline_snapshot() -> Optional[ArousalSnapshot]:
-        if baseline_time_logger is None:
+    def _capture_pre_drive_arousal_snapshot() -> Optional[ArousalSnapshot]:
+        if not cfg.arousal_sensor.enabled:
             return None
         if arousal_client is None:
-            raise RuntimeError("Baseline run aborted: arousal sensor provider unavailable at start.")
+            if baseline_requires_sensor:
+                raise RuntimeError("Baseline run aborted: arousal sensor provider unavailable at start.")
+            return None
 
         try:
             snapshot = arousal_client.get_snapshot()
         except Exception as exc:
-            raise RuntimeError(
-                f"Baseline run aborted: failed to read arousal sensor at start ({exc})."
-            ) from exc
+            if baseline_requires_sensor:
+                raise RuntimeError(
+                    f"Baseline run aborted: failed to read arousal sensor at start ({exc})."
+                ) from exc
+            print(f"[Runner] Initial arousal snapshot unavailable: {exc}")
+            return None
 
         try:
             hr_value = int(snapshot.hr_bpm) if snapshot.hr_bpm is not None else None
@@ -868,13 +899,19 @@ def main() -> int:
             arousal_value = None
 
         if hr_value is None or hr_value < 35 or hr_value > 220:
-            raise RuntimeError(
-                "Baseline run aborted: invalid heart-rate sample at start."
-            )
+            if baseline_requires_sensor:
+                raise RuntimeError(
+                    "Baseline run aborted: invalid heart-rate sample at start."
+                )
+            print("[Runner] Initial heart-rate sample invalid; run-level baseline columns will be empty.")
+            return None
         if arousal_value is None or arousal_value < 0.0 or arousal_value > 1.0:
-            raise RuntimeError(
-                "Baseline run aborted: invalid arousal sample at start."
-            )
+            if baseline_requires_sensor:
+                raise RuntimeError(
+                    "Baseline run aborted: invalid arousal sample at start."
+                )
+            print("[Runner] Initial arousal sample invalid; run-level baseline columns will be empty.")
+            return None
 
         return snapshot
 
@@ -888,6 +925,11 @@ def main() -> int:
         mc_env["SIM_WINDOW_H"] = str(h)
         mc_env["SDL_VIDEO_WINDOW_POS"] = f"{x},{y}"
     try:
+        baseline_pre_drive_snapshot = _capture_pre_drive_arousal_snapshot()
+        timeline_logger.set_run_baseline_snapshot(baseline_pre_drive_snapshot)
+        error_logger.set_run_baseline_snapshot(baseline_pre_drive_snapshot)
+        distraction_logger.set_run_baseline_snapshot(baseline_pre_drive_snapshot)
+
         if not args.no_launch_manual:
             mc_path = _resolve_manual_control_path(cfg.manual_control.path)
             mc_args = list(cfg.manual_control.extra_args)
@@ -895,7 +937,6 @@ def main() -> int:
             if max_speed_kmh is not None and max_speed_kmh > 0:
                 if not any(str(arg).startswith("--max-speed-kmh") for arg in mc_args):
                     mc_args.append(f"--max-speed-kmh={max_speed_kmh}")
-            baseline_pre_drive_snapshot = _capture_pre_drive_baseline_snapshot()
             proc = _launch_manual_control(
                 mc_path,
                 cfg.carla.host,
@@ -929,7 +970,6 @@ def main() -> int:
                 time.sleep(0.5)
         else:
             print("[Runner] --no-launch-manual set. Scenario running; you can start manual_control separately.")
-            baseline_pre_drive_snapshot = _capture_pre_drive_baseline_snapshot()
             drive_start_monotonic = time.monotonic()
             while True:
                 if max_duration_seconds > 0.0 and drive_start_monotonic is not None:
@@ -1000,17 +1040,10 @@ def main() -> int:
             except Exception:
                 pass
 
-        if emotion_inference is not None:
-            emotion_inference.stop()
+        if sync_inference is not None:
+            sync_inference.stop()
             try:
-                emotion_inference.join(timeout=2.0)
-            except Exception:
-                pass
-
-        if model_inference is not None:
-            model_inference.stop()
-            try:
-                model_inference.join(timeout=2.0)
+                sync_inference.join(timeout=2.0)
             except Exception:
                 pass
 
@@ -1047,4 +1080,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    mp.freeze_support()
     raise SystemExit(main())
