@@ -653,9 +653,41 @@ def main() -> int:
     if cfg.arousal_sensor.enabled and arousal_client is not None:
         baseline_wait = float(cfg.arousal_sensor.baseline_seconds)
         if baseline_wait > 0:
-            print(f"[Runner] Waiting {baseline_wait:.0f}s for arousal baseline calibration...")
+            first_sample_wait = max(
+                15.0,
+                float(cfg.arousal_sensor.no_sample_timeout_seconds)
+                + float(cfg.arousal_sensor.reconnect_seconds)
+                + 10.0,
+            )
+            calibration_wait = baseline_wait + 5.0
+            if baseline_requires_sensor:
+                print(
+                    "[Runner] Waiting for first arousal sample "
+                    f"(timeout={first_sample_wait:.0f}s), then {baseline_wait:.0f}s of baseline calibration..."
+                )
+                try:
+                    first_sample_ready = bool(arousal_client.wait_for_first_sample(timeout=first_sample_wait))
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Baseline run aborted: failed while waiting for first sensor sample ({exc})."
+                    ) from exc
+                if not first_sample_ready:
+                    last_error = ""
+                    try:
+                        raw_error = arousal_client.last_error()
+                        if raw_error:
+                            last_error = f" last_error={raw_error}"
+                    except Exception:
+                        last_error = ""
+                    raise RuntimeError(
+                        "Baseline run aborted: no arousal sensor data received before calibration timeout."
+                        f"{last_error}"
+                    )
+            else:
+                print(f"[Runner] Waiting up to {baseline_wait:.0f}s for arousal baseline calibration...")
+
             try:
-                baseline_ready = bool(arousal_client.wait_for_baseline(timeout=baseline_wait))
+                baseline_ready = bool(arousal_client.wait_for_baseline(timeout=calibration_wait))
             except Exception as exc:
                 if baseline_requires_sensor:
                     raise RuntimeError(
@@ -666,7 +698,14 @@ def main() -> int:
                 if not baseline_ready:
                     msg = "Baseline not completed yet (no data or still calibrating)."
                     if baseline_requires_sensor:
-                        raise RuntimeError(f"Baseline run aborted: {msg}")
+                        last_error = ""
+                        try:
+                            raw_error = arousal_client.last_error()
+                            if raw_error:
+                                last_error = f" last_error={raw_error}"
+                        except Exception:
+                            last_error = ""
+                        raise RuntimeError(f"Baseline run aborted: {msg}{last_error}")
                     print(f"[Runner] {msg}")
 
     try:

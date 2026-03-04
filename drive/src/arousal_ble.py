@@ -114,6 +114,7 @@ class BleArousalProvider(threading.Thread):
         self._last_debug_ts = 0.0
         self._last_sample_ts = 0.0
         self._baseline_done = threading.Event()
+        self._first_sample_done = threading.Event()
 
         self._stop_event = threading.Event()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -151,6 +152,9 @@ class BleArousalProvider(threading.Thread):
 
     def wait_for_baseline(self, timeout: Optional[float] = None) -> bool:
         return self._baseline_done.wait(timeout=timeout)
+
+    def wait_for_first_sample(self, timeout: Optional[float] = None) -> bool:
+        return self._first_sample_done.wait(timeout=timeout)
 
     def run(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -262,6 +266,7 @@ class BleArousalProvider(threading.Thread):
         now = time.time()
         mono_now = time.monotonic()
         self._last_sample_ts = mono_now
+        self._first_sample_done.set()
         if rr_list:
             self._update_rr_buffer(rr_list)
 

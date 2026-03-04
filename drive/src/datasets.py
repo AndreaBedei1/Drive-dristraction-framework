@@ -61,11 +61,9 @@ class _CsvWriter:
         existing_fieldnames = self._read_existing_fieldnames(path)
         if not existing_fieldnames:
             return
-        merged_fieldnames = self._merge_fieldnames(existing_fieldnames, self._fieldnames)
-        self._fieldnames = merged_fieldnames
-        if merged_fieldnames != existing_fieldnames:
+        if existing_fieldnames != self._fieldnames:
             try:
-                self._rewrite_with_fieldnames(merged_fieldnames)
+                self._rewrite_with_fieldnames(self._fieldnames)
             except Exception:
                 self._fieldnames = existing_fieldnames
 
@@ -93,7 +91,7 @@ class _CsvWriter:
 
     @staticmethod
     def _merge_fieldnames(existing: List[str], required: List[str]) -> List[str]:
-        """Keep existing columns and append missing required columns."""
+        """Normalize fieldnames and preserve first-seen order."""
         merged: List[str] = []
         seen = set()
         for raw in list(existing) + list(required):
@@ -320,9 +318,6 @@ def _run_baseline_fields(pre_drive_snapshot: Optional[ArousalSnapshot]) -> Dict[
         "arousal_baseline": _format_baseline_arousal(
             None if pre_drive_snapshot is None else pre_drive_snapshot.value
         ),
-        "arousal_baseline_timestamp_ms": ""
-        if pre_drive_snapshot is None or pre_drive_snapshot.timestamp_ms is None
-        else pre_drive_snapshot.timestamp_ms,
     }
 
 
@@ -380,7 +375,6 @@ class BaselineDrivingTimeLogger:
                 "timestamp",
                 "hr_baseline",
                 "arousal_baseline",
-                "arousal_baseline_timestamp_ms",
             ],
         )
         self._lock = threading.Lock()
@@ -454,9 +448,6 @@ class BaselineDrivingTimeLogger:
                 "timestamp": _wall_time_iso(),
                 "hr_baseline": hr_baseline,
                 "arousal_baseline": arousal_baseline,
-                "arousal_baseline_timestamp_ms": ""
-                if pre_drive_snapshot is None or pre_drive_snapshot.timestamp_ms is None
-                else pre_drive_snapshot.timestamp_ms,
             }
             self._writer.append(row)
             return total_seconds
@@ -490,20 +481,10 @@ class TimelineDatasetLogger:
                 "map_name",
                 "hr_baseline",
                 "arousal_baseline",
-                "arousal_baseline_timestamp_ms",
-                "second_index",
-                "wall_second_bucket",
-                "wall_time_seconds",
-                "sim_second_bucket",
-                "second_complete",
                 "timestamp",
-                "frame",
-                "sim_time_seconds",
                 "x",
                 "y",
                 "z",
-                "road_id",
-                "lane_id",
                 "speed_kmh",
                 "steer_angle_deg",
                 "throttle",
@@ -518,29 +499,10 @@ class TimelineDatasetLogger:
                 "emotion_prob",
                 "emotion_timestamp",
                 "arousal",
-                "arousal_method",
-                "arousal_quality",
                 "arousal_timestamp_ms",
                 "hr_bpm",
-                "distraction_active",
-                "active_distraction_count",
-                "active_distraction_ids",
-                "distraction_start_count",
-                "distraction_start_ids",
-                "distraction_finish_count",
-                "distraction_finish_ids",
-                "last_distraction_started_id",
-                "last_distraction_finished_id",
-                "last_distraction_duration_seconds",
-                "seconds_since_last_distraction_end",
-                "total_distraction_starts",
-                "total_distraction_finishes",
-                "error_occurred",
-                "error_count",
                 "error_types",
                 "error_details",
-                "last_error_type",
-                "total_errors",
                 "details",
             ],
         )
@@ -858,18 +820,13 @@ class ErrorDatasetLogger:
                 "map_name",
                 "hr_baseline",
                 "arousal_baseline",
-                "arousal_baseline_timestamp_ms",
                 "error_type",
                 "speed_kmh",
                 "steer_angle_deg",
                 "timestamp",
-                "frame",
-                "sim_time_seconds",
                 "x",
                 "y",
                 "z",
-                "road_id",
-                "lane_id",
                 "details",
             ],
         )
@@ -957,7 +914,6 @@ class DistractionDatasetLogger:
                 "map_name",
                 "hr_baseline",
                 "arousal_baseline",
-                "arousal_baseline_timestamp_ms",
                 "start_x",
                 "start_y",
                 "start_z",
@@ -970,10 +926,6 @@ class DistractionDatasetLogger:
                 "steer_angle_deg_end",
                 "timestamp_start",
                 "timestamp_end",
-                "frame_start",
-                "frame_end",
-                "sim_time_start",
-                "sim_time_end",
                 "details",
             ],
         )
