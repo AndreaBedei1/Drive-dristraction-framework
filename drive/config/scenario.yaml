@@ -94,11 +94,11 @@ manual_control:
     # - "-a"
 
 experiment:
-  user_id: "participant_13"
+  user_id: "participant_03"
   run_id: 1
   weather_label: "day"
   output_dir: "data"
-  max_duration_seconds: 600  # stop scenario after 10 minutes; <= 0 disables timeout
+  max_duration_seconds: 300  # stop scenario after 5 minutes; <= 0 disables timeout
   # baseline | distraction
   dataset_profile: "distraction"
   baseline_dataset_suffix: "_baseline"
@@ -141,6 +141,8 @@ distractions:
   fullscreen: false
   fill_monitor: true
   steal_focus: false
+  min_keypresses: 2
+  max_keypresses: 6
   excluded_letters:
     - W
     - S
@@ -161,8 +163,8 @@ distractions:
     - B
     - R
     - H
-  min_interval_seconds: 25.0
-  max_interval_seconds: 35.0
+  min_interval_seconds: 8.0
+  max_interval_seconds: 15.0
   min_gap_between_windows_seconds: 5.0
   flash_duration_seconds: 5.0
   flash_start_interval_seconds: 0.5

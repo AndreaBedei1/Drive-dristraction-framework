@@ -67,6 +67,8 @@ class DistractionWindow(threading.Thread):
         window_id: str,
         title: str,
         coordinator: DistractionCoordinator,
+        min_keypresses: int,
+        max_keypresses: int,
         min_interval_seconds: float,
         max_interval_seconds: float,
         flash_duration_seconds: float,
@@ -90,6 +92,8 @@ class DistractionWindow(threading.Thread):
         self._id = window_id
         self._title = title
         self._coord = coordinator
+        self._min_keypresses = max(1, int(min_keypresses))
+        self._max_keypresses = max(self._min_keypresses, int(max_keypresses))
         self._min_interval = float(min_interval_seconds)
         self._max_interval = float(max_interval_seconds)
         self._flash_duration = float(flash_duration_seconds)
@@ -234,19 +238,24 @@ class DistractionWindow(threading.Thread):
         if self._root is None or self._label is None:
             return
         self._root.configure(bg="#b00020")
-        count = random.randint(1, 3)
-        if len(self._allowed_letters) >= count:
-            self._expected_letters = random.sample(self._allowed_letters, k=count)
-        else:
-            self._expected_letters = [random.choice(self._allowed_letters) for _ in range(count)]
+        max_count = max(1, min(self._max_keypresses, len(self._allowed_letters)))
+        min_count = max(1, min(self._min_keypresses, max_count))
+        count = random.randint(min_count, max_count)
+        self._expected_letters = random.sample(self._allowed_letters, k=count)
         self._expected_index = 0
         self._expected_letter = self._expected_letters[0] if self._expected_letters else None
         self._expected_vk = ord(self._expected_letter) if self._expected_letter else None
         font_size = 96
         if count == 2:
             font_size = 84
-        elif count >= 3:
+        elif count == 3:
             font_size = 72
+        elif count == 4:
+            font_size = 60
+        elif count == 5:
+            font_size = 52
+        elif count >= 6:
+            font_size = 46
         self._label.configure(text=self._format_prompt(), font=("Arial", font_size, "bold"))
         self._awaiting_ack = True
         self._on_start(self._id)

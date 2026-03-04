@@ -30,6 +30,10 @@ class ModelInferenceProvider(Protocol):
         """Return (label, probability) for the latest inference window."""
         ...
 
+    def get_window_summary_with_timestamp(self) -> Tuple[str, float, Optional[float]]:
+        """Return (label, probability, timestamp) for the latest inference window."""
+        ...
+
 
 class _CsvWriter:
     """Thread-safe CSV appender with header creation."""
@@ -273,6 +277,15 @@ def _format_emotion_prob(value: Optional[float]) -> Any:
         return ""
 
 
+def _format_float_timestamp(value: Optional[float]) -> Any:
+    if value is None:
+        return ""
+    try:
+        return round(float(value), 3)
+    except Exception:
+        return ""
+
+
 class BaselineDrivingTimeLogger:
     """Logger for baseline driving time and cumulative user totals."""
 
@@ -299,6 +312,7 @@ class BaselineDrivingTimeLogger:
                 "timestamp",
                 "hr_baseline",
                 "arousal_baseline",
+                "arousal_baseline_timestamp_ms",
             ],
         )
         self._lock = threading.Lock()
@@ -388,13 +402,16 @@ class BaselineDrivingTimeLogger:
                 "timestamp": _wall_time_iso(),
                 "hr_baseline": hr_baseline,
                 "arousal_baseline": arousal_baseline,
+                "arousal_baseline_timestamp_ms": ""
+                if pre_drive_snapshot is None or pre_drive_snapshot.timestamp_ms is None
+                else pre_drive_snapshot.timestamp_ms,
             }
             self._writer.append(row)
             return total_seconds
 
 
 class TimelineDatasetLogger:
-    """Second-by-second timeline logger for the whole simulation."""
+    """Real-time second-by-second timeline logger for the whole simulation."""
 
     def __init__(
         self,
@@ -418,6 +435,8 @@ class TimelineDatasetLogger:
                 "weather",
                 "map_name",
                 "second_index",
+                "wall_second_bucket",
+                "wall_time_seconds",
                 "sim_second_bucket",
                 "second_complete",
                 "timestamp",
@@ -437,6 +456,7 @@ class TimelineDatasetLogger:
                 "gear",
                 "model_pred",
                 "model_prob",
+                "model_timestamp",
                 "emotion_label",
                 "emotion_prob",
                 "emotion_timestamp",
@@ -468,6 +488,7 @@ class TimelineDatasetLogger:
             ],
         )
         self._lock = threading.Lock()
+        self._wall_start_monotonic: Optional[float] = None
         self._first_bucket: Optional[int] = None
         self._current_bucket: Optional[int] = None
         self._current_state: Optional[Dict[str, Any]] = None
@@ -479,14 +500,18 @@ class TimelineDatasetLogger:
         self._distraction_finish_history: List[Tuple[float, str, Any]] = []
         self._active_distractions: Dict[str, float] = {}
 
-    def _model_snapshot(self) -> Tuple[str, float]:
+    def _model_snapshot(self) -> Tuple[str, float, Optional[float]]:
         if self._model_provider is None:
-            return "None", 1.0
+            return "None", 1.0, None
         try:
-            label, prob = self._model_provider.get_window_summary()
-            return str(label), float(prob)
+            label, prob, timestamp = self._model_provider.get_window_summary_with_timestamp()
+            return str(label), float(prob), timestamp
         except Exception:
-            return "None", 1.0
+            try:
+                label, prob = self._model_provider.get_window_summary()
+                return str(label), float(prob), None
+            except Exception:
+                return "None", 1.0, None
 
     def _arousal_snapshot(self) -> ArousalSnapshot:
         if self._arousal_provider is None:
@@ -523,15 +548,6 @@ class TimelineDatasetLogger:
             return ""
 
     @staticmethod
-    def _format_timestamp(value: Optional[float]) -> Any:
-        if value is None:
-            return ""
-        try:
-            return round(float(value), 3)
-        except Exception:
-            return ""
-
-    @staticmethod
     def _coerce_sim_time(value: Any) -> Optional[float]:
         try:
             sim_time = float(value)
@@ -553,18 +569,27 @@ class TimelineDatasetLogger:
         cleaned = [str(v).strip() for v in values if str(v).strip()]
         return " | ".join(cleaned)
 
-    def _capture_state(self, world: carla.World, vehicle: carla.Actor) -> Optional[Tuple[int, Dict[str, Any]]]:
+    def _ensure_wall_time_locked(self, wall_monotonic: Optional[float] = None) -> Tuple[float, int]:
+        """Return elapsed real seconds and the corresponding wall-time bucket."""
+        now = time.monotonic() if wall_monotonic is None else float(wall_monotonic)
+        if self._wall_start_monotonic is None:
+            self._wall_start_monotonic = now
+        elapsed = max(0.0, now - self._wall_start_monotonic)
+        return elapsed, int(elapsed)
+
+    def _capture_state(self, world: carla.World, vehicle: carla.Actor) -> Optional[Tuple[float, Dict[str, Any]]]:
         try:
             location = vehicle.get_location()
         except Exception:
             return None
 
+        wall_monotonic = time.monotonic()
         snap = _snapshot_info(world)
         sim_time = self._coerce_sim_time(snap.get("sim_time_seconds"))
         if sim_time is None:
             return None
-        bucket = int(sim_time)
-        model_pred, model_prob = self._model_snapshot()
+        sim_bucket = int(sim_time)
+        model_pred, model_prob, model_timestamp = self._model_snapshot()
         emotion = self._emotion_snapshot()
         arousal = self._arousal_snapshot()
 
@@ -574,13 +599,15 @@ class TimelineDatasetLogger:
             "weather": self._context.weather_label,
             "map_name": self._context.map_name,
             "timestamp": _wall_time_iso(),
+            "sim_second_bucket": sim_bucket,
             "speed_kmh": round(_speed_kmh(vehicle), 3),
             "steer_angle_deg": round(_steer_angle_deg(vehicle), 3),
             "model_pred": model_pred,
             "model_prob": round(model_prob, 3),
+            "model_timestamp": _format_float_timestamp(model_timestamp),
             "emotion_label": _format_emotion_label(emotion.label),
             "emotion_prob": _format_emotion_prob(emotion.prob),
-            "emotion_timestamp": self._format_timestamp(emotion.timestamp),
+            "emotion_timestamp": _format_float_timestamp(emotion.timestamp),
             "arousal": self._format_arousal(arousal.value),
             "arousal_method": str(arousal.method).strip() if arousal.method else "",
             "arousal_quality": str(arousal.quality).strip() if arousal.quality else "",
@@ -590,15 +617,18 @@ class TimelineDatasetLogger:
         row.update(snap)
         row.update(_location_info(world, location))
         row.update(_vehicle_control_info(vehicle))
-        return bucket, row
+        return wall_monotonic, row
 
     def update(self, world: carla.World, vehicle: carla.Actor) -> None:
         captured = self._capture_state(world, vehicle)
         if captured is None:
             return
-        bucket, state = captured
+        wall_monotonic, state = captured
 
         with self._lock:
+            wall_elapsed, bucket = self._ensure_wall_time_locked(wall_monotonic)
+            state["wall_second_bucket"] = bucket
+            state["wall_time_seconds"] = round(wall_elapsed, 3)
             if self._first_bucket is None:
                 self._first_bucket = bucket
             if self._current_bucket is None:
@@ -611,34 +641,26 @@ class TimelineDatasetLogger:
             self._current_state = state
 
     def record_error(self, error_type: str, details: str = "", sim_time_seconds: Any = None) -> None:
-        bucket = self._bucket_for_sim_time(sim_time_seconds)
-        if bucket is None:
-            return
         with self._lock:
+            _wall_elapsed, bucket = self._ensure_wall_time_locked()
             self._error_history.append((bucket, error_type, details))
             self._error_events_by_bucket.setdefault(bucket, []).append((error_type, details))
 
     def record_distraction_start(self, window_id: str, sim_time_seconds: Any = None) -> None:
-        sim_time = self._coerce_sim_time(sim_time_seconds)
-        if sim_time is None:
-            return
-        bucket = int(sim_time)
         with self._lock:
-            self._active_distractions[window_id] = sim_time
-            self._distraction_start_history.append((sim_time, window_id))
+            wall_elapsed, bucket = self._ensure_wall_time_locked()
+            self._active_distractions[window_id] = wall_elapsed
+            self._distraction_start_history.append((wall_elapsed, window_id))
             self._distraction_starts_by_bucket.setdefault(bucket, []).append(window_id)
 
     def record_distraction_finish(self, window_id: str, sim_time_seconds: Any = None) -> None:
-        sim_time = self._coerce_sim_time(sim_time_seconds)
-        if sim_time is None:
-            return
-        bucket = int(sim_time)
         with self._lock:
+            wall_elapsed, bucket = self._ensure_wall_time_locked()
             start_time = self._active_distractions.pop(window_id, None)
             duration: Any = ""
             if start_time is not None:
-                duration = round(max(0.0, sim_time - start_time), 3)
-            self._distraction_finish_history.append((sim_time, window_id, duration))
+                duration = round(max(0.0, wall_elapsed - start_time), 3)
+            self._distraction_finish_history.append((wall_elapsed, window_id, duration))
             self._distraction_finishes_by_bucket.setdefault(bucket, []).append((window_id, duration))
 
     def flush_pending(self) -> None:
@@ -678,7 +700,7 @@ class TimelineDatasetLogger:
         row.update(
             {
                 "second_index": (bucket - self._first_bucket) if self._first_bucket is not None else 0,
-                "sim_second_bucket": bucket,
+                "wall_second_bucket": bucket,
                 "second_complete": int(bool(second_complete)),
                 "distraction_active": int(bool(active_ids)),
                 "active_distraction_count": len(active_ids),
@@ -745,8 +767,10 @@ class ErrorDatasetLogger:
                 "error_type",
                 "model_pred",
                 "model_prob",
+                "model_timestamp",
                 "emotion_label",
                 "emotion_prob",
+                "emotion_timestamp",
                 "speed_kmh",
                 "steer_angle_deg",
                 "timestamp",
@@ -761,15 +785,19 @@ class ErrorDatasetLogger:
             ],
         )
 
-    def _model_snapshot(self) -> Tuple[str, float]:
+    def _model_snapshot(self) -> Tuple[str, float, Optional[float]]:
         """Return the latest aggregated model label and probability."""
         if self._model_provider is None:
-            return "None", 1.0
+            return "None", 1.0, None
         try:
-            label, prob = self._model_provider.get_window_summary()
-            return str(label), float(prob)
+            label, prob, timestamp = self._model_provider.get_window_summary_with_timestamp()
+            return str(label), float(prob), timestamp
         except Exception:
-            return "None", 1.0
+            try:
+                label, prob = self._model_provider.get_window_summary()
+                return str(label), float(prob), None
+            except Exception:
+                return "None", 1.0, None
 
     def _emotion_snapshot(self) -> EmotionSnapshot:
         """Return the latest emotion snapshot."""
@@ -793,7 +821,7 @@ class ErrorDatasetLogger:
         except Exception:
             return
 
-        pred_label, pred_prob = self._model_snapshot()
+        pred_label, pred_prob, model_timestamp = self._model_snapshot()
         emotion = self._emotion_snapshot()
 
         row: Dict[str, Any] = {
@@ -804,8 +832,10 @@ class ErrorDatasetLogger:
             "error_type": error_type,
             "model_pred": pred_label,
             "model_prob": round(pred_prob, 3),
+            "model_timestamp": _format_float_timestamp(model_timestamp),
             "emotion_label": _format_emotion_label(emotion.label),
             "emotion_prob": _format_emotion_prob(emotion.prob),
+            "emotion_timestamp": _format_float_timestamp(emotion.timestamp),
             "speed_kmh": round(_speed_kmh(vehicle), 3),
             "steer_angle_deg": round(_steer_angle_deg(vehicle), 3),
             "timestamp": _wall_time_iso(),
@@ -867,12 +897,18 @@ class DistractionDatasetLogger:
                 "hr_bpm_end",
                 "model_pred_start",
                 "model_prob_start",
+                "model_timestamp_start",
                 "model_pred_end",
                 "model_prob_end",
+                "model_timestamp_end",
                 "emotion_label_start",
                 "emotion_prob_start",
+                "emotion_timestamp_start",
                 "emotion_label_end",
                 "emotion_prob_end",
+                "emotion_timestamp_end",
+                "arousal_timestamp_ms_start",
+                "arousal_timestamp_ms_end",
                 "timestamp_start",
                 "timestamp_end",
                 "frame_start",
@@ -885,15 +921,19 @@ class DistractionDatasetLogger:
         self._active: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
-    def _model_snapshot(self) -> Tuple[str, float]:
+    def _model_snapshot(self) -> Tuple[str, float, Optional[float]]:
         """Return the latest aggregated model label and probability."""
         if self._model_provider is None:
-            return "None", 1.0
+            return "None", 1.0, None
         try:
-            label, prob = self._model_provider.get_window_summary()
-            return str(label), float(prob)
+            label, prob, timestamp = self._model_provider.get_window_summary_with_timestamp()
+            return str(label), float(prob), timestamp
         except Exception:
-            return "None", 1.0
+            try:
+                label, prob = self._model_provider.get_window_summary()
+                return str(label), float(prob), None
+            except Exception:
+                return "None", 1.0, None
 
     def _arousal_snapshot(self) -> ArousalSnapshot:
         """Return the latest arousal snapshot."""
@@ -941,7 +981,7 @@ class DistractionDatasetLogger:
             except Exception:
                 return
             snap = _snapshot_info(world)
-            pred_label, pred_prob = self._model_snapshot()
+            pred_label, pred_prob, model_timestamp = self._model_snapshot()
             arousal = self._arousal_snapshot()
             emotion = self._emotion_snapshot()
             self._active[window_id] = {
@@ -951,12 +991,17 @@ class DistractionDatasetLogger:
                 "timestamp_start": _wall_time_iso(),
                 "model_pred_start": pred_label,
                 "model_prob_start": round(pred_prob, 3),
+                "model_timestamp_start": _format_float_timestamp(model_timestamp),
                 "speed_kmh_start": round(_speed_kmh(vehicle), 3),
                 "steer_angle_deg_start": round(_steer_angle_deg(vehicle), 3),
                 "arousal_start": self._format_arousal(arousal.value),
+                "arousal_timestamp_ms_start": ""
+                if arousal.timestamp_ms is None
+                else arousal.timestamp_ms,
                 "hr_bpm_start": self._format_hr(arousal.hr_bpm),
                 "emotion_label_start": _format_emotion_label(emotion.label),
                 "emotion_prob_start": _format_emotion_prob(emotion.prob),
+                "emotion_timestamp_start": _format_float_timestamp(emotion.timestamp),
             }
             if self._timeline_logger is not None:
                 self._timeline_logger.record_distraction_start(
@@ -975,7 +1020,7 @@ class DistractionDatasetLogger:
         except Exception:
             return
         snap = _snapshot_info(world)
-        end_pred_label, end_pred_prob = self._model_snapshot()
+        end_pred_label, end_pred_prob, end_model_timestamp = self._model_snapshot()
         end_arousal = self._arousal_snapshot()
         end_emotion = self._emotion_snapshot()
 
@@ -1001,12 +1046,20 @@ class DistractionDatasetLogger:
             "hr_bpm_end": self._format_hr(end_arousal.hr_bpm),
             "model_pred_start": start_info.get("model_pred_start", ""),
             "model_prob_start": start_info.get("model_prob_start", ""),
+            "model_timestamp_start": start_info.get("model_timestamp_start", ""),
             "model_pred_end": end_pred_label,
             "model_prob_end": round(end_pred_prob, 3),
+            "model_timestamp_end": _format_float_timestamp(end_model_timestamp),
             "emotion_label_start": start_info.get("emotion_label_start", ""),
             "emotion_prob_start": start_info.get("emotion_prob_start", ""),
+            "emotion_timestamp_start": start_info.get("emotion_timestamp_start", ""),
             "emotion_label_end": _format_emotion_label(end_emotion.label),
             "emotion_prob_end": _format_emotion_prob(end_emotion.prob),
+            "emotion_timestamp_end": _format_float_timestamp(end_emotion.timestamp),
+            "arousal_timestamp_ms_start": start_info.get("arousal_timestamp_ms_start", ""),
+            "arousal_timestamp_ms_end": ""
+            if end_arousal.timestamp_ms is None
+            else end_arousal.timestamp_ms,
             "timestamp_start": start_info.get("timestamp_start", ""),
             "timestamp_end": _wall_time_iso(),
             "frame_start": start_info.get("frame_start", ""),

@@ -142,6 +142,8 @@ class DistractionConfig:
     fill_monitor: bool
     steal_focus: bool
     excluded_letters: List[str]
+    min_keypresses: int
+    max_keypresses: int
     min_interval_seconds: float
     max_interval_seconds: float
     min_gap_between_windows_seconds: float
@@ -350,6 +352,8 @@ def load_config(path: str) -> ScenarioConfig:
         fill_monitor=bool(_get(dis_raw, "fill_monitor", False)),
         steal_focus=bool(_get(dis_raw, "steal_focus", False)),
         excluded_letters=[str(x) for x in _get(dis_raw, "excluded_letters", []) or []],
+        min_keypresses=int(_get(dis_raw, "min_keypresses", 2)),
+        max_keypresses=int(_get(dis_raw, "max_keypresses", 6)),
         min_interval_seconds=float(_get(dis_raw, "min_interval_seconds", 25.0)),
         max_interval_seconds=float(_get(dis_raw, "max_interval_seconds", 35.0)),
         min_gap_between_windows_seconds=float(_get(dis_raw, "min_gap_between_windows_seconds", 5.0)),

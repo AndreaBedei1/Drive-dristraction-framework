@@ -103,6 +103,38 @@ def _postprocess_probs(probs: np.ndarray, threshold: float) -> Tuple[str, float]
     return label, pred_score
 
 
+def _summarize_history(history: List[InferenceResult]) -> Tuple[str, float, Optional[float]]:
+    """Return window summary plus the latest timestamp that supports it."""
+    if not history:
+        return NONE_LABEL, 1.0, None
+
+    buckets: Dict[str, List[InferenceResult]] = {}
+    for item in history:
+        buckets.setdefault(item.label, []).append(item)
+
+    best_label = None
+    best_count = -1
+    best_avg = -1.0
+    best_ts = -1.0
+    for label, items in buckets.items():
+        count = len(items)
+        avg = sum(x.prob for x in items) / count
+        ts = max(x.timestamp for x in items)
+        if (
+            count > best_count
+            or (count == best_count and avg > best_avg)
+            or (count == best_count and avg == best_avg and ts > best_ts)
+        ):
+            best_label = label
+            best_count = count
+            best_avg = avg
+            best_ts = ts
+
+    if best_label is None:
+        return NONE_LABEL, 1.0, None
+    return best_label, float(best_avg), float(best_ts) if best_ts >= 0.0 else None
+
+
 class ModelInferenceService(threading.Thread):
     """Run CLIP+classifier inference asynchronously and store a rolling window."""
 
@@ -145,35 +177,13 @@ class ModelInferenceService(threading.Thread):
 
     def get_window_summary(self) -> Tuple[str, float]:
         """Return majority label and mean probability over the rolling window."""
+        label, prob, _timestamp = self.get_window_summary_with_timestamp()
+        return label, prob
+
+    def get_window_summary_with_timestamp(self) -> Tuple[str, float, Optional[float]]:
+        """Return summary plus the latest timestamp of the selected window."""
         with self._lock:
-            if not self._history:
-                return NONE_LABEL, 1.0
-
-            buckets: Dict[str, List[InferenceResult]] = {}
-            for item in self._history:
-                buckets.setdefault(item.label, []).append(item)
-
-            best_label = None
-            best_count = -1
-            best_avg = -1.0
-            best_ts = -1.0
-            for label, items in buckets.items():
-                count = len(items)
-                avg = sum(x.prob for x in items) / count
-                ts = max(x.timestamp for x in items)
-                if (
-                    count > best_count
-                    or (count == best_count and avg > best_avg)
-                    or (count == best_count and avg == best_avg and ts > best_ts)
-                ):
-                    best_label = label
-                    best_count = count
-                    best_avg = avg
-                    best_ts = ts
-
-            if best_label is None:
-                return NONE_LABEL, 1.0
-            return best_label, float(best_avg)
+            return _summarize_history(list(self._history))
 
     def run(self) -> None:
         """Thread loop: read webcam frames and push inference results."""
@@ -404,32 +414,10 @@ class ModelInferenceProcess:
 
     def get_window_summary(self) -> Tuple[str, float]:
         """Return majority label and mean probability over the rolling window."""
+        label, prob, _timestamp = self.get_window_summary_with_timestamp()
+        return label, prob
+
+    def get_window_summary_with_timestamp(self) -> Tuple[str, float, Optional[float]]:
+        """Return summary plus the latest timestamp of the selected window."""
         self._drain_queues()
-        if not self._history:
-            return NONE_LABEL, 1.0
-
-        buckets: Dict[str, List[InferenceResult]] = {}
-        for item in self._history:
-            buckets.setdefault(item.label, []).append(item)
-
-        best_label = None
-        best_count = -1
-        best_avg = -1.0
-        best_ts = -1.0
-        for label, items in buckets.items():
-            count = len(items)
-            avg = sum(x.prob for x in items) / count
-            ts = max(x.timestamp for x in items)
-            if (
-                count > best_count
-                or (count == best_count and avg > best_avg)
-                or (count == best_count and avg == best_avg and ts > best_ts)
-            ):
-                best_label = label
-                best_count = count
-                best_avg = avg
-                best_ts = ts
-
-        if best_label is None:
-            return NONE_LABEL, 1.0
-        return best_label, float(best_avg)
+        return _summarize_history(list(self._history))
