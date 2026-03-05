@@ -23,7 +23,7 @@ from data_logger import DataLogger
 RR_WINDOW_SEC = 60.0
 MIN_RR_SAMPLES = 20
 MAX_RR_JUMP   = 0.25
-AROUSAL_ZMAX  = 2.5
+AROUSAL_ZMAX_FLOOR = 2.5
 MIN_RR_MS     = 300
 MAX_RR_MS     = 2000
 
@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         # -----------------------------
         self.smoothing_window = deque(maxlen=10)
         self.smooth_method = "mean"
+        self.arousal_zmax = AROUSAL_ZMAX_FLOOR
 
         # -----------------------------
         # Recording
@@ -267,6 +268,7 @@ class MainWindow(QMainWindow):
         self.hr_baseline_vals.clear()
         self.rmssd_baseline_vals.clear()
         self.rr_buffer.clear()
+        self.arousal_zmax = AROUSAL_ZMAX_FLOOR
 
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
@@ -401,9 +403,11 @@ class MainWindow(QMainWindow):
             self.label_arousal.setText("Arousal: -- (no baseline)")
             return
 
-        # Smooth then normalize to [0, 1]
+        # Smooth then normalize to [0, 1] with dynamic ceiling
+        if arousal > self.arousal_zmax:
+            self.arousal_zmax = arousal
         smooth = self._smooth_arousal(arousal)
-        normalized = np.clip((smooth + AROUSAL_ZMAX) / (2 * AROUSAL_ZMAX), 0.0, 1.0)
+        normalized = float(np.clip(smooth / self.arousal_zmax, 0.0, 1.0))
 
         # Update UI
         color = "green" if method == "actual" else "orange"
