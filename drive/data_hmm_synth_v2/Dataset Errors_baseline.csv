@@ -1,1 +1,0 @@
-user_id,run_id,weather,map_name,error_type,model_pred,model_prob,emotion_label,emotion_prob,speed_kmh,timestamp,frame,sim_time_seconds,x,y,z,road_id,lane_id,details,steer_angle_deg

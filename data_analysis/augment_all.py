@@ -5,10 +5,10 @@ from augment_distraction_errors import *
 
 
 
-users = [f'participant_{i:02d}' for i in range(23,31)]
-runs_baseline = [1, 2, 3]
-runs_errors = [1, 2, 3, 4]
-noise=0.06
+users = [f'participant_{i:02d}' for i in range(9)]
+runs_baseline = [4,5,6]
+runs_errors = [4,5,6]
+noise=0.15
 
 base_timestamp='2026-02-23T09:00:42.023752'
 error_timestamp = '2026-02-24T10:24:42.128109'
