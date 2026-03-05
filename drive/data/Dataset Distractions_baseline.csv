@@ -1,0 +1,1 @@
+user_id,run_id,weather,map_name,hr_baseline,arousal_baseline,start_x,start_y,start_z,end_x,end_y,end_z,speed_kmh_start,speed_kmh_end,steer_angle_deg_start,steer_angle_deg_end,timestamp_start,timestamp_end,details

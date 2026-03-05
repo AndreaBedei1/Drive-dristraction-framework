@@ -2,8 +2,10 @@ from __future__ import annotations
 
 """CSV dataset logging utilities for errors and distractions."""
 
+import atexit
 import csv
 import os
+import queue
 import threading
 from dataclasses import dataclass
 import datetime
@@ -38,13 +40,19 @@ class ModelInferenceProvider(Protocol):
 
 
 class _CsvWriter:
-    """Thread-safe CSV appender with header creation."""
+    """Thread-safe async CSV appender with header creation."""
+
+    _STOP = object()
 
     def __init__(self, path: str, fieldnames: List[str]) -> None:
         """Create a writer for the target CSV path."""
         self._path = path
         self._fieldnames = self._merge_fieldnames([], list(fieldnames))
         self._lock = threading.Lock()
+        self._pending_cond = threading.Condition(self._lock)
+        self._pending_rows = 0
+        self._closed = False
+        self._queue: "queue.SimpleQueue[Any]" = queue.SimpleQueue()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         write_header = not os.path.exists(path)
         if not write_header:
@@ -56,22 +64,85 @@ class _CsvWriter:
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=self._fieldnames)
                 writer.writeheader()
-            return
-
-        existing_fieldnames = self._read_existing_fieldnames(path)
-        if not existing_fieldnames:
-            return
-        if existing_fieldnames != self._fieldnames:
-            try:
-                self._rewrite_with_fieldnames(self._fieldnames)
-            except Exception:
-                self._fieldnames = existing_fieldnames
+        else:
+            existing_fieldnames = self._read_existing_fieldnames(path)
+            if not existing_fieldnames:
+                pass
+            elif existing_fieldnames != self._fieldnames:
+                try:
+                    self._rewrite_with_fieldnames(self._fieldnames)
+                except Exception:
+                    self._fieldnames = existing_fieldnames
+        self._worker = threading.Thread(target=self._writer_loop, daemon=True)
+        self._worker.start()
+        atexit.register(self.close)
 
     def append(self, row: Dict[str, Any]) -> None:
         """Append a row to the CSV file."""
-        with self._lock, open(self._path, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=self._fieldnames, extrasaction="ignore")
-            writer.writerow(row)
+        with self._lock:
+            if self._closed:
+                return
+            self._pending_rows += 1
+        self._queue.put(dict(row))
+
+    def flush(self, timeout: Optional[float] = None) -> bool:
+        """Wait until all queued rows are written."""
+        deadline = None if timeout is None else (time.monotonic() + max(0.0, float(timeout)))
+        with self._pending_cond:
+            while self._pending_rows > 0:
+                if deadline is None:
+                    self._pending_cond.wait(timeout=0.05)
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._pending_cond.wait(timeout=min(0.05, remaining))
+        return True
+
+    def close(self) -> None:
+        """Flush and stop the writer thread."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._queue.put(self._STOP)
+        try:
+            self._worker.join(timeout=2.0)
+        except Exception:
+            pass
+
+    def _writer_loop(self) -> None:
+        """Drain queued rows and append to CSV on a dedicated thread."""
+        try:
+            with open(self._path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=self._fieldnames, extrasaction="ignore")
+                rows_since_flush = 0
+                while True:
+                    item = self._queue.get()
+                    if item is self._STOP:
+                        break
+                    try:
+                        writer.writerow(item)
+                    except Exception:
+                        pass
+                    rows_since_flush += 1
+                    if rows_since_flush >= 16:
+                        try:
+                            f.flush()
+                        except Exception:
+                            pass
+                        rows_since_flush = 0
+                    with self._pending_cond:
+                        self._pending_rows = max(0, self._pending_rows - 1)
+                        self._pending_cond.notify_all()
+                try:
+                    f.flush()
+                except Exception:
+                    pass
+        finally:
+            with self._pending_cond:
+                self._pending_rows = 0
+                self._pending_cond.notify_all()
 
     @staticmethod
     def _read_existing_fieldnames(path: str) -> List[str]:
@@ -281,7 +352,32 @@ def _format_float_timestamp(value: Optional[float]) -> Any:
     if value is None:
         return ""
     try:
-        return round(float(value), 3)
+        ts = float(value)
+    except Exception:
+        return ""
+    if ts > 1e12:
+        ts = ts / 1000.0
+    if ts <= 0.0:
+        return ""
+    try:
+        return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).replace(tzinfo=None).isoformat()
+    except Exception:
+        return ""
+
+
+def _format_ms_timestamp(value: Optional[int]) -> Any:
+    if value is None:
+        return ""
+    try:
+        ts = float(value)
+    except Exception:
+        return ""
+    if ts <= 0.0:
+        return ""
+    if ts > 1e12:
+        ts = ts / 1000.0
+    try:
+        return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).replace(tzinfo=None).isoformat()
     except Exception:
         return ""
 
@@ -451,6 +547,10 @@ class BaselineDrivingTimeLogger:
             }
             self._writer.append(row)
             return total_seconds
+
+    def close(self) -> None:
+        """Stop the async CSV writer."""
+        self._writer.close()
 
 
 class TimelineDatasetLogger:
@@ -657,7 +757,7 @@ class TimelineDatasetLogger:
             "arousal": self._format_arousal(arousal.value),
             "arousal_method": str(arousal.method).strip() if arousal.method else "",
             "arousal_quality": str(arousal.quality).strip() if arousal.quality else "",
-            "arousal_timestamp_ms": arousal.timestamp_ms if arousal.timestamp_ms is not None else "",
+            "arousal_timestamp_ms": _format_ms_timestamp(arousal.timestamp_ms),
             "hr_bpm": self._format_hr(arousal.hr_bpm),
         }
         with self._lock:
@@ -717,6 +817,14 @@ class TimelineDatasetLogger:
     def flush_pending(self) -> None:
         with self._lock:
             self._flush_locked(second_complete=False)
+
+    def close(self) -> None:
+        """Flush pending timeline state and stop the async CSV writer."""
+        try:
+            self.flush_pending()
+            self._writer.flush(timeout=2.0)
+        finally:
+            self._writer.close()
 
     def _flush_locked(self, second_complete: bool) -> None:
         if self._current_bucket is None or self._current_state is None:
@@ -883,6 +991,10 @@ class ErrorDatasetLogger:
                 sim_time_seconds=snap.get("sim_time_seconds"),
             )
 
+    def close(self) -> None:
+        """Stop the async CSV writer."""
+        self._writer.close()
+
 
 class DistractionDatasetLogger:
     """Logger for distraction windows into Dataset Distractions CSV."""
@@ -1014,3 +1126,7 @@ class DistractionDatasetLogger:
                 window_id=window_id,
                 sim_time_seconds=snap.get("sim_time_seconds"),
             )
+
+    def close(self) -> None:
+        """Stop the async CSV writer."""
+        self._writer.close()

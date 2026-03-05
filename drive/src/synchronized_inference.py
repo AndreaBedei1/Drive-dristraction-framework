@@ -23,7 +23,7 @@ from src.emotion_provider import EmotionSnapshot
 
 
 DEFAULT_CAPTURE_HZ = 15.0
-DEFAULT_SAMPLE_TIMEOUT_SECONDS = 5.0
+DEFAULT_SAMPLE_TIMEOUT_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -174,7 +174,7 @@ class _BaseFrameWorker(threading.Thread):
             return future
         try:
             req = _FrameInferenceRequest(frame=frame.copy(), request_timestamp=float(request_timestamp), future=future)
-            self._queue.put(req, timeout=1.0)
+            self._queue.put_nowait(req)
         except Exception as exc:
             self._last_error = str(exc)
             future.set_result(self._default_result(request_timestamp))
@@ -350,6 +350,14 @@ _DISTRACTION_PROCESS_STATE = None
 _EMOTION_PROCESS_STATE = None
 
 
+def _shutdown_process_executor(executor: ProcessPoolExecutor) -> None:
+    """Shutdown compatibility wrapper for Python versions without cancel_futures."""
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        executor.shutdown(wait=False)
+
+
 def _load_distraction_process_state(classifier_path: Optional[str], device: Optional[str]):
     """Load and cache the distraction model inside a worker process."""
     global _DISTRACTION_PROCESS_STATE
@@ -487,6 +495,7 @@ class DistractionInferenceProcessWorker:
         self._ready_future: Optional[Future] = None
         self._last_error: Optional[str] = None
         self._lock = threading.Lock()
+        self._inflight_future: Optional[Future] = None
 
     def start(self) -> None:
         with self._lock:
@@ -504,8 +513,9 @@ class DistractionInferenceProcessWorker:
             executor = self._executor
             self._executor = None
             self._ready_future = None
+            self._inflight_future = None
         if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
+            _shutdown_process_executor(executor)
 
     def join(self, timeout: Optional[float] = None) -> None:
         _ = timeout
@@ -533,14 +543,24 @@ class DistractionInferenceProcessWorker:
     def submit_frame(self, frame: np.ndarray, request_timestamp: float) -> Future:
         from src.model_inference import InferenceResult, NONE_LABEL
 
+        def _default_future() -> Future:
+            f: Future = Future()
+            f.set_result(InferenceResult(label=NONE_LABEL, prob=1.0, timestamp=float(request_timestamp)))
+            return f
+
         with self._lock:
             executor = self._executor
+            inflight = self._inflight_future
+            if inflight is not None and inflight.done():
+                self._inflight_future = None
+                inflight = None
         if executor is None:
-            future: Future = Future()
-            future.set_result(InferenceResult(label=NONE_LABEL, prob=1.0, timestamp=float(request_timestamp)))
-            return future
+            return _default_future()
+        if inflight is not None:
+            # Do not queue unlimited stale frames when inference is slower than requests.
+            return _default_future()
         try:
-            return executor.submit(
+            submitted = executor.submit(
                 _run_distraction_process_inference,
                 frame.copy(),
                 float(request_timestamp),
@@ -548,11 +568,19 @@ class DistractionInferenceProcessWorker:
                 self._device,
                 self._threshold,
             )
+            with self._lock:
+                self._inflight_future = submitted
+
+            def _clear_inflight(done_future: Future) -> None:
+                with self._lock:
+                    if self._inflight_future is done_future:
+                        self._inflight_future = None
+
+            submitted.add_done_callback(_clear_inflight)
+            return submitted
         except Exception as exc:
             self._last_error = str(exc)
-            future = Future()
-            future.set_result(InferenceResult(label=NONE_LABEL, prob=1.0, timestamp=float(request_timestamp)))
-            return future
+            return _default_future()
 
 
 class EmotionInferenceProcessWorker:
@@ -569,6 +597,7 @@ class EmotionInferenceProcessWorker:
         self._ready_future: Optional[Future] = None
         self._last_error: Optional[str] = None
         self._lock = threading.Lock()
+        self._inflight_future: Optional[Future] = None
 
     def start(self) -> None:
         with self._lock:
@@ -586,8 +615,9 @@ class EmotionInferenceProcessWorker:
             executor = self._executor
             self._executor = None
             self._ready_future = None
+            self._inflight_future = None
         if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
+            _shutdown_process_executor(executor)
 
     def join(self, timeout: Optional[float] = None) -> None:
         _ = timeout
@@ -613,25 +643,43 @@ class EmotionInferenceProcessWorker:
             return True
 
     def submit_frame(self, frame: np.ndarray, request_timestamp: float) -> Future:
+        def _default_future() -> Future:
+            f: Future = Future()
+            f.set_result(EmotionSnapshot(label=None, prob=None, timestamp=float(request_timestamp)))
+            return f
+
         with self._lock:
             executor = self._executor
+            inflight = self._inflight_future
+            if inflight is not None and inflight.done():
+                self._inflight_future = None
+                inflight = None
         if executor is None:
-            future: Future = Future()
-            future.set_result(EmotionSnapshot(label=None, prob=None, timestamp=float(request_timestamp)))
-            return future
+            return _default_future()
+        if inflight is not None:
+            # Do not queue unlimited stale frames when inference is slower than requests.
+            return _default_future()
         try:
-            return executor.submit(
+            submitted = executor.submit(
                 _run_emotion_process_inference,
                 frame.copy(),
                 float(request_timestamp),
                 self._detector_backend,
                 self._enforce_detection,
             )
+            with self._lock:
+                self._inflight_future = submitted
+
+            def _clear_inflight(done_future: Future) -> None:
+                with self._lock:
+                    if self._inflight_future is done_future:
+                        self._inflight_future = None
+
+            submitted.add_done_callback(_clear_inflight)
+            return submitted
         except Exception as exc:
             self._last_error = str(exc)
-            future = Future()
-            future.set_result(EmotionSnapshot(label=None, prob=None, timestamp=float(request_timestamp)))
-            return future
+            return _default_future()
 
 
 class SynchronizedInferenceCoordinator(SynchronizedInferenceProvider):
@@ -644,12 +692,16 @@ class SynchronizedInferenceCoordinator(SynchronizedInferenceProvider):
         emotion_worker: Optional[FrameInferenceWorker] = None,
         arousal_provider: Optional[ArousalProvider] = None,
         sample_timeout_seconds: float = DEFAULT_SAMPLE_TIMEOUT_SECONDS,
+        model_sample_interval_seconds: float = 0.5,
+        emotion_sample_interval_seconds: float = 2.0,
     ) -> None:
         self._frame_capture = frame_capture
         self._distraction_worker = distraction_worker
         self._emotion_worker = emotion_worker
         self._arousal_provider = arousal_provider
         self._sample_timeout_seconds = max(0.1, float(sample_timeout_seconds))
+        self._model_sample_interval_seconds = max(0.0, float(model_sample_interval_seconds))
+        self._emotion_sample_interval_seconds = max(0.0, float(emotion_sample_interval_seconds))
         self._lock = threading.Lock()
         self._last_sample: Optional[SynchronizedInferenceSample] = None
 
@@ -715,10 +767,14 @@ class SynchronizedInferenceCoordinator(SynchronizedInferenceProvider):
             )
 
     def capture_sample(self, timeout: Optional[float] = None) -> SynchronizedInferenceSample:
-        request_timestamp = time.monotonic()
-        request_timestamp_iso = datetime.datetime.utcnow().isoformat()
+        request_timestamp = time.time()
+        request_timestamp_iso = datetime.datetime.fromtimestamp(
+            request_timestamp, datetime.timezone.utc
+        ).replace(tzinfo=None).isoformat()
         sample_timeout = self._sample_timeout_seconds if timeout is None else max(0.1, float(timeout))
         deadline = time.monotonic() + sample_timeout
+        with self._lock:
+            previous_sample = self._last_sample
 
         frame = None
         frame_timestamp = None
@@ -739,13 +795,45 @@ class SynchronizedInferenceCoordinator(SynchronizedInferenceProvider):
         emotion_future: Optional[Future] = None
         if frame is not None:
             if self._distraction_worker is not None:
-                model_future = self._distraction_worker.submit_frame(frame, request_timestamp)
+                submit_model = True
+                if previous_sample is not None and self._model_sample_interval_seconds > 0.0:
+                    last_model_ts = (
+                        previous_sample.model_timestamp
+                        if previous_sample.model_timestamp is not None
+                        else previous_sample.request_timestamp
+                    )
+                    if request_timestamp - float(last_model_ts) < self._model_sample_interval_seconds:
+                        submit_model = False
+                if submit_model:
+                    model_future = self._distraction_worker.submit_frame(frame, request_timestamp)
             if self._emotion_worker is not None:
-                emotion_future = self._emotion_worker.submit_frame(frame, request_timestamp)
+                submit_emotion = True
+                if previous_sample is not None and self._emotion_sample_interval_seconds > 0.0:
+                    last_emotion_ts = (
+                        previous_sample.emotion_timestamp
+                        if previous_sample.emotion_timestamp is not None
+                        else previous_sample.request_timestamp
+                    )
+                    if request_timestamp - float(last_emotion_ts) < self._emotion_sample_interval_seconds:
+                        submit_emotion = False
+                if submit_emotion:
+                    emotion_future = self._emotion_worker.submit_frame(frame, request_timestamp)
 
-        model_label = "None"
-        model_prob: Optional[float] = 1.0
-        model_timestamp: Optional[float] = None
+        model_label = (
+            "None"
+            if previous_sample is None
+            else str(previous_sample.model_label)
+        )
+        model_prob: Optional[float] = (
+            1.0
+            if previous_sample is None or previous_sample.model_prob is None
+            else float(previous_sample.model_prob)
+        )
+        model_timestamp: Optional[float] = (
+            None
+            if previous_sample is None
+            else previous_sample.model_timestamp
+        )
         if model_future is not None:
             timeout_left = max(0.0, deadline - time.monotonic())
             try:
@@ -754,17 +842,31 @@ class SynchronizedInferenceCoordinator(SynchronizedInferenceProvider):
                 model_prob = float(getattr(result, "prob", 1.0))
                 model_timestamp = float(getattr(result, "timestamp", request_timestamp))
             except TimeoutError:
-                model_label = "None"
-                model_prob = 1.0
-                model_timestamp = request_timestamp
+                if model_timestamp is None:
+                    model_label = "None"
+                    model_prob = 1.0
+                    model_timestamp = request_timestamp
             except Exception:
-                model_label = "None"
-                model_prob = 1.0
-                model_timestamp = request_timestamp
+                if model_timestamp is None:
+                    model_label = "None"
+                    model_prob = 1.0
+                    model_timestamp = request_timestamp
 
-        emotion_label: Optional[str] = None
-        emotion_prob: Optional[float] = None
-        emotion_timestamp: Optional[float] = None
+        emotion_label: Optional[str] = (
+            None
+            if previous_sample is None
+            else previous_sample.emotion_label
+        )
+        emotion_prob: Optional[float] = (
+            None
+            if previous_sample is None
+            else previous_sample.emotion_prob
+        )
+        emotion_timestamp: Optional[float] = (
+            None
+            if previous_sample is None
+            else previous_sample.emotion_timestamp
+        )
         if emotion_future is not None:
             timeout_left = max(0.0, deadline - time.monotonic())
             try:
@@ -774,9 +876,11 @@ class SynchronizedInferenceCoordinator(SynchronizedInferenceProvider):
                 ts = getattr(result, "timestamp", request_timestamp)
                 emotion_timestamp = float(ts) if ts is not None else None
             except TimeoutError:
-                emotion_timestamp = request_timestamp
+                if emotion_timestamp is None:
+                    emotion_timestamp = request_timestamp
             except Exception:
-                emotion_timestamp = request_timestamp
+                if emotion_timestamp is None:
+                    emotion_timestamp = request_timestamp
 
         sample = SynchronizedInferenceSample(
             request_timestamp=request_timestamp,

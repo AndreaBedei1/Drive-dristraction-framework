@@ -4,8 +4,8 @@ carla:
   timeout: 10.0
   seed: 42
 
-  # Prefer short names (Town10HD/Town04). The runner will pick the first available.
-  map_preference: ["Town10HD", "Town04"]
+  # Prefer short names (Town10HD/). The runner will pick the first available.
+  map_preference: ["Town10_Opt"]
 
   sync: true
   fixed_delta_seconds: 0.035
@@ -46,6 +46,10 @@ inference:
   enable_preview: false
   use_process: true
   preview_hz: 15.0
+  capture_hz: 10.0
+  sample_timeout_seconds: 0.30
+  model_sample_interval_seconds: 0.5
+  emotion_sample_interval_seconds: 2.0
 
 traffic:
   vehicles: 10
@@ -94,7 +98,7 @@ manual_control:
     # - "-a"
 
 experiment:
-  user_id: "participant_03"
+  user_id: "participant_01"
   run_id: 1
   weather_label: "day"
   output_dir: "data"
@@ -104,7 +108,7 @@ experiment:
   baseline_dataset_suffix: "_baseline"
   distraction_dataset_suffix: "_distraction"
   mode: "train"  # train | test
-  test_map_preference: ["Town04"]
+  test_map_preference: ["Town10_Opt"]
   test_vehicles: 100
   test_walkers: 120
   test_dataset_suffix: "_test"
@@ -142,7 +146,7 @@ distractions:
   fill_monitor: true
   steal_focus: false
   min_keypresses: 2
-  max_keypresses: 6
+  max_keypresses: 4
   excluded_letters:
     - W
     - S
@@ -164,7 +168,7 @@ distractions:
     - R
     - H
   min_interval_seconds: 8.0
-  max_interval_seconds: 15.0
+  max_interval_seconds: 20.0
   min_gap_between_windows_seconds: 5.0
   flash_duration_seconds: 5.0
   flash_start_interval_seconds: 0.5

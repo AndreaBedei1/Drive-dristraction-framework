@@ -220,6 +220,7 @@ class ModelInferenceService(threading.Thread):
                 if now - last_infer_t < infer_period:
                     continue
                 last_infer_t = now
+                now_wall = time.time()
 
                 frame_rgb = _maybe_crop_roi(frame_rgb)
 
@@ -227,7 +228,7 @@ class ModelInferenceService(threading.Thread):
                 label, prob = _postprocess_probs(probs, self._threshold)
 
                 with self._lock:
-                    self._history.append(InferenceResult(label=label, prob=float(prob), timestamp=now))
+                    self._history.append(InferenceResult(label=label, prob=float(prob), timestamp=now_wall))
 
         except Exception as exc:
             self._last_error = str(exc)
@@ -303,12 +304,13 @@ def _inference_worker(
             if now - last_infer_t < infer_period:
                 continue
             last_infer_t = now
+            now_wall = time.time()
 
             frame_rgb = _maybe_crop_roi(frame_rgb)
 
             probs = _infer_probs(model, classifier, frame_rgb, preprocess, device)
             label, prob = _postprocess_probs(probs, threshold)
-            _queue_put_latest(result_queue, InferenceResult(label=label, prob=float(prob), timestamp=now))
+            _queue_put_latest(result_queue, InferenceResult(label=label, prob=float(prob), timestamp=now_wall))
 
     except Exception as exc:
         _queue_put_latest(result_queue, ("error", str(exc)))

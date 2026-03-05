@@ -66,6 +66,8 @@ class ErrorMonitor(threading.Thread):
         self._stop_sign_check_period = 1.0 / max(0.1, float(getattr(self._cfg, "stop_sign_check_hz", 15.0)))
         self._next_red_light_check_time = -1e9
         self._next_stop_sign_check_time = -1e9
+        self._timeline_update_period = 0.2
+        self._next_timeline_update_time = -1e9
 
         self._lights_list = self._world.get_actors().filter("*traffic_light*")
         self._lights_map: Dict[int, carla.Waypoint] = {}
@@ -836,10 +838,12 @@ class ErrorMonitor(threading.Thread):
             sim_time = float(snapshot.timestamp.elapsed_seconds)
             self._last_sim_time = sim_time
             if self._timeline_logger is not None:
-                try:
-                    self._timeline_logger.update(self._world, hero)
-                except Exception:
-                    pass
+                if sim_time >= self._next_timeline_update_time:
+                    self._next_timeline_update_time = sim_time + self._timeline_update_period
+                    try:
+                        self._timeline_logger.update(self._world, hero)
+                    except Exception:
+                        pass
             if self._last_time is None:
                 self._last_time = sim_time
                 continue

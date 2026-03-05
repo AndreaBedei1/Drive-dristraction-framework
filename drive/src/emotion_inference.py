@@ -219,8 +219,9 @@ class EmotionInferenceService(threading.Thread, EmotionProvider):
                 results = _normalize_results(raw)
                 best = _select_best_result(results)
                 label, prob = _extract_emotion(best)
+                now_wall = time.time()
                 with self._lock:
-                    self._snapshot = EmotionSnapshot(label=label, prob=prob, timestamp=now)
+                    self._snapshot = EmotionSnapshot(label=label, prob=prob, timestamp=now_wall)
                 self._last_error = None
             except Exception as exc:
                 self._last_error = str(exc)

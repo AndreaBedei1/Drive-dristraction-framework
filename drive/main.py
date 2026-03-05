@@ -718,7 +718,10 @@ def main() -> int:
             or cfg.inference.enable_preview
         )
         if needs_camera:
-            capture_service = FrameCaptureService(target_hz=max(15.0, float(cfg.inference.preview_hz)))
+            capture_hz = max(2.0, float(cfg.inference.capture_hz))
+            if cfg.inference.enable_preview:
+                capture_hz = max(capture_hz, float(cfg.inference.preview_hz))
+            capture_service = FrameCaptureService(target_hz=capture_hz)
         use_process_workers = bool(cfg.inference.use_process)
         if cfg.inference.enable_model:
             if use_process_workers:
@@ -740,8 +743,31 @@ def main() -> int:
                 distraction_worker=distraction_worker,
                 emotion_worker=emotion_worker,
                 arousal_provider=arousal_client,
+                sample_timeout_seconds=cfg.inference.sample_timeout_seconds,
+                model_sample_interval_seconds=cfg.inference.model_sample_interval_seconds,
+                emotion_sample_interval_seconds=cfg.inference.emotion_sample_interval_seconds,
             )
             sync_inference.start()
+            if distraction_worker is not None:
+                try:
+                    if hasattr(distraction_worker, "wait_until_ready"):
+                        distraction_worker.wait_until_ready(timeout=90.0)
+                    if hasattr(distraction_worker, "last_error"):
+                        err = distraction_worker.last_error()
+                        if err:
+                            print(f"[Runner] Distraction worker warning: {err}")
+                except Exception as exc:
+                    print(f"[Runner] Distraction worker readiness check failed: {exc}")
+            if emotion_worker is not None:
+                try:
+                    if hasattr(emotion_worker, "wait_until_ready"):
+                        emotion_worker.wait_until_ready(timeout=90.0)
+                    if hasattr(emotion_worker, "last_error"):
+                        err = emotion_worker.last_error()
+                        if err:
+                            print(f"[Runner] Emotion worker warning: {err}")
+                except Exception as exc:
+                    print(f"[Runner] Emotion worker readiness check failed: {exc}")
             preview_emotion_provider = SynchronizedEmotionPreviewProvider(sync_inference)
             worker_mode = "process" if use_process_workers else "thread"
             print(f"[Runner] Synchronized inference pipeline started (shared frame, event-driven {worker_mode} workers).")
@@ -917,42 +943,86 @@ def main() -> int:
             if baseline_requires_sensor:
                 raise RuntimeError("Baseline run aborted: arousal sensor provider unavailable at start.")
             return None
+        wait_for_valid_seconds = 0.0
+        if baseline_requires_sensor:
+            # After baseline completion, one additional HR sample may be needed
+            # before normalized arousal becomes available.
+            wait_for_valid_seconds = max(
+                5.0,
+                min(
+                    20.0,
+                    float(cfg.arousal_sensor.reconnect_seconds) + 8.0,
+                ),
+            )
+        deadline = time.monotonic() + wait_for_valid_seconds
+        waiting_log_printed = False
+        last_issue = ""
 
-        try:
-            snapshot = arousal_client.get_snapshot()
-        except Exception as exc:
-            if baseline_requires_sensor:
+        while True:
+            try:
+                snapshot = arousal_client.get_snapshot()
+            except Exception as exc:
+                if baseline_requires_sensor:
+                    raise RuntimeError(
+                        f"Baseline run aborted: failed to read arousal sensor at start ({exc})."
+                    ) from exc
+                print(f"[Runner] Initial arousal snapshot unavailable: {exc}")
+                return None
+
+            method = str(snapshot.method).strip().lower() if snapshot.method else ""
+            quality = str(snapshot.quality).strip() if snapshot.quality is not None else ""
+            try:
+                hr_value = int(snapshot.hr_bpm) if snapshot.hr_bpm is not None else None
+            except Exception:
+                hr_value = None
+            try:
+                arousal_value = float(snapshot.value) if snapshot.value is not None else None
+            except Exception:
+                arousal_value = None
+
+            hr_valid = hr_value is not None and 35 <= hr_value <= 220
+            arousal_valid = arousal_value is not None and 0.0 <= arousal_value <= 1.0
+            if hr_valid and arousal_valid:
+                return snapshot
+
+            if hr_valid and not arousal_valid and method == "calibrating":
+                last_issue = "sensor still calibrating"
+            elif not hr_valid:
+                last_issue = "invalid heart-rate sample"
+            else:
+                last_issue = "invalid arousal sample"
+
+            if not baseline_requires_sensor:
+                if not hr_valid:
+                    print("[Runner] Initial heart-rate sample invalid; run-level baseline columns will be empty.")
+                else:
+                    print("[Runner] Initial arousal sample invalid; run-level baseline columns will be empty.")
+                return None
+
+            now = time.monotonic()
+            if now >= deadline:
+                detail_bits = []
+                if method:
+                    detail_bits.append(f"method={method}")
+                if quality:
+                    detail_bits.append(f"quality={quality}")
+                if hr_value is not None:
+                    detail_bits.append(f"hr={hr_value}")
+                if arousal_value is not None:
+                    detail_bits.append(f"arousal={arousal_value:.3f}")
+                details = f" ({', '.join(detail_bits)})" if detail_bits else ""
                 raise RuntimeError(
-                    f"Baseline run aborted: failed to read arousal sensor at start ({exc})."
-                ) from exc
-            print(f"[Runner] Initial arousal snapshot unavailable: {exc}")
-            return None
-
-        try:
-            hr_value = int(snapshot.hr_bpm) if snapshot.hr_bpm is not None else None
-        except Exception:
-            hr_value = None
-        try:
-            arousal_value = float(snapshot.value) if snapshot.value is not None else None
-        except Exception:
-            arousal_value = None
-
-        if hr_value is None or hr_value < 35 or hr_value > 220:
-            if baseline_requires_sensor:
-                raise RuntimeError(
-                    "Baseline run aborted: invalid heart-rate sample at start."
+                    "Baseline run aborted: no valid pre-drive arousal sample available at start "
+                    f"within {wait_for_valid_seconds:.1f}s ({last_issue}){details}."
                 )
-            print("[Runner] Initial heart-rate sample invalid; run-level baseline columns will be empty.")
-            return None
-        if arousal_value is None or arousal_value < 0.0 or arousal_value > 1.0:
-            if baseline_requires_sensor:
-                raise RuntimeError(
-                    "Baseline run aborted: invalid arousal sample at start."
-                )
-            print("[Runner] Initial arousal sample invalid; run-level baseline columns will be empty.")
-            return None
 
-        return snapshot
+            if not waiting_log_printed:
+                print(
+                    "[Runner] Waiting for valid pre-drive arousal sample "
+                    f"(timeout={wait_for_valid_seconds:.1f}s)..."
+                )
+                waiting_log_printed = True
+            time.sleep(0.2)
 
     mc_env = os.environ.copy()
     mc_env["SIM_SHUTDOWN_FILE"] = shutdown_flag_path
@@ -1067,6 +1137,18 @@ def main() -> int:
                 w.join(timeout=1.0)
             except Exception:
                 pass
+        for logger_name, logger_obj in (
+            ("timeline", timeline_logger),
+            ("errors", error_logger),
+            ("distractions", distraction_logger),
+            ("baseline_time", baseline_time_logger),
+        ):
+            if logger_obj is None:
+                continue
+            try:
+                logger_obj.close()
+            except Exception as exc:
+                print(f"[Runner] Failed to close {logger_name} logger: {exc}")
         if preview_window is not None:
             preview_window.stop()
         if arousal_client is not None:

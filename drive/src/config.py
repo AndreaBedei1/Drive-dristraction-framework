@@ -186,6 +186,10 @@ class InferenceConfig:
     enable_preview: bool
     use_process: bool
     preview_hz: float
+    capture_hz: float
+    sample_timeout_seconds: float
+    model_sample_interval_seconds: float
+    emotion_sample_interval_seconds: float
 
 
 @dataclass(frozen=True)
@@ -310,7 +314,7 @@ def load_config(path: str) -> ScenarioConfig:
         baseline_dataset_suffix=str(_get(exp_raw, "baseline_dataset_suffix", "_baseline")),
         distraction_dataset_suffix=str(_get(exp_raw, "distraction_dataset_suffix", "_distraction")),
         mode=str(_get(exp_raw, "mode", "train")),
-        test_map_preference=list(_get(exp_raw, "test_map_preference", ["Town04"])),
+        test_map_preference=list(_get(exp_raw, "test_map_preference", ["Town10_Opt"])),
         test_vehicles=int(_get(exp_raw, "test_vehicles", 0)),
         test_walkers=int(_get(exp_raw, "test_walkers", 0)),
         test_dataset_suffix=str(_get(exp_raw, "test_dataset_suffix", "_test")),
@@ -393,6 +397,10 @@ def load_config(path: str) -> ScenarioConfig:
         enable_preview=bool(_get(inf_raw, "enable_preview", True)),
         use_process=bool(_get(inf_raw, "use_process", False)),
         preview_hz=float(_get(inf_raw, "preview_hz", 15.0)),
+        capture_hz=float(_get(inf_raw, "capture_hz", 12.0)),
+        sample_timeout_seconds=float(_get(inf_raw, "sample_timeout_seconds", 0.35)),
+        model_sample_interval_seconds=float(_get(inf_raw, "model_sample_interval_seconds", 0.5)),
+        emotion_sample_interval_seconds=float(_get(inf_raw, "emotion_sample_interval_seconds", 2.0)),
     )
 
     return ScenarioConfig(
