@@ -98,7 +98,7 @@ manual_control:
     # - "-a"
 
 experiment:
-  user_id: "participant_01"
+  user_id: "participant_02"
   run_id: 1
   weather_label: "day"
   output_dir: "data"
@@ -145,8 +145,8 @@ distractions:
   fullscreen: false
   fill_monitor: true
   steal_focus: false
-  min_keypresses: 2
-  max_keypresses: 4
+  min_keypresses: 3
+  max_keypresses: 6
   excluded_letters:
     - W
     - S
