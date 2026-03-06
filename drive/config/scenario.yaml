@@ -145,8 +145,8 @@ distractions:
   fullscreen: false
   fill_monitor: true
   steal_focus: false
-  min_keypresses: 3
-  max_keypresses: 6
+  min_keypresses: 2
+  max_keypresses: 5
   excluded_letters:
     - W
     - S
@@ -167,9 +167,9 @@ distractions:
     - B
     - R
     - H
-  min_interval_seconds: 8.0
+  min_interval_seconds: 12.0
   max_interval_seconds: 20.0
-  min_gap_between_windows_seconds: 5.0
+  min_gap_between_windows_seconds: 7.0
   flash_duration_seconds: 5.0
   flash_start_interval_seconds: 0.5
   flash_min_interval_seconds: 0.05
