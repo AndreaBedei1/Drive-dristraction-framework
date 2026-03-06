@@ -406,47 +406,8 @@ def _format_baseline_hr(value: Optional[int]) -> Any:
     return hr
 
 
-def _run_baseline_fields(pre_drive_snapshot: Optional[ArousalSnapshot]) -> Dict[str, Any]:
-    return {
-        "hr_baseline": _format_baseline_hr(
-            None if pre_drive_snapshot is None else pre_drive_snapshot.hr_bpm
-        ),
-        "arousal_baseline": _format_baseline_arousal(
-            None if pre_drive_snapshot is None else pre_drive_snapshot.value
-        ),
-    }
-
-
-def _baseline_fields_complete(fields: Dict[str, Any]) -> bool:
-    return str(fields.get("hr_baseline", "")).strip() != "" and str(fields.get("arousal_baseline", "")).strip() != ""
-
-
-def _resolve_run_baseline_fields_from_snapshot(snapshot: Optional[ArousalSnapshot]) -> Optional[Dict[str, Any]]:
-    if snapshot is None:
-        return None
-    method = str(snapshot.method).strip().lower() if snapshot.method else ""
-    if method == "calibrating":
-        return None
-    resolved = _run_baseline_fields(snapshot)
-    if not _baseline_fields_complete(resolved):
-        return None
-    return resolved
-
-
-def _merge_run_baseline_fields(
-    existing_fields: Dict[str, Any],
-    snapshot: Optional[ArousalSnapshot],
-) -> Dict[str, Any]:
-    if _baseline_fields_complete(existing_fields):
-        return dict(existing_fields)
-    resolved = _resolve_run_baseline_fields_from_snapshot(snapshot)
-    if resolved is None:
-        return dict(existing_fields)
-    return resolved
-
-
 class BaselineDrivingTimeLogger:
-    """Logger for baseline driving time and cumulative user totals."""
+    """Logger for per-run driving time rows."""
 
     def __init__(
         self,
@@ -466,33 +427,12 @@ class BaselineDrivingTimeLogger:
                 "map_name",
                 "run_duration_seconds",
                 "run_duration_minutes",
-                "total_duration_seconds",
-                "total_duration_minutes",
-                "timestamp",
+                "timestamp_end",
                 "hr_baseline",
                 "arousal_baseline",
             ],
         )
         self._lock = threading.Lock()
-
-    def _existing_total_for_user_seconds(self, user_id: str) -> float:
-        """Return cumulative driving time already stored for the user."""
-        total = 0.0
-        if not os.path.exists(self._path):
-            return total
-        try:
-            with open(self._path, "r", newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    if str(row.get("user_id", "")).strip() != user_id:
-                        continue
-                    try:
-                        total += float(row.get("run_duration_seconds", 0.0))
-                    except Exception:
-                        continue
-        except Exception:
-            return 0.0
-        return total
 
     @staticmethod
     def _format_arousal(value: Optional[float]) -> Any:
@@ -506,18 +446,12 @@ class BaselineDrivingTimeLogger:
         self,
         pre_drive_snapshot: Optional[ArousalSnapshot] = None,
     ) -> Tuple[Any, Any]:
-        """Resolve baseline HR/arousal from a required pre-drive snapshot."""
+        """Resolve baseline HR/arousal from pre-drive snapshot, if available."""
         if pre_drive_snapshot is None:
-            raise RuntimeError("Missing pre-drive arousal snapshot for baseline run.")
+            return "", ""
 
         hr_value = self._format_hr(pre_drive_snapshot.hr_bpm)
         arousal_value = self._format_arousal(pre_drive_snapshot.value)
-
-        if hr_value == "":
-            raise RuntimeError("Invalid baseline heart-rate sample from arousal sensor.")
-        if arousal_value == "":
-            raise RuntimeError("Invalid baseline arousal sample from arousal sensor.")
-
         return hr_value, arousal_value
 
     def log_run_duration(
@@ -525,10 +459,9 @@ class BaselineDrivingTimeLogger:
         run_duration_seconds: float,
         pre_drive_snapshot: Optional[ArousalSnapshot] = None,
     ) -> float:
-        """Append run duration and return updated cumulative user total."""
+        """Append run duration and return stored run seconds."""
         run_seconds = max(0.0, float(run_duration_seconds))
         with self._lock:
-            total_seconds = self._existing_total_for_user_seconds(self._context.user_id) + run_seconds
             hr_baseline, arousal_baseline = self._resolve_baseline_metrics(
                 pre_drive_snapshot=pre_drive_snapshot
             )
@@ -539,14 +472,12 @@ class BaselineDrivingTimeLogger:
                 "map_name": self._context.map_name,
                 "run_duration_seconds": round(run_seconds, 3),
                 "run_duration_minutes": round(run_seconds / 60.0, 3),
-                "total_duration_seconds": round(total_seconds, 3),
-                "total_duration_minutes": round(total_seconds / 60.0, 3),
-                "timestamp": _wall_time_iso(),
+                "timestamp_end": _wall_time_iso(),
                 "hr_baseline": hr_baseline,
                 "arousal_baseline": arousal_baseline,
             }
             self._writer.append(row)
-            return total_seconds
+            return run_seconds
 
     def close(self) -> None:
         """Stop the async CSV writer."""
@@ -579,8 +510,6 @@ class TimelineDatasetLogger:
                 "run_id",
                 "weather",
                 "map_name",
-                "hr_baseline",
-                "arousal_baseline",
                 "timestamp",
                 "x",
                 "y",
@@ -618,11 +547,9 @@ class TimelineDatasetLogger:
         self._distraction_start_history: List[Tuple[float, str]] = []
         self._distraction_finish_history: List[Tuple[float, str, Any]] = []
         self._active_distractions: Dict[str, float] = {}
-        self._run_baseline_fields = _run_baseline_fields(None)
 
     def set_run_baseline_snapshot(self, pre_drive_snapshot: Optional[ArousalSnapshot]) -> None:
-        with self._lock:
-            self._run_baseline_fields = _run_baseline_fields(pre_drive_snapshot)
+        _ = pre_drive_snapshot
 
     def _model_snapshot(self) -> Tuple[str, float, Optional[float]]:
         if self._model_provider is None:
@@ -760,9 +687,6 @@ class TimelineDatasetLogger:
             "arousal_timestamp_ms": _format_ms_timestamp(arousal.timestamp_ms),
             "hr_bpm": self._format_hr(arousal.hr_bpm),
         }
-        with self._lock:
-            self._run_baseline_fields = _merge_run_baseline_fields(self._run_baseline_fields, arousal)
-            row.update(self._run_baseline_fields)
         row.update(snap)
         row.update(_location_info(world, location))
         row.update(_vehicle_control_info(vehicle))
@@ -915,10 +839,8 @@ class ErrorDatasetLogger:
         """Create a logger with a destination folder and context."""
         path = os.path.join(output_dir, f"Dataset Errors{suffix}.csv")
         self._context = context
-        self._arousal_provider = arousal_provider
+        _ = arousal_provider
         self._timeline_logger = timeline_logger
-        self._baseline_lock = threading.Lock()
-        self._run_baseline_fields = _run_baseline_fields(None)
         self._writer = _CsvWriter(
             path,
             [
@@ -926,8 +848,6 @@ class ErrorDatasetLogger:
                 "run_id",
                 "weather",
                 "map_name",
-                "hr_baseline",
-                "arousal_baseline",
                 "error_type",
                 "speed_kmh",
                 "steer_angle_deg",
@@ -940,19 +860,7 @@ class ErrorDatasetLogger:
         )
 
     def set_run_baseline_snapshot(self, pre_drive_snapshot: Optional[ArousalSnapshot]) -> None:
-        with self._baseline_lock:
-            self._run_baseline_fields = _run_baseline_fields(pre_drive_snapshot)
-
-    def _current_run_baseline_fields(self) -> Dict[str, Any]:
-        snapshot = None
-        if self._arousal_provider is not None:
-            try:
-                snapshot = self._arousal_provider.get_snapshot()
-            except Exception:
-                snapshot = None
-        with self._baseline_lock:
-            self._run_baseline_fields = _merge_run_baseline_fields(self._run_baseline_fields, snapshot)
-            return dict(self._run_baseline_fields)
+        _ = pre_drive_snapshot
 
     def log(
         self,
@@ -978,7 +886,6 @@ class ErrorDatasetLogger:
             "timestamp": _wall_time_iso(),
             "details": details,
         }
-        row.update(self._current_run_baseline_fields())
 
         snap = _snapshot_info(world)
         row.update(snap)
@@ -1013,10 +920,8 @@ class DistractionDatasetLogger:
         """Create a logger with a destination folder and context."""
         path = os.path.join(output_dir, f"Dataset Distractions{suffix}.csv")
         self._context = context
-        self._arousal_provider = arousal_provider
+        _ = arousal_provider
         self._timeline_logger = timeline_logger
-        self._baseline_lock = threading.Lock()
-        self._run_baseline_fields = _run_baseline_fields(None)
         self._writer = _CsvWriter(
             path,
             [
@@ -1024,8 +929,6 @@ class DistractionDatasetLogger:
                 "run_id",
                 "weather",
                 "map_name",
-                "hr_baseline",
-                "arousal_baseline",
                 "start_x",
                 "start_y",
                 "start_z",
@@ -1045,19 +948,7 @@ class DistractionDatasetLogger:
         self._lock = threading.Lock()
 
     def set_run_baseline_snapshot(self, pre_drive_snapshot: Optional[ArousalSnapshot]) -> None:
-        with self._baseline_lock:
-            self._run_baseline_fields = _run_baseline_fields(pre_drive_snapshot)
-
-    def _current_run_baseline_fields(self) -> Dict[str, Any]:
-        snapshot = None
-        if self._arousal_provider is not None:
-            try:
-                snapshot = self._arousal_provider.get_snapshot()
-            except Exception:
-                snapshot = None
-        with self._baseline_lock:
-            self._run_baseline_fields = _merge_run_baseline_fields(self._run_baseline_fields, snapshot)
-            return dict(self._run_baseline_fields)
+        _ = pre_drive_snapshot
 
     def start(self, window_id: str, world: carla.World, vehicle: carla.Actor) -> None:
         """Record the start of a distraction window."""
@@ -1119,7 +1010,6 @@ class DistractionDatasetLogger:
             "sim_time_end": snap.get("sim_time_seconds", ""),
             "details": window_id,
         }
-        row.update(self._current_run_baseline_fields())
         self._writer.append(row)
         if self._timeline_logger is not None:
             self._timeline_logger.record_distraction_finish(

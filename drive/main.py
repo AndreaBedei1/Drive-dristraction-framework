@@ -129,7 +129,7 @@ def _compute_next_run_id(
     ]
     if run_mode == "test":
         pass
-    elif profile == "baseline":
+    elif profile in ("baseline", "distraction"):
         filenames.append(f"Dataset Driving Time{suffix}.csv")
 
     max_run_id = 0
@@ -802,7 +802,7 @@ def main() -> int:
         sync_provider=sync_inference,
     )
     baseline_time_logger = None
-    if dataset_profile == "baseline":
+    if dataset_profile in ("baseline", "distraction"):
         baseline_time_logger = BaselineDrivingTimeLogger(
             output_dir=output_dir,
             context=context,
@@ -1105,16 +1105,16 @@ def main() -> int:
         if baseline_time_logger is not None and drive_start_monotonic is not None:
             try:
                 run_duration_seconds = max(0.0, time.monotonic() - drive_start_monotonic)
-                total_seconds = baseline_time_logger.log_run_duration(
+                saved_run_seconds = baseline_time_logger.log_run_duration(
                     run_duration_seconds,
                     pre_drive_snapshot=baseline_pre_drive_snapshot,
                 )
                 print(
-                    "[Runner] Baseline driving time saved "
-                    f"(run={run_duration_seconds:.1f}s, user_total={total_seconds:.1f}s)."
+                    "[Runner] Driving time saved "
+                    f"(run={saved_run_seconds:.1f}s)."
                 )
             except Exception as exc:
-                print(f"[Runner] Failed to save baseline driving time: {exc}")
+                print(f"[Runner] Failed to save driving time: {exc}")
 
         monitor.stop()
         error_monitor.stop()
