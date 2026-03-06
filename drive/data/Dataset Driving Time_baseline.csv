@@ -1,3 +1,6 @@
 user_id,run_id,weather,map_name,run_duration_seconds,run_duration_minutes,total_duration_seconds,total_duration_minutes,timestamp,hr_baseline,arousal_baseline
 participant_01,2,day,Town10HD_Opt,300.204,5.003,300.204,5.003,2026-03-05T12:00:22.980425,62,0.563
 participant_01,3,day,Town10HD_Opt,300.204,5.003,600.408,10.007,2026-03-05T12:11:20.856169,61,0.575
+participant_02,1,day,Town10HD_Opt,300.078,5.001,300.078,5.001,2026-03-06T07:42:32.078772,52,0.454
+participant_02,2,day,Town10HD_Opt,300.266,5.004,600.344,10.006,2026-03-06T07:55:52.008631,55,0.16
+participant_02,3,day,Town10HD_Opt,300.296,5.005,900.64,15.011,2026-03-06T08:03:55.892475,55,0.51
