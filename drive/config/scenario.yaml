@@ -98,7 +98,7 @@ manual_control:
     # - "-a"
 
 experiment:
-  user_id: "participant_02"
+  user_id: "participant_01"
   run_id: 1
   weather_label: "day"
   output_dir: "data"
