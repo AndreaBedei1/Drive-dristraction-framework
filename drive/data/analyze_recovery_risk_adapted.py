@@ -10,7 +10,7 @@ DATA_PATH = ''
 
 def floor_to_second(series):
     """Truncate datetime series to second granularity (drop ms)."""
-    return pd.to_datetime(series).dt.floor('s')
+    return pd.to_datetime(series, format="ISO8601").dt.floor('s')
 
 
 def compute_arousal_endpoints(distractions, timeline):
