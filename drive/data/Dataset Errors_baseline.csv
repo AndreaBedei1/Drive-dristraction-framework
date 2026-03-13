@@ -1,0 +1,2 @@
+user_id,run_id,weather,map_name,error_type,speed_kmh,steer_angle_deg,timestamp,x,y,z,details
+participant_31,2,day,Town10HD_Opt,Solid line crossing,25.683,-6.097,2026-03-13T13:25:46.301495,-86.67926788330078,-61.061458587646484,0.002103614853695035,SolidSolid
