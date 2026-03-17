@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet)",
+      "Bash(python drive/relab_transfer.py)"
+    ]
+  }
+}
