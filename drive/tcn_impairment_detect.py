@@ -148,14 +148,23 @@ def normalize_signals(df):
 
 def engineer_features(window):
     """(T, C) → (T, C*5): raw | diff1 | roll_mean | roll_std | z-score"""
-    T, C      = window.shape
-    diff1     = np.diff(window, axis=0, prepend=window[:1])
-    roll_mean = np.zeros_like(window)
-    roll_std  = np.zeros_like(window)
-    for t in range(T):
-        seg          = window[max(0, t - ROLL_K + 1): t + 1]
-        roll_mean[t] = seg.mean(axis=0)
-        roll_std[t]  = seg.std(axis=0) + 1e-6
+    T, C  = window.shape
+    diff1 = np.diff(window, axis=0, prepend=window[:1])
+
+    # Vectorized causal rolling mean/std (window size = ROLL_K).
+    # Uses cumulative sums: E[X] and E[X²] over the causal window.
+    cs     = np.cumsum(window,       axis=0)   # (T, C)
+    cs_sq  = np.cumsum(window ** 2,  axis=0)   # (T, C)
+    cs_lag    = np.zeros_like(cs)
+    cs_sq_lag = np.zeros_like(cs_sq)
+    if ROLL_K < T:
+        cs_lag[ROLL_K:]    = cs[:T - ROLL_K]
+        cs_sq_lag[ROLL_K:] = cs_sq[:T - ROLL_K]
+    win_len   = np.minimum(np.arange(1, T + 1)[:, None], ROLL_K)  # (T, 1)
+    roll_mean = (cs - cs_lag) / win_len
+    roll_var  = (cs_sq - cs_sq_lag) / win_len - roll_mean ** 2
+    roll_std  = np.sqrt(np.maximum(roll_var, 0.0)) + 1e-6
+
     w_mean  = window.mean(axis=0, keepdims=True)
     w_std   = window.std(axis=0,  keepdims=True) + 1e-6
     z_score = (window - w_mean) / w_std
@@ -240,16 +249,6 @@ def bootstrap_auc_ci(y_true, y_score, n_boot=N_BOOTSTRAP, seed=SEED):
         return float("nan"), float("nan")
     lo, hi = np.percentile(aucs, [2.5, 97.5])
     return lo, hi
-
-
-def fit_calibrator(logits_tensor, y_array, device, lr=0.01, steps=500):
-    cal      = LogitCalibrator().to(device)
-    opt      = torch.optim.Adam(cal.parameters(), lr=lr)
-    y_tensor = torch.as_tensor(y_array).float().to(device)
-    for _ in range(steps):
-        loss = F.binary_cross_entropy_with_logits(cal(logits_tensor), y_tensor)
-        opt.zero_grad(); loss.backward(); opt.step()
-    return cal
 
 
 def min_count_boundary(y, min_positives, start=0):
@@ -480,7 +479,8 @@ def main():
 
     drivers = [d for d in np.unique(pid_te_all)
                if y_te_all[pid_te_all == d].sum() >= MIN_POSITIVES]
-    rng     = np.random.default_rng(SEED)
+    rng_fold = np.random.default_rng(SEED)        # val-driver selection per fold
+    rng_perm = np.random.default_rng(SEED + 1)    # permutation importance
 
     hdr = (f"{'Driver':<10} | {'N_eval':>6} {'PosR%':>6} | "
            f"{'PopAUC':>7} {'HybAUC':>7} {'Gain':>7} | "
@@ -506,7 +506,7 @@ def main():
         mask_te    = pid_te_all == d
         X_te, y_te = X_raw_te[mask_te], y_te_all[mask_te]
 
-        val_ids = rng.choice(
+        val_ids = rng_fold.choice(
             np.unique(pid_tr),
             max(1, int(0.15 * len(np.unique(pid_tr)))),
             replace=False,
@@ -531,24 +531,34 @@ def main():
             Xte_feat.reshape(-1, n_feats)).reshape(-1, LOOKBACK_S, n_feats)
 
         # ── Baseline features (window stats, standardised) ────────────────
-        X_bl_tr_f  = window_baseline_feats(X_tr[~vmask])
+        # Baselines train on uniform-stride (fine_stride=False) windows so
+        # their training distribution matches the evaluation distribution.
+        # X_raw_te covers all drivers at uniform stride — mask to non-test drivers.
+        mask_bl_tr  = pid_te_all != d
+        X_bl_base   = X_raw_te[mask_bl_tr]
+        y_bl_base   = y_te_all[mask_bl_tr]
+        pid_bl_base = pid_te_all[mask_bl_tr]
+        vmask_bl    = np.isin(pid_bl_base, val_ids)   # same held-out drivers as TCN
+
+        X_bl_tr_f  = window_baseline_feats(X_bl_base[~vmask_bl])
         X_bl_te_f  = window_baseline_feats(X_te)
         bl_scaler  = StandardScaler()
         X_bl_tr_sc = bl_scaler.fit_transform(X_bl_tr_f)
         X_bl_te_sc = bl_scaler.transform(X_bl_te_f)
 
         # ── Fit baselines on training fold ────────────────────────────────
-        pos_w   = (y_tr[~vmask] == 0).sum() / max(1, (y_tr[~vmask] == 1).sum())
+        y_bl_tr = y_bl_base[~vmask_bl]
+        pos_w   = (y_bl_tr == 0).sum() / max(1, (y_bl_tr == 1).sum())
         lr_clf  = LogisticRegression(C=1.0, class_weight="balanced",
                                      max_iter=1000, random_state=SEED)
-        lr_clf.fit(X_bl_tr_sc, y_tr[~vmask])
+        lr_clf.fit(X_bl_tr_sc, y_bl_tr)
 
         xgb_clf = xgb.XGBClassifier(
             n_estimators=200, max_depth=4, learning_rate=0.05,
             scale_pos_weight=pos_w, subsample=0.8, colsample_bytree=0.8,
             random_state=SEED, verbosity=0,
         )
-        xgb_clf.fit(X_bl_tr_sc, y_tr[~vmask])
+        xgb_clf.fit(X_bl_tr_sc, y_bl_tr)
 
         # ── Train TCN ─────────────────────────────────────────────────────
         model     = TCN_Attention_Net(n_feats).to(DEVICE)
@@ -786,7 +796,7 @@ def main():
 
     print(f"Windows: {n_pool}  |  Positives: {pos_pool} ({pos_pool/n_pool*100:.1f}%)  "
           f"|  Drivers: {len(pool_y)}\n")
-    print("AUC: 95% CI via bootstrap ({N_BOOTSTRAP} resamples).")
+    print(f"AUC: 95% CI via bootstrap ({N_BOOTSTRAP} resamples).")
     print("Brier: raw model probabilities (no post-hoc calibration).\n")
 
     pp_raw = torch.sigmoid(torch.tensor(lp_all)).numpy()
@@ -843,7 +853,7 @@ def main():
 
         for X_e, mdl in zip(pool_X_eval, pool_models):
             X_perm    = X_e.copy()                   # (n_windows, T, n_feats)
-            perm_idx  = rng.permutation(len(X_perm))
+            perm_idx  = rng_perm.permutation(len(X_perm))
             for c in feat_cols:
                 X_perm[:, :, c] = X_perm[perm_idx, :, c]
 
