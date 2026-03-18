@@ -2,7 +2,7 @@
 tcn_impairment_detect.py
 
 Detects elevated driving-risk state from physiological (HR, arousal) and
-kinematic (brake, accelerator, steeringWheelAngle) signals only.
+kinematic (steeringWheelAngle, speed.x) signals only.
 
 Target  : y=1 if a weighted error event occurs within [GAP, GAP+HORIZON]
           seconds after the end of the lookback window (composite risk score > 0).
@@ -40,7 +40,6 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 SIGNAL_COLS = [
     "arousal", "hr",          # physiological — absolute level is predictive
-    "brake", "accelerator",   # behavioural — within-session deviation is predictive
     "steeringWheelAngle",     # behavioural — within-session deviation is predictive
     "speed.x"
 ]
@@ -48,7 +47,7 @@ SIGNAL_COLS = [
 # Vehicle signals z-scored within (driver, route).
 # Physiological signals intentionally excluded: their predictive signal is in
 # absolute level (high-arousal drivers make more errors), which z-scoring destroys.
-VEHICLE_COLS = ["brake", "accelerator", "steeringWheelAngle"]
+VEHICLE_COLS = ["speed.x", "steeringWheelAngle"]
 
 SEVERITY = {
     "Collision":               5,
