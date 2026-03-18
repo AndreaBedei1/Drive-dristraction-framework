@@ -42,6 +42,7 @@ SIGNAL_COLS = [
     "arousal", "hr",          # physiological — absolute level is predictive
     "brake", "accelerator",   # behavioural — within-session deviation is predictive
     "steeringWheelAngle",     # behavioural — within-session deviation is predictive
+    "speed.x"
 ]
 
 # Vehicle signals z-scored within (driver, route).
