@@ -44,6 +44,7 @@ SIGNAL_COLS = [
     "steeringWheelAngle",     # kinematic — lateral control deviation
     "steeringTorq",           # kinematic — steering effort / workload proxy
     "acceleration.y",         # kinematic — lateral dynamics (turns, lane deviation)
+    "speed.x"
 ]
 
 # Vehicle signals z-scored within (driver, route).
