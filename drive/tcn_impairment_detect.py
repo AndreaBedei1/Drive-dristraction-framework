@@ -72,7 +72,7 @@ SEVERITY = {
 EPOCHS, LR    = 100, 1e-3
 LOOKBACK_S    = 60
 WINDOW_STEP   = 5
-GAP, HORIZON  = 3, 5
+GAP, HORIZON  = 3, 10
 BATCH_SIZE    = 64
 WEIGHT_DECAY  = 1e-4
 
@@ -83,7 +83,8 @@ PERS_MIN_DRIVER_RATE   = 0.05
 HYBRID_LR            = 5e-4
 HYBRID_EPOCHS        = 30
 HYBRID_MIN_POSITIVES = 5
-LAMBDA_TETHER        = 1e-1
+HYBRID_MIN_NEGATIVES = 5
+LAMBDA_TETHER        = 1e-1   # base value; scaled adaptively by pers set size
 
 ROLL_K         = 10
 JITTER_STD     = 0.01
@@ -285,13 +286,32 @@ class TemporalAttention(nn.Module):
         return torch.sum(x_t * weights, dim=1)
 
 
+class ResBlock(nn.Module):
+    """TCN residual block: dilated causal conv + skip connection."""
+    def __init__(self, in_c, out_c, d):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(in_c, out_c, 3, padding=d, dilation=d),
+            nn.BatchNorm1d(out_c),
+            nn.ReLU(),
+            nn.Dropout1d(0.1),
+        )
+        self.res = nn.Conv1d(in_c, out_c, 1) if in_c != out_c else nn.Identity()
+
+    def forward(self, x):
+        return self.conv(x) + self.res(x)
+
+
 class TCN_Attention_Net(nn.Module):
     def __init__(self, in_channels):
         super().__init__()
+        # 5 blocks: dilations 1,2,4,8,16 → RF = 1 + 2*(1+2+4+8+16) = 63
         self.network = nn.Sequential(
-            self._block(in_channels, 32, 1),
-            self._block(32,          64, 2),
-            self._block(64,          64, 4),
+            ResBlock(in_channels, 32,  1),
+            ResBlock(32,          64,  2),
+            ResBlock(64,          64,  4),
+            ResBlock(64,          64,  8),
+            ResBlock(64,          64, 16),
         )
         self.attention = TemporalAttention(64)
         self.head = nn.Sequential(
@@ -299,14 +319,6 @@ class TCN_Attention_Net(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(32, 1),
-        )
-
-    def _block(self, in_c, out_c, d):
-        return nn.Sequential(
-            nn.Conv1d(in_c, out_c, 3, padding=d, dilation=d),
-            nn.BatchNorm1d(out_c),
-            nn.ReLU(),
-            nn.Dropout1d(0.1),
         )
 
     def forward(self, x):
@@ -461,9 +473,9 @@ def main():
     print(f"Feature channels  : {n_raw} raw → {n_feats} engineered (TCN)")
     print(f"Baseline features : {n_raw} signals × 3 stats = {n_raw*3} (mean, std, max)")
     print(f"Loss              : focal (gamma=2)")
-    print(f"TCN blocks        : 3 (d=1,2,4 — RF=15)")
+    print(f"TCN blocks        : 5 (d=1,2,4,8,16 — RF=63) with residual connections")
     print(f"Epochs            : {EPOCHS} with CosineAnnealingLR")
-    print(f"Personalisation   : L2-tethered fine-tuning (head + network.2)")
+    print(f"Personalisation   : L2-tethered adaptive-λ, head-only if N_pers<20, commit-gated")
     print(f"Bootstrap CI      : {N_BOOTSTRAP} resamples (95% CI on pooled AUC)")
     print(f"{'='*70}\n")
 
@@ -606,15 +618,28 @@ def main():
 
         # ── Personalisation ───────────────────────────────────────────────
         model_hyb = copy.deepcopy(model)
+        # Fewer tunable layers for small adaptation sets to limit overfitting
+        layers_to_tune = ["head"] if len(X_pers) < 20 else ["head", "network.4"]
         for name, param in model_hyb.named_parameters():
-            param.requires_grad = any(x in name for x in ["head", "network.2"])
+            param.requires_grad = any(x in name for x in layers_to_tune)
 
         personalised = False
-        if dense_enough and y_pers.sum() >= HYBRID_MIN_POSITIVES:
+        n_neg_pers   = int((y_pers == 0).sum())
+        if dense_enough and y_pers.sum() >= HYBRID_MIN_POSITIVES and n_neg_pers >= HYBRID_MIN_NEGATIVES:
+            # Adaptive tether: stronger regularisation when adaptation data is scarce
+            lam = LAMBDA_TETHER * max(1.0, 20.0 / max(1, len(X_pers)))
+
+            # Temporal validation split: last 20% of pers for commit decision
+            n_pv         = max(1, int(0.2 * len(X_pers)))
+            can_validate = len(np.unique(y_pers[-n_pv:])) == 2
+            X_pa = X_pers[:-n_pv] if can_validate else X_pers
+            y_pa = y_pers[:-n_pv] if can_validate else y_pers
+            X_pv, y_pv = X_pers[-n_pv:], y_pers[-n_pv:]
+
             pop_params  = {pname: p.clone().detach() for pname, p in model.named_parameters()}
             pers_loader = get_balanced_loader(
-                X_pers, y_pers,
-                batch_size=max(1, min(BATCH_SIZE, len(X_pers))),
+                X_pa, y_pa,
+                batch_size=max(1, min(BATCH_SIZE, len(X_pa))),
                 augment=False,
             )
             opt_h = torch.optim.Adam(
@@ -633,7 +658,7 @@ def main():
                         ((p - pop_params[pname]) ** 2).sum()
                         for pname, p in model_hyb.named_parameters() if p.requires_grad
                     )
-                    batch_loss = task + LAMBDA_TETHER * tether
+                    batch_loss = task + lam * tether
                     opt_h.zero_grad(); batch_loss.backward(); opt_h.step()
                     ep_loss += batch_loss.item()
                 ep_loss /= n_batches
@@ -644,7 +669,20 @@ def main():
                 else:
                     pat_count = 0
                 prev_loss = ep_loss
-            personalised = True
+
+            # Commit only if personalised model improves on the held-out pers slice
+            if can_validate:
+                model_hyb.eval(); model.eval()
+                with torch.no_grad():
+                    X_pv_t     = torch.as_tensor(X_pv, dtype=torch.float32).to(DEVICE)
+                    auc_pop_pv = safe_auc(y_pv, torch.sigmoid(model(X_pv_t)).cpu().numpy())
+                    auc_hyb_pv = safe_auc(y_pv, torch.sigmoid(model_hyb(X_pv_t)).cpu().numpy())
+                if auc_pop_pv is not None and auc_hyb_pv is not None and auc_hyb_pv <= auc_pop_pv:
+                    model_hyb = copy.deepcopy(model)   # revert — personalisation hurt
+                else:
+                    personalised = True
+            else:
+                personalised = True
 
         # ── Inference ─────────────────────────────────────────────────────
         model.eval(); model_hyb.eval()
