@@ -333,12 +333,24 @@ def composite_risk_score(future_df):
     )
 
 
+def future_error_types(future_df):
+    """Return frozenset of SEVERITY error-type column names present in future_df."""
+    return frozenset(
+        col for col in SEVERITY
+        if col in future_df.columns and (future_df[col] > 0).any()
+    )
+
+
 def build_windows(df, fine_stride=True):
     """
     fine_stride=True  (training): vicinity densification around positive events.
     fine_stride=False (eval)    : fixed WINDOW_STEP, unbiased AUC.
+
+    Returns (windows, labels, scores, pids, etypes) where etypes is a numpy
+    object array of frozensets — one per window — recording which SEVERITY
+    error types are present in that window's future slice.
     """
-    windows, labels, scores, pids = [], [], [], []
+    windows, labels, scores, pids, etypes = [], [], [], [], []
 
     for (pid, route), grp in df.groupby(["id", "route"]):
         grp = grp.sort_values("Timestamp").reset_index(drop=True)
@@ -374,6 +386,7 @@ def build_windows(df, fine_stride=True):
                         scores.append(score)
                         labels.append(int(score > 0))
                         pids.append(pid)
+                        etypes.append(future_error_types(future))
                         seen.add(idx)
                 idx += step
         else:
@@ -387,9 +400,11 @@ def build_windows(df, fine_stride=True):
                     scores.append(score)
                     labels.append(int(score > 0))
                     pids.append(pid)
+                    etypes.append(future_error_types(future))
                 idx += WINDOW_STEP
 
-    return np.stack(windows), np.array(labels), np.array(scores), np.array(pids)
+    return (np.stack(windows), np.array(labels), np.array(scores),
+            np.array(pids), np.array(etypes, dtype=object))
 
 # -------------------------------------------------
 # VALIDITY REPORT
@@ -440,8 +455,8 @@ def main():
     df = mark_event_onsets(df)   # convert duration runs → single onset row
     df = normalize_signals(df)
 
-    X_raw_tr, y_tr_all, scores_tr, pid_tr_all = build_windows(df, fine_stride=True)
-    X_raw_te, y_te_all, scores_te, pid_te_all = build_windows(df, fine_stride=False)
+    X_raw_tr, y_tr_all, scores_tr, pid_tr_all, _        = build_windows(df, fine_stride=True)
+    X_raw_te, y_te_all, scores_te, pid_te_all, etypes_te = build_windows(df, fine_stride=False)
 
     BUFFER  = (LOOKBACK_S + GAP + HORIZON + WINDOW_STEP - 1) // WINDOW_STEP
     n_raw   = len(SIGNAL_COLS)
@@ -481,6 +496,7 @@ def main():
 
     # Ablation pools: one probs list per condition (y shared with pool_y)
     pool_ablation = {name: [] for name in ABLATION_CONDITIONS}
+    pool_etypes   = []   # frozensets of future error types, aligned with pool_y
 
     for d in drivers:
         mask_tr    = pid_tr_all != d
@@ -644,6 +660,7 @@ def main():
 
         # Accumulate for pooled evaluation
         pool_y.append(y_eval)
+        pool_etypes.append(etypes_te[mask_te][eval_start:])
         pool_logits_pop.append(logits_eval_pop)
         pool_logits_hyb.append(logits_eval_hyb)
         pool_probs_lr.append(lr_probs)
@@ -871,6 +888,65 @@ def main():
         ci_str = f"[{lo:.3f} – {hi:.3f}]"
         n_sig  = len(cond_cols)
         print(f"  {cond_name:<14}  {n_sig:>7}  {auc:.4f}  {ci_str:^17}  {auprc:.4f}  {brier:.4f}")
+
+    # ================================================================
+    # STRATIFIED EVALUATION  (CLC vs non-CLC positive windows)
+    # ================================================================
+    print("\n" + "=" * 70)
+    print("STRATIFIED EVALUATION  (TCN-Population & Kinematics-only, pooled)")
+    print("=" * 70)
+    print("Diagnoses whether lateral-signal importance is driven by")
+    print("center_line_crossing (CLC) or generalises to other error types.\n")
+    print("  CLC-only   : future slice contains CLC and no other SEVERITY error.")
+    print("  Non-CLC    : future slice contains at least one non-CLC SEVERITY error.")
+    print("  Each stratum is evaluated against all negatives.\n")
+
+    etypes_pool = np.concatenate(pool_etypes)   # shape (N,), dtype=object
+
+    clc_only_mask = np.array([
+        "center_line_crossing" in e and not (e - {"center_line_crossing"})
+        for e in etypes_pool
+    ])
+    non_clc_mask = np.array([
+        bool(e - {"center_line_crossing"})
+        for e in etypes_pool
+    ])
+    neg_mask = (y_pool == 0)
+
+    strata = [
+        ("CLC-only",  clc_only_mask),
+        ("Non-CLC",   non_clc_mask),
+    ]
+
+    # Models to evaluate per stratum: Combined TCN + Kinematics ablation
+    kin_probs_all = pool_ablation.get("Kinematics", [])
+    kin_ok        = kin_probs_all and not any(p is None for p in kin_probs_all)
+    kin_probs     = np.concatenate(kin_probs_all) if kin_ok else None
+
+    strat_models = [("TCN-Combined", pp_raw)]
+    if kin_probs is not None:
+        strat_models.append(("TCN-Kinematics", kin_probs))
+
+    print(f"  {'Stratum':<12}  {'Model':<18}  {'N_pos':>5}  {'AUC':>6}  {'95% CI':^17}")
+    print(f"  {'-'*12}  {'-'*18}  {'-'*5}  {'-'*6}  {'-'*17}")
+
+    for stratum_name, pos_mask in strata:
+        eval_mask = pos_mask | neg_mask
+        y_strat   = pos_mask[eval_mask].astype(int)
+        n_pos     = int(y_strat.sum())
+        if n_pos < 5 or len(np.unique(y_strat)) < 2:
+            print(f"  {stratum_name:<12}  {'SKIP (too few positives)':<18}")
+            continue
+        for model_name, probs_all in strat_models:
+            p_strat     = probs_all[eval_mask]
+            auc_s       = safe_auc(y_strat, p_strat) or float("nan")
+            lo_s, hi_s  = bootstrap_auc_ci(y_strat, p_strat)
+            ci_s        = f"[{lo_s:.3f} – {hi_s:.3f}]"
+            print(f"  {stratum_name:<12}  {model_name:<18}  {n_pos:>5}  {auc_s:.4f}  {ci_s:^17}")
+
+    print(f"\n  Reference — TCN-Combined overall AUC = {baseline_auc:.4f}")
+    print(f"  If AUC(CLC-only) >> AUC(Non-CLC): lateral signals exploit CLC correlation.")
+    print(f"  If AUC(CLC-only) ≈  AUC(Non-CLC): model captures general impairment.")
 
     # ================================================================
     # PER-DRIVER SUMMARY
