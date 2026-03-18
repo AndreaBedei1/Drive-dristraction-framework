@@ -53,6 +53,7 @@ SEVERITY = {
     "Collision":               5,
     "Red_light_violation":     3,
     "panic_braking_with_stop": 2,
+    "center_line_crossing":    2,  # contiguous non-zero rows = one crossing event
     "panic_braking":           1,
     "sharp_turn":              1,
 }
@@ -88,8 +89,35 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark     = False
 
 # -------------------------------------------------
-# NORMALISATION
+# NORMALISATION & PREPROCESSING
 # -------------------------------------------------
+
+def mark_event_onsets(df):
+    """
+    For each error column in SEVERITY, keep only the FIRST row of each
+    contiguous non-zero run; set all subsequent rows in the same run to 0.
+
+    Without this, a 21-second center_line_crossing run would label ~4 consecutive
+    windows as positive (one per 5s step overlapping the run).  With onset
+    detection, it labels at most 1 window — the one whose future slice contains
+    the run's first second.
+
+    Applied per (driver, route) to avoid cross-session boundary artefacts.
+    """
+    df = df.copy()
+    for (_, _), grp in df.groupby(["id", "route"]):
+        idx = grp.index
+        for col in SEVERITY:
+            if col not in df.columns:
+                continue
+            vals   = grp[col].fillna(0).values
+            onset  = np.zeros(len(vals), dtype=float)
+            for i in range(len(vals)):
+                if vals[i] > 0 and (i == 0 or vals[i - 1] == 0):
+                    onset[i] = 1.0
+            df.loc[idx, col] = onset
+    return df
+
 
 def normalize_signals(df):
     """
@@ -398,6 +426,7 @@ def print_validity_report(X_raw, y, scores, pid):
 
 def main():
     df = pd.read_csv("relab+unibo_dataset.csv")
+    df = mark_event_onsets(df)   # convert duration runs → single onset row
     df = normalize_signals(df)
 
     X_raw_tr, y_tr_all, scores_tr, pid_tr_all = build_windows(df, fine_stride=True)
