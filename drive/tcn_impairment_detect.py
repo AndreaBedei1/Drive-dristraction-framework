@@ -2,7 +2,7 @@
 tcn_impairment_detect.py
 
 Detects elevated driving-risk state from physiological (HR, arousal) and
-kinematic (steeringWheelAngle, speed.x) signals only.
+kinematic (steeringWheelAngle, steeringTorq, acceleration.y) signals.
 
 Target  : y=1 if a weighted error event occurs within [GAP, GAP+HORIZON]
           seconds after the end of the lookback window (composite risk score > 0).
@@ -40,14 +40,23 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 SIGNAL_COLS = [
     "arousal", "hr",          # physiological — absolute level is predictive
-    "steeringWheelAngle",     # behavioural — within-session deviation is predictive
-    "speed.x"
+    "steeringWheelAngle",     # kinematic — lateral control deviation
+    "steeringTorq",           # kinematic — steering effort / workload proxy
+    "acceleration.y",         # kinematic — lateral dynamics (turns, lane deviation)
 ]
 
 # Vehicle signals z-scored within (driver, route).
 # Physiological signals intentionally excluded: their predictive signal is in
 # absolute level (high-arousal drivers make more errors), which z-scoring destroys.
-VEHICLE_COLS = ["speed.x", "steeringWheelAngle"]
+VEHICLE_COLS = ["steeringWheelAngle", "steeringTorq", "acceleration.y"]
+
+# Modality subsets for the ablation study (§ MODALITY ABLATION).
+# "Combined" reuses the main-loop TCN-Population result — no extra training needed.
+ABLATION_CONDITIONS = {
+    "Physiology": ["arousal", "hr"],
+    "Kinematics": ["steeringWheelAngle", "steeringTorq", "acceleration.y"],
+    "Combined":   SIGNAL_COLS,
+}
 
 SEVERITY = {
     "Collision":               5,
@@ -158,15 +167,17 @@ def apply_features(X_raw):
     return np.stack([engineer_features(w) for w in X_raw])
 
 
-def window_baseline_feats(X_raw):
+def window_baseline_feats(X_raw, col_idx=None):
     """
-    (N, T, C) → (N, C*3): per-signal [mean, std, max] over the lookback window.
+    (N, T, C) → (N, C_sel*3): per-signal [mean, std, max] over the lookback window.
+    col_idx: list of signal column indices to use (None = all).
     Used as tabular features for LR and XGBoost baselines.
     """
+    X = X_raw if col_idx is None else X_raw[:, :, col_idx]
     return np.concatenate([
-        X_raw.mean(axis=1),
-        X_raw.std(axis=1),
-        X_raw.max(axis=1),
+        X.mean(axis=1),
+        X.std(axis=1),
+        X.max(axis=1),
     ], axis=1).astype(np.float32)
 
 # -------------------------------------------------
@@ -468,6 +479,9 @@ def main():
     pool_X_eval,     pool_models     = [], []   # for permutation importance
     per_driver_results               = []
 
+    # Ablation pools: one probs list per condition (y shared with pool_y)
+    pool_ablation = {name: [] for name in ABLATION_CONDITIONS}
+
     for d in drivers:
         mask_tr    = pid_tr_all != d
         X_tr, y_tr = X_raw_tr[mask_tr], y_tr_all[mask_tr]
@@ -638,6 +652,61 @@ def main():
         pool_models.append(copy.deepcopy(model))
 
         p_pop_raw = torch.sigmoid(torch.tensor(logits_eval_pop)).numpy()
+
+        # ── Modality ablation — one population TCN per non-Combined condition ──
+        for cond_name, cond_cols in ABLATION_CONDITIONS.items():
+            if cond_name == "Combined":
+                pool_ablation[cond_name].append(p_pop_raw)
+                continue
+
+            cidx      = [SIGNAL_COLS.index(c) for c in cond_cols]
+            n_raw_ab  = len(cidx)
+            n_feat_ab = n_raw_ab * 5
+
+            Xtr_ab  = apply_features(X_tr[~vmask][:, :, cidx])
+            Xval_ab = apply_features(X_tr[ vmask][:, :, cidx])
+            Xte_ab  = apply_features(X_te[:, :, cidx])
+
+            sc_ab      = StandardScaler()
+            Xtr_ab_sc  = sc_ab.fit_transform(
+                Xtr_ab.reshape(-1, n_feat_ab)).reshape(-1, LOOKBACK_S, n_feat_ab)
+            Xval_ab_sc = sc_ab.transform(
+                Xval_ab.reshape(-1, n_feat_ab)).reshape(-1, LOOKBACK_S, n_feat_ab)
+            Xte_ab_sc  = sc_ab.transform(
+                Xte_ab.reshape(-1, n_feat_ab)).reshape(-1, LOOKBACK_S, n_feat_ab)
+
+            mdl_ab   = TCN_Attention_Net(n_feat_ab).to(DEVICE)
+            opt_ab   = torch.optim.Adam(mdl_ab.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+            sched_ab = torch.optim.lr_scheduler.CosineAnnealingLR(opt_ab, T_max=EPOCHS)
+            ld_ab    = get_balanced_loader(Xtr_ab_sc, y_tr[~vmask], augment=True)
+
+            best_ab, wt_ab = float("-inf"), None
+            for _ in range(EPOCHS):
+                mdl_ab.train()
+                for xb, yb in ld_ab:
+                    loss = focal_loss(mdl_ab(xb.to(DEVICE)), yb.to(DEVICE))
+                    opt_ab.zero_grad(); loss.backward(); opt_ab.step()
+                sched_ab.step()
+                mdl_ab.eval()
+                with torch.no_grad():
+                    pv = torch.sigmoid(
+                        mdl_ab(torch.as_tensor(Xval_ab_sc).to(DEVICE))).cpu().numpy()
+                a = safe_auc(y_tr[vmask], pv)
+                if a is not None and a > best_ab:
+                    best_ab, wt_ab = a, copy.deepcopy(mdl_ab.state_dict())
+
+            if wt_ab is None:
+                pool_ablation[cond_name].append(None)
+                continue
+
+            mdl_ab.load_state_dict(wt_ab)
+            mdl_ab.eval()
+            with torch.no_grad():
+                logits_ab = mdl_ab(
+                    torch.as_tensor(Xte_ab_sc[eval_start:],
+                                    dtype=torch.float32).to(DEVICE)).cpu().numpy()
+            pool_ablation[cond_name].append(
+                torch.sigmoid(torch.tensor(logits_ab)).numpy())
         p_hyb_raw = torch.sigmoid(torch.tensor(logits_eval_hyb)).numpy()
         auc_pop   = safe_auc(y_eval, p_pop_raw)
         auc_hyb   = safe_auc(y_eval, p_hyb_raw)
@@ -777,6 +846,31 @@ def main():
     for name, auc_p, drop in perm_results:
         print(f"  {name:<25}  {auc_p:>14.4f}  {drop:>+8.4f}")
     print(f"\n  Baseline (unshuffled) AUC = {baseline_auc:.4f}")
+
+    # ================================================================
+    # MODALITY ABLATION  (TCN-Population per signal subset, pooled)
+    # ================================================================
+    print("\n" + "=" * 70)
+    print("MODALITY ABLATION  (TCN-Population, pooled LOPO-CV)")
+    print("=" * 70)
+    print("Each condition trains a separate population TCN on the same folds.")
+    print("'Combined' reuses the main-loop TCN-Population result.\n")
+    print(f"  {'Condition':<14}  {'Signals':>7}  {'AUC':>6}  {'95% CI':^17}  {'AUPRC':>6}  {'Brier':>6}")
+    print(f"  {'-'*14}  {'-'*7}  {'-'*6}  {'-'*17}  {'-'*6}  {'-'*6}")
+
+    for cond_name, cond_cols in ABLATION_CONDITIONS.items():
+        probs_list = pool_ablation[cond_name]
+        if not probs_list or any(p is None for p in probs_list):
+            print(f"  {cond_name:<14}  SKIP (fold failure)")
+            continue
+        probs = np.concatenate(probs_list)
+        auc   = safe_auc(y_pool, probs) or float("nan")
+        auprc = safe_auprc(y_pool, probs) or float("nan")
+        brier = brier_score_loss(y_pool, probs)
+        lo, hi = bootstrap_auc_ci(y_pool, probs)
+        ci_str = f"[{lo:.3f} – {hi:.3f}]"
+        n_sig  = len(cond_cols)
+        print(f"  {cond_name:<14}  {n_sig:>7}  {auc:.4f}  {ci_str:^17}  {auprc:.4f}  {brier:.4f}")
 
     # ================================================================
     # PER-DRIVER SUMMARY
