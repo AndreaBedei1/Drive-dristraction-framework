@@ -50,12 +50,12 @@ SIGNAL_COLS = [
 # Vehicle signals z-scored within (driver, route).
 # Physiological signals intentionally excluded: their predictive signal is in
 # absolute level (high-arousal drivers make more errors), which z-scoring destroys.
-VEHICLE_COLS = ["steeringWheelAngle", "steeringTorq", "acceleration.y"]
+VEHICLE_COLS = ["speed.x", "steeringWheelAngle", "steeringTorq", "acceleration.y"]
 
 # Modality subsets for the ablation study (§ MODALITY ABLATION).
 # "Combined" reuses the main-loop TCN-Population result — no extra training needed.
 ABLATION_CONDITIONS = {
-    "Physiology": ["arousal", "hr"],
+    "Physiology + speed": ["arousal", "hr", "speed.x"],
     "Kinematics": ["steeringWheelAngle", "steeringTorq", "acceleration.y"],
     "Combined":   SIGNAL_COLS,
 }
