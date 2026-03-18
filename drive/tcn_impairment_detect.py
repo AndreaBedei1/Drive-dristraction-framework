@@ -372,21 +372,18 @@ def build_windows(df, fine_stride=True):
                     if t >= 0:
                         vicinity.add(t)
 
-            seen = set()
-            idx  = 0
+            idx = 0
             while idx + LOOKBACK_S + GAP + HORIZON <= n:
                 step = 1 if idx in vicinity else WINDOW_STEP
-                if idx not in seen:
-                    sig = grp.iloc[idx: idx + LOOKBACK_S][SIGNAL_COLS].values.astype(np.float32)
-                    if not np.isnan(sig).any():
-                        future = grp.iloc[idx + LOOKBACK_S + GAP: idx + LOOKBACK_S + GAP + HORIZON]
-                        score  = composite_risk_score(future)
-                        windows.append(sig)
-                        scores.append(score)
-                        labels.append(int(score > 0))
-                        pids.append(pid)
-                        etypes.append(future_error_types(future))
-                        seen.add(idx)
+                sig = grp.iloc[idx: idx + LOOKBACK_S][SIGNAL_COLS].values.astype(np.float32)
+                if not np.isnan(sig).any():
+                    future = grp.iloc[idx + LOOKBACK_S + GAP: idx + LOOKBACK_S + GAP + HORIZON]
+                    score  = composite_risk_score(future)
+                    windows.append(sig)
+                    scores.append(score)
+                    labels.append(int(score > 0))
+                    pids.append(pid)
+                    etypes.append(future_error_types(future))
                 idx += step
         else:
             idx = 0
@@ -479,7 +476,6 @@ def main():
 
     drivers = [d for d in np.unique(pid_te_all)
                if y_te_all[pid_te_all == d].sum() >= MIN_POSITIVES]
-    rng_fold = np.random.default_rng(SEED)        # val-driver selection per fold
     rng_perm = np.random.default_rng(SEED + 1)    # permutation importance
 
     hdr = (f"{'Driver':<10} | {'N_eval':>6} {'PosR%':>6} | "
@@ -506,7 +502,8 @@ def main():
         mask_te    = pid_te_all == d
         X_te, y_te = X_raw_te[mask_te], y_te_all[mask_te]
 
-        val_ids = rng_fold.choice(
+        # Seed per fold so val selection is stable regardless of driver ordering/filtering.
+        val_ids = np.random.default_rng(SEED ^ hash(d) & 0xFFFFFFFF).choice(
             np.unique(pid_tr),
             max(1, int(0.15 * len(np.unique(pid_tr)))),
             replace=False,
@@ -606,7 +603,7 @@ def main():
 
         X_eval, y_eval = Xte_sc[eval_start:], y_te[eval_start:]
 
-        if len(X_eval) < 10 or y_eval.sum() == 0 or y_eval.sum() == len(y_eval):
+        if len(X_eval) < 10 or (y_eval == 0).all() or (y_eval == 1).all():
             print(f"{d:<10} | SKIP — eval degenerate ({int(y_eval.sum())}/{len(y_eval)} pos)")
             continue
 
@@ -887,17 +884,25 @@ def main():
 
     for cond_name, cond_cols in ABLATION_CONDITIONS.items():
         probs_list = pool_ablation[cond_name]
-        if not probs_list or any(p is None for p in probs_list):
-            print(f"  {cond_name:<14}  SKIP (fold failure)")
+        if not probs_list:
+            print(f"  {cond_name:<14}  SKIP (no folds)")
             continue
-        probs = np.concatenate(probs_list)
-        auc   = safe_auc(y_pool, probs) or float("nan")
-        auprc = safe_auprc(y_pool, probs) or float("nan")
-        brier = brier_score_loss(y_pool, probs)
-        lo, hi = bootstrap_auc_ci(y_pool, probs)
+        # Filter out folds that failed (None), keeping y_pool aligned.
+        valid_pairs = [(p, y) for p, y in zip(probs_list, pool_y) if p is not None]
+        n_failed = len(probs_list) - len(valid_pairs)
+        if not valid_pairs:
+            print(f"  {cond_name:<14}  SKIP (all folds failed)")
+            continue
+        probs = np.concatenate([p for p, _ in valid_pairs])
+        y_ab  = np.concatenate([y for _, y in valid_pairs])
+        warn  = f"  [{n_failed} fold(s) skipped]" if n_failed else ""
+        auc   = safe_auc(y_ab, probs) or float("nan")
+        auprc = safe_auprc(y_ab, probs) or float("nan")
+        brier = brier_score_loss(y_ab, probs)
+        lo, hi = bootstrap_auc_ci(y_ab, probs)
         ci_str = f"[{lo:.3f} – {hi:.3f}]"
         n_sig  = len(cond_cols)
-        print(f"  {cond_name:<14}  {n_sig:>7}  {auc:.4f}  {ci_str:^17}  {auprc:.4f}  {brier:.4f}")
+        print(f"  {cond_name:<14}  {n_sig:>7}  {auc:.4f}  {ci_str:^17}  {auprc:.4f}  {brier:.4f}{warn}")
 
     # ================================================================
     # STRATIFIED EVALUATION  (CLC vs non-CLC positive windows)
