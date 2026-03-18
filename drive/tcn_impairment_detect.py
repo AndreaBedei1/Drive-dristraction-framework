@@ -22,6 +22,7 @@ import copy
 import numpy as np
 import pandas as pd
 import torch
+from pathlib import Path
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
@@ -236,7 +237,7 @@ def safe_auprc(y_true, y_score):
 
 
 def bootstrap_auc_ci(y_true, y_score, n_boot=N_BOOTSTRAP, seed=SEED):
-    """Stratified bootstrap 95% CI for AUC-ROC."""
+    """Non-stratified bootstrap 95% CI for AUC-ROC."""
     rng_b = np.random.default_rng(seed)
     n     = len(y_true)
     aucs  = []
@@ -311,15 +312,6 @@ class TCN_Attention_Net(nn.Module):
         x = self.network(x.permute(0, 2, 1))
         return self.head(self.attention(x)).squeeze(-1)
 
-
-class LogitCalibrator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.a = nn.Parameter(torch.tensor(1.0))
-        self.b = nn.Parameter(torch.tensor(0.0))
-
-    def forward(self, z):
-        return torch.abs(self.a) * z + self.b
 
 # -------------------------------------------------
 # WINDOWING
@@ -447,7 +439,7 @@ def print_validity_report(X_raw, y, scores, pid):
 # -------------------------------------------------
 
 def main():
-    df = pd.read_csv("relab+unibo_dataset.csv")
+    df = pd.read_csv(Path(__file__).parent / "relab+unibo_dataset.csv")
     df = mark_event_onsets(df)   # convert duration runs → single onset row
     df = normalize_signals(df)
 
@@ -503,7 +495,8 @@ def main():
         X_te, y_te = X_raw_te[mask_te], y_te_all[mask_te]
 
         # Seed per fold so val selection is stable regardless of driver ordering/filtering.
-        val_ids = np.random.default_rng(SEED ^ hash(d) & 0xFFFFFFFF).choice(
+        seed_d  = int.from_bytes(str(d).encode(), "little") & 0xFFFFFFFF
+        val_ids = np.random.default_rng(SEED ^ seed_d).choice(
             np.unique(pid_tr),
             max(1, int(0.15 * len(np.unique(pid_tr)))),
             replace=False,
@@ -590,9 +583,8 @@ def main():
         # ── Temporal split: pers → buffer → eval ──────────────────────────
         end_pers = min_count_boundary(y_te, HYBRID_MIN_POSITIVES)
         if end_pers is None:
-            end_pers, pers_skipped = len(y_te), True
-        else:
-            pers_skipped = False
+            print(f"{d:<10} | SKIP — insufficient positives for personalisation")
+            continue
 
         X_pers, y_pers = Xte_sc[:end_pers], y_te[:end_pers]
 
@@ -617,7 +609,7 @@ def main():
             param.requires_grad = any(x in name for x in ["head", "network.2"])
 
         personalised = False
-        if not pers_skipped and dense_enough and y_pers.sum() >= HYBRID_MIN_POSITIVES:
+        if dense_enough and y_pers.sum() >= HYBRID_MIN_POSITIVES:
             pop_params  = {pname: p.clone().detach() for pname, p in model.named_parameters()}
             pers_loader = get_balanced_loader(
                 X_pers, y_pers,
@@ -644,7 +636,7 @@ def main():
                     opt_h.zero_grad(); batch_loss.backward(); opt_h.step()
                     ep_loss += batch_loss.item()
                 ep_loss /= n_batches
-                if abs(prev_loss - ep_loss) < 1e-5:
+                if abs(prev_loss - ep_loss) < 1e-4:
                     pat_count += 1
                     if pat_count >= patience:
                         break
@@ -918,45 +910,52 @@ def main():
 
     etypes_pool = np.concatenate(pool_etypes)   # shape (N,), dtype=object
 
-    clc_only_mask = np.array([
-        "center_line_crossing" in e and not (e - {"center_line_crossing"})
-        for e in etypes_pool
-    ])
-    non_clc_mask = np.array([
-        bool(e - {"center_line_crossing"})
-        for e in etypes_pool
-    ])
-    neg_mask = (y_pool == 0)
+    strata = ["CLC-only", "Non-CLC"]
 
-    strata = [
-        ("CLC-only",  clc_only_mask),
-        ("Non-CLC",   non_clc_mask),
+    # Models to evaluate per stratum: Combined TCN + Kinematics ablation.
+    # Build kinematics arrays using only folds where training succeeded (non-None),
+    # keeping y and etypes aligned — same filter-valid-pairs logic as the ablation table.
+    kin_raw = pool_ablation.get("Kinematics", [])
+    kin_valid = [
+        (p, y, e)
+        for p, y, e in zip(kin_raw, pool_y, pool_etypes)
+        if p is not None
     ]
+    n_kin_failed = len(kin_raw) - len(kin_valid)
 
-    # Models to evaluate per stratum: Combined TCN + Kinematics ablation
-    kin_probs_all = pool_ablation.get("Kinematics", [])
-    kin_ok        = kin_probs_all and not any(p is None for p in kin_probs_all)
-    kin_probs     = np.concatenate(kin_probs_all) if kin_ok else None
-
-    strat_models = [("TCN-Combined", pp_raw)]
-    if kin_probs is not None:
-        strat_models.append(("TCN-Kinematics", kin_probs))
+    strat_models = [("TCN-Combined", pp_raw, y_pool, etypes_pool)]
+    if kin_valid:
+        kin_probs  = np.concatenate([p for p, _, _ in kin_valid])
+        kin_y      = np.concatenate([y for _, y, _ in kin_valid])
+        kin_etypes = np.concatenate([e for _, _, e in kin_valid])
+        strat_models.append(("TCN-Kinematics", kin_probs, kin_y, kin_etypes))
+        if n_kin_failed:
+            print(f"  Note: {n_kin_failed} fold(s) excluded from Kinematics stratum (training failed)\n")
 
     print(f"  {'Stratum':<12}  {'Model':<18}  {'N_pos':>5}  {'AUC':>6}  {'95% CI':^17}")
     print(f"  {'-'*12}  {'-'*18}  {'-'*5}  {'-'*6}  {'-'*17}")
 
-    for stratum_name, pos_mask in strata:
-        eval_mask = pos_mask | neg_mask
-        y_strat   = pos_mask[eval_mask].astype(int)
-        n_pos     = int(y_strat.sum())
-        if n_pos < 5 or len(np.unique(y_strat)) < 2:
-            print(f"  {stratum_name:<12}  {'SKIP (too few positives)':<18}")
-            continue
-        for model_name, probs_all in strat_models:
-            p_strat     = probs_all[eval_mask]
-            auc_s       = safe_auc(y_strat, p_strat) or float("nan")
-            lo_s, hi_s  = bootstrap_auc_ci(y_strat, p_strat)
-            ci_s        = f"[{lo_s:.3f} – {hi_s:.3f}]"
+    for stratum_name in strata:
+        for model_name, probs_all, y_strat_pool, etypes_strat in strat_models:
+            clc_only_m = np.array([
+                "center_line_crossing" in e and not (e - {"center_line_crossing"})
+                for e in etypes_strat
+            ])
+            non_clc_m = np.array([bool(e - {"center_line_crossing"}) for e in etypes_strat])
+            neg_m     = (y_strat_pool == 0)
+
+            pos_m     = clc_only_m if stratum_name == "CLC-only" else non_clc_m
+            eval_mask = pos_m | neg_m
+            y_strat   = pos_m[eval_mask].astype(int)
+            n_pos     = int(y_strat.sum())
+            if n_pos < 5 or len(np.unique(y_strat)) < 2:
+                if model_name == strat_models[0][0]:   # print SKIP only once per stratum
+                    print(f"  {stratum_name:<12}  {'SKIP (too few positives)':<18}")
+                continue
+            p_strat    = probs_all[eval_mask]
+            auc_s      = safe_auc(y_strat, p_strat) or float("nan")
+            lo_s, hi_s = bootstrap_auc_ci(y_strat, p_strat)
+            ci_s       = f"[{lo_s:.3f} – {hi_s:.3f}]"
             print(f"  {stratum_name:<12}  {model_name:<18}  {n_pos:>5}  {auc_s:.4f}  {ci_s:^17}")
 
     print(f"\n  Reference — TCN-Combined overall AUC = {baseline_auc:.4f}")
