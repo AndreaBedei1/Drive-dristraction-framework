@@ -1238,6 +1238,7 @@ def main():
             "final_adv_loss":   diag["adv_loss"][-1],
             "final_lambda":     diag["lambda"][-1],
         })
+        print(f"{d:<10} | adv_acc={adv_acc:.3f}  chance={chance:.3f}  ratio={adv_acc/chance:.1f}x")
 
         # ── Gate adaptation ──────────────────────────────────────────────────────
         gate_scores, _ = gate_adapt(dann_model, Xte_p_sc, Xte_k_sc, Xte_s_sc, y_te)
