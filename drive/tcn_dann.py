@@ -901,6 +901,36 @@ def train_single_tcn(model, Xtr_sc, y_tr, Xval_sc, y_val):
     return model
 
 
+def platt_adapt(pop_scores: np.ndarray, y_te: np.ndarray) -> np.ndarray:
+    """
+    Online Platt-scaling personalisation on the first GATE_ADAPT_K test windows.
+
+    Fits a 2-parameter sigmoid  p = σ(w·s + b)  on support scores/labels,
+    then applies it to the remaining evaluation windows.
+
+    - Support set  : pop_scores[:GATE_ADAPT_K] / y_te[:GATE_ADAPT_K]
+    - Evaluation   : pop_scores[GATE_ADAPT_K:]  (Platt-rescaled)
+    - Support scores come from the frozen population model (no leakage)
+    - Returns full-length score array: [pop_support | platt_eval]
+    """
+    K = GATE_ADAPT_K
+    if len(y_te) <= K:
+        return pop_scores
+
+    s_sup, y_sup = pop_scores[:K], y_te[:K]
+    s_eval       = pop_scores[K:]
+
+    if len(np.unique(y_sup)) < 2:
+        # Not enough class diversity — fall back to population scores
+        return pop_scores
+
+    lr = LogisticRegression(max_iter=1000, random_state=SEED)
+    lr.fit(s_sup.reshape(-1, 1), y_sup.astype(int))
+    platt_eval = lr.predict_proba(s_eval.reshape(-1, 1))[:, 1]
+
+    return np.concatenate([s_sup, platt_eval])
+
+
 def gate_adapt(model_pop, Xte_p, Xte_k, Xte_s, y_te):
     """
     Online gate-only personalisation on the first GATE_ADAPT_K test windows.
@@ -1078,7 +1108,7 @@ def main():
 
     hdr = (f"{'Driver':<10} | {'N_win':>5} {'PosR%':>6} | "
            f"{'LR':>7} {'XGB':>7} {'DB-TCN':>7} | "
-           f"{'DANN-Pop':>8} {'GateAdpt†':>9} {'Gain':>6} | "
+           f"{'DANN-Pop':>8} {'GateAdpt†':>9} {'Platt†':>8} {'Gain':>6} | "
            f"{'gate(α)':>7}")
     print(hdr)
     print("-" * len(hdr))
@@ -1246,22 +1276,26 @@ def main():
         # ── Gate adaptation ──────────────────────────────────────────────────────
         gate_scores, _ = gate_adapt(dann_model, Xte_p_sc, Xte_k_sc, Xte_s_sc, y_te)
 
+        # ── Platt scaling personalisation ────────────────────────────────────────
+        platt_scores = platt_adapt(dann_scores, y_te)
+
         # ── Gate values ──────────────────────────────────────────────────────────
         gate_vals = dann_model.gate_values(torch.as_tensor(Xte_p_sc),
                                            torch.as_tensor(Xte_k_sc))
         mean_gate = float(gate_vals.mean())
 
         # ── Per-driver AUC ───────────────────────────────────────────────────────
-        auc_lr   = safe_auc(y_te, lr_scores)    or float("nan")
-        auc_xgb  = safe_auc(y_te, xgb_scores)   or float("nan")
-        auc_db   = safe_auc(y_te, db_scores)    or float("nan")
-        auc_dann = safe_auc(y_te, dann_scores)   or float("nan")
-        auc_ga   = (safe_auc(y_te, gate_scores) or float("nan")) if gate_scores is not None else float("nan")
-        gain     = auc_dann - auc_db
+        auc_lr    = safe_auc(y_te, lr_scores)    or float("nan")
+        auc_xgb   = safe_auc(y_te, xgb_scores)  or float("nan")
+        auc_db    = safe_auc(y_te, db_scores)    or float("nan")
+        auc_dann  = safe_auc(y_te, dann_scores)  or float("nan")
+        auc_ga    = (safe_auc(y_te, gate_scores) or float("nan")) if gate_scores is not None else float("nan")
+        auc_platt = safe_auc(y_te, platt_scores) or float("nan")
+        gain      = auc_dann - auc_db
 
         print(f"{d:<10} | {len(y_te):>5}  {100*y_te.mean():>5.1f}% | "
               f"{auc_lr:>7.4f} {auc_xgb:>7.4f} {auc_db:>7.4f} | "
-              f"{auc_dann:>8.4f} {auc_ga:>8.4f} {gain:>+6.4f} | "
+              f"{auc_dann:>8.4f} {auc_ga:>8.4f} {auc_platt:>8.4f} {gain:>+6.4f} | "
               f"{mean_gate:>7.3f}")
 
         pool_y.append(y_te);    pool_db.append(db_scores)
@@ -1277,7 +1311,7 @@ def main():
             "driver": d, "n_windows": int(len(y_te)),
             "pos_rate": float(y_te.mean()),
             "auc_lr": auc_lr, "auc_xgb": auc_xgb, "auc_db": auc_db,
-            "auc_dann": auc_dann, "auc_gate": auc_ga,
+            "auc_dann": auc_dann, "auc_gate": auc_ga, "auc_platt": auc_platt,
             "dann_gain": gain, "mean_gate": mean_gate, "adv_acc": adv_acc,
         })
 
