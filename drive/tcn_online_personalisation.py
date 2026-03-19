@@ -26,7 +26,9 @@ Output mirrors tcn_impairment_detect.py:
   - Label validity report (Mann-Whitney U, per-driver tier)
   - Pipeline configuration summary
   - Per-driver table: LR / XGBoost / TCN-Population / TCN-Online AUC
-  - Pooled evaluation: AUC + 95% CI + AUPRC + Brier for all four models
+  - Pooled evaluation: AUC + 95% CI + AUPRC + Brier + ECE for all four models
+  - Threshold-dependent metrics: F1 / Precision / Recall at Youden's-J threshold
+  - Online learning dynamics: per-quartile AUC + Wilcoxon test on gains
   - Permutation feature importance (TCN-Population, pooled)
   - Modality ablation (Physiology+speed / Kinematics / Combined)
   - Stratified evaluation (CLC-only vs Non-CLC positive windows)
@@ -46,9 +48,11 @@ import torch.nn.functional as F
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, brier_score_loss, average_precision_score
+from sklearn.metrics import (roc_auc_score, roc_curve, brier_score_loss,
+                              average_precision_score, f1_score,
+                              precision_score, recall_score)
 from sklearn.preprocessing import StandardScaler
-from scipy.stats import mannwhitneyu
+from scipy.stats import mannwhitneyu, wilcoxon
 import xgboost as xgb
 import random
 
@@ -85,7 +89,7 @@ SEVERITY = {
 EPOCHS, LR    = 100, 1e-3
 LOOKBACK_S    = 60
 WINDOW_STEP   = 5
-GAP, HORIZON  = 3, 10
+GAP, HORIZON  = 15, 5
 BATCH_SIZE    = 64
 WEIGHT_DECAY  = 1e-4
 ROLL_K        = 10
@@ -96,6 +100,7 @@ EVENT_VICINITY = 10
 N_BOOTSTRAP   = 2000
 MIN_POSITIVES      = 1
 MIN_EVAL_POSITIVES = 3
+N_LC_BINS          = 4     # quartile groups for the online learning curve
 
 # Online personalisation
 ONLINE_LR          = 1e-4   # small LR — fine adjustments only
@@ -103,6 +108,11 @@ ONLINE_STEPS       = 5      # gradient steps after each window
 REPLAY_BUFFER_SIZE = 20     # rolling window of recent (x, y) pairs
 ONLINE_LAYERS      = ["head"]  # layers updated online; head-only for stability
 GRAD_CLIP_NORM     = 1.0    # max gradient norm for online updates
+# L2 tether: penalises drift from the population head weights.
+# Adaptive: lambda * (REPLAY_BUFFER_SIZE / buf_size) so regularisation is
+# strongest when the buffer is barely filled and relaxes as data accumulates.
+# Mirror of LAMBDA_TETHER in tcn_impairment_detect.py, tuned for per-window SGD.
+LAMBDA_TETHER_ONLINE = 0.1
 
 random.seed(SEED)
 np.random.seed(SEED)
@@ -365,6 +375,40 @@ def _val_sample(arr, frac, rng):
     n = min(max(1, int(frac * len(arr))), len(arr)) if len(arr) > 0 else 0
     return rng.choice(arr, n, replace=False) if n > 0 else np.array([], dtype=arr.dtype)
 
+
+def compute_ece(y_true, y_prob, n_bins=10):
+    """Expected Calibration Error: mean |accuracy - confidence| weighted by bin size."""
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    ece  = 0.0
+    n    = len(y_true)
+    for i in range(n_bins):
+        lo, hi = bins[i], bins[i + 1]
+        mask   = (y_prob >= lo) & (y_prob < hi) if i < n_bins - 1 else (y_prob >= lo)
+        if mask.sum() == 0:
+            continue
+        acc  = float(y_true[mask].mean())
+        conf = float(y_prob[mask].mean())
+        ece += mask.sum() / n * abs(acc - conf)
+    return ece
+
+
+def threshold_metrics(y_true, y_prob):
+    """F1 / Precision / Recall at the Youden's-J optimal threshold.
+
+    Youden's J = TPR + TNR - 1 = TPR - FPR, maximised over the ROC curve.
+    This is threshold-free in the sense that no held-out calibration set is
+    needed — the threshold is derived analytically from the ROC curve itself.
+    Returns (f1, precision, recall, threshold).
+    """
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    j_idx  = int(np.argmax(tpr - fpr))
+    thresh = float(thresholds[j_idx])
+    preds  = (y_prob >= thresh).astype(int)
+    f1   = float(f1_score(y_true,        preds, zero_division=0))
+    prec = float(precision_score(y_true, preds, zero_division=0))
+    rec  = float(recall_score(y_true,    preds, zero_division=0))
+    return f1, prec, rec, thresh
+
 # ── MODEL (identical to tcn_impairment_detect.py) ─────────────────────────────
 
 class TemporalAttention(nn.Module):
@@ -504,6 +548,14 @@ def online_evaluate_driver(model_pop, Xte_sc, y_te):
     # ExponentialLR: decay by ~0.5% per update window for gradual stabilisation.
     scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.995)
 
+    # Snapshot of the population head weights — used for the adaptive L2 tether.
+    # Detached so they never receive gradients.
+    pop_head = {
+        name: p.clone().detach()
+        for name, p in model_online.named_parameters()
+        if p.requires_grad
+    }
+
     # Pre-compute frozen population scores in one batch.
     Xte_t = torch.as_tensor(Xte_sc, dtype=torch.float32).to(DEVICE)
     with torch.no_grad():
@@ -550,9 +602,18 @@ def online_evaluate_driver(model_pop, Xte_sc, y_te):
                 if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
                     m.eval()
 
+            # Adaptive tether: stronger when buffer is sparse, relaxes when full.
+            lam = LAMBDA_TETHER_ONLINE * (REPLAY_BUFFER_SIZE / buf_size)
+
             for _ in range(ONLINE_STEPS):
-                logits = model_online(buf_X_t)
-                loss   = focal_loss(logits, buf_y_t, pos_weight=pos_weight)
+                logits  = model_online(buf_X_t)
+                task    = focal_loss(logits, buf_y_t, pos_weight=pos_weight)
+                tether  = sum(
+                    ((p - pop_head[name]) ** 2).sum()
+                    for name, p in model_online.named_parameters()
+                    if p.requires_grad
+                )
+                loss = task + lam * tether
                 opt.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(online_params, max_norm=GRAD_CLIP_NORM)
@@ -859,7 +920,7 @@ def main():
     print(f"Windows: {n_pool}  |  Positives: {pos_pool} ({pos_pool/n_pool*100:.1f}%)  "
           f"|  Drivers: {len(pool_y)}\n")
     print(f"AUC: 95% CI via window-level bootstrap ({N_BOOTSTRAP} resamples).")
-    print("Brier: raw model probabilities (no post-hoc calibration).\n")
+    print("Brier / ECE: raw model probabilities (no post-hoc calibration).\n")
 
     models_eval = [
         ("LR (baseline)",      plr_all),
@@ -868,18 +929,20 @@ def main():
         ("TCN-Online",         po_all),
     ]
 
-    print(f"  {'Model':<22}  {'AUC':>6}  {'95% CI':^17}  {'AUPRC':>6}  {'Brier':>6}")
-    print(f"  {'-'*22}  {'-'*6}  {'-'*17}  {'-'*6}  {'-'*6}")
+    # ── Table 1: discrimination + calibration ──────────────────────────────
+    print(f"  {'Model':<22}  {'AUC':>6}  {'95% CI':^17}  {'AUPRC':>6}  {'Brier':>6}  {'ECE':>6}")
+    print(f"  {'-'*22}  {'-'*6}  {'-'*17}  {'-'*6}  {'-'*6}  {'-'*6}")
 
     pooled_metrics = {}
     for name, probs in models_eval:
         auc   = safe_auc(y_pool,   probs) or float("nan")
         auprc = safe_auprc(y_pool, probs) or float("nan")
         brier = brier_score_loss(y_pool, probs)
+        ece   = compute_ece(y_pool, probs)
         lo, hi = bootstrap_auc_ci_windows(y_pool, probs)
         ci_str = f"[{lo:.3f} – {hi:.3f}]"
-        print(f"  {name:<22}  {auc:.4f}  {ci_str:^17}  {auprc:.4f}  {brier:.4f}")
-        pooled_metrics[name] = {"auc": auc, "auprc": auprc, "brier": brier,
+        print(f"  {name:<22}  {auc:.4f}  {ci_str:^17}  {auprc:.4f}  {brier:.4f}  {ece:.4f}")
+        pooled_metrics[name] = {"auc": auc, "auprc": auprc, "brier": brier, "ece": ece,
                                 "ci_lo": lo, "ci_hi": hi}
 
     best_bl_auc = max(pooled_metrics["LR (baseline)"]["auc"],
@@ -891,6 +954,18 @@ def main():
     print(f"  TCN-Online gain     : {tcn_onl_auc - best_bl_auc:+.4f}")
     print(f"  Online vs Pop       : {tcn_onl_auc - tcn_pop_auc:+.4f}")
 
+    # ── Table 2: threshold-dependent metrics at Youden's-J threshold ───────
+    print(f"\n  Threshold-dependent metrics (Youden's-J optimal threshold per model):")
+    print(f"  {'Model':<22}  {'Thresh':>7}  {'F1':>6}  {'Prec':>6}  {'Recall':>6}")
+    print(f"  {'-'*22}  {'-'*7}  {'-'*6}  {'-'*6}  {'-'*6}")
+    for name, probs in models_eval:
+        if len(np.unique(y_pool)) < 2:
+            continue
+        f1, prec, rec, thr = threshold_metrics(y_pool, probs)
+        print(f"  {name:<22}  {thr:>7.3f}  {f1:>6.4f}  {prec:>6.4f}  {rec:>6.4f}")
+        pooled_metrics[name].update({"f1": f1, "precision": prec,
+                                     "recall": rec, "threshold": thr})
+
     # Per-driver AUC summary (driver-level bootstrap CI).
     pop_auc_list = [r["auc_pop"] for r in per_driver_results]
     onl_auc_list = [r["auc_onl"] for r in per_driver_results]
@@ -899,6 +974,64 @@ def main():
     print(f"\n  Mean driver AUC — Population : {np.mean(pop_auc_list):.4f}  [{lo_pop:.3f}–{hi_pop:.3f}]")
     print(f"  Mean driver AUC — Online     : {np.mean(onl_auc_list):.4f}  [{lo_onl:.3f}–{hi_onl:.3f}]")
     print(f"  Net driver gain              : {np.mean(onl_auc_list) - np.mean(pop_auc_list):+.4f}")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ONLINE LEARNING DYNAMICS
+    # ══════════════════════════════════════════════════════════════════════════
+    print("\n" + "=" * 70)
+    print("ONLINE LEARNING DYNAMICS")
+    print("=" * 70)
+
+    # ── Wilcoxon signed-rank test on per-driver gains ──────────────────────
+    gains = np.array([r["gain"] for r in per_driver_results])
+    print(f"Per-driver AUC gain  (Online − Population):")
+    print(f"  n={len(gains)}  mean={gains.mean():+.4f}  median={np.median(gains):+.4f}  "
+          f"std={gains.std():.4f}")
+    if len(gains) >= 10:
+        w_stat, p_two = wilcoxon(gains)
+        _, p_greater  = wilcoxon(gains, alternative="greater")
+        sig = "***" if p_two < 0.001 else ("**" if p_two < 0.01 else ("*" if p_two < 0.05 else "ns"))
+        print(f"  Wilcoxon signed-rank: W={w_stat:.1f}  p(two-sided)={p_two:.4f} {sig}"
+              f"  p(Online>Pop)={p_greater:.4f}")
+    else:
+        print(f"  Wilcoxon: insufficient drivers (n={len(gains)} < 10), skipped.")
+        w_stat, p_two, p_greater = float("nan"), float("nan"), float("nan")
+
+    # ── Quartile learning curve ────────────────────────────────────────────
+    # For each driver, split windows into N_LC_BINS equal-size quantile groups
+    # by temporal position. Compute AUC(pop) and AUC(online) per group.
+    # Average across drivers that have both classes in the group.
+    print(f"\n  Quartile learning curve  (Q={N_LC_BINS}, averaged over drivers with ≥2 classes per bin):")
+    print(f"  {'Quartile':<10}  {'N_drivers':>9}  {'AUC(Pop)':>9}  {'AUC(Online)':>11}  {'Gain':>7}")
+    print(f"  {'-'*10}  {'-'*9}  {'-'*9}  {'-'*11}  {'-'*7}")
+
+    lc_pop_bins = [[] for _ in range(N_LC_BINS)]
+    lc_onl_bins = [[] for _ in range(N_LC_BINS)]
+    lc_curve_data = []
+
+    for y_d, pop_d, onl_d in zip(pool_y, pool_pop_scores, pool_onl_scores):
+        n     = len(y_d)
+        edges = np.linspace(0, n, N_LC_BINS + 1).astype(int)
+        for b in range(N_LC_BINS):
+            sl = slice(edges[b], edges[b + 1])
+            y_b, pp_b, po_b = y_d[sl], pop_d[sl], onl_d[sl]
+            if len(np.unique(y_b)) < 2:
+                continue
+            lc_pop_bins[b].append(roc_auc_score(y_b, pp_b))
+            lc_onl_bins[b].append(roc_auc_score(y_b, po_b))
+
+    for b in range(N_LC_BINS):
+        if not lc_pop_bins[b]:
+            print(f"  Q{b+1:<9}  SKIP (no driver with both classes in this bin)")
+            lc_curve_data.append(None)
+            continue
+        m_pop = float(np.mean(lc_pop_bins[b]))
+        m_onl = float(np.mean(lc_onl_bins[b]))
+        nd    = len(lc_pop_bins[b])
+        gain_b = m_onl - m_pop
+        print(f"  Q{b+1:<9}  {nd:>9}  {m_pop:>9.4f}  {m_onl:>11.4f}  {gain_b:>+7.4f}")
+        lc_curve_data.append({"q": b + 1, "n_drivers": nd,
+                               "auc_pop": m_pop, "auc_onl": m_onl, "gain": gain_b})
 
     # ══════════════════════════════════════════════════════════════════════════
     # PERMUTATION FEATURE IMPORTANCE  (TCN-Population, pooled)
@@ -1056,12 +1189,21 @@ def main():
             "ci_online":       [float(lo_onl), float(hi_onl)],
             "n_drivers":       len(per_driver_results),
         },
+        "wilcoxon": {
+            "n":         int(len(gains)),
+            "mean_gain": float(gains.mean()),
+            "W":         float(w_stat),
+            "p_two":     float(p_two),
+            "p_greater": float(p_greater),
+        },
+        "learning_curve": [x for x in lc_curve_data if x is not None],
         "per_driver": per_driver_results,
         "config": {
-            "online_lr":          ONLINE_LR,
-            "online_steps":       ONLINE_STEPS,
-            "replay_buffer_size": REPLAY_BUFFER_SIZE,
-            "online_layers":      ONLINE_LAYERS,
+            "online_lr":            ONLINE_LR,
+            "online_steps":         ONLINE_STEPS,
+            "replay_buffer_size":   REPLAY_BUFFER_SIZE,
+            "online_layers":        ONLINE_LAYERS,
+            "lambda_tether_online": LAMBDA_TETHER_ONLINE,
         },
     }
     out_path = OUT_DIR / "tcn_online_personalisation.json"
