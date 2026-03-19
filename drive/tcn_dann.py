@@ -1173,7 +1173,7 @@ def main():
         bl_feats_te = window_baseline_feats(X_te)
         pw_bl = (y_tr_train == 0).sum() / max((y_tr_train == 1).sum(), 1)
 
-        lr_model = LogisticRegression(max_iter=1000, class_weight="balanced",
+        lr_model = LogisticRegression(max_iter=5000, class_weight="balanced",
                                       random_state=SEED)
         lr_model.fit(bl_feats_tr, y_tr_train.astype(int))
         lr_scores = lr_model.predict_proba(bl_feats_te)[:, 1]
