@@ -684,7 +684,7 @@ def gate_adapt(model_pop, Xte_p, Xte_k, y_te):
     if not gate_params:
         return None, 0
 
-    opt = torch.optim.Adam(gate_params, lr=GATE_ADAPT_LR)
+    opt = torch.optim.Adam(gate_params, lr=GATE_ADAPT_LR, weight_decay=1e-2)
 
     X_sup_p = torch.as_tensor(Xte_p[:GATE_ADAPT_K]).float().to(DEVICE)
     X_sup_k = torch.as_tensor(Xte_k[:GATE_ADAPT_K]).float().to(DEVICE)
