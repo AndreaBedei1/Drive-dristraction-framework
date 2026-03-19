@@ -137,7 +137,7 @@ LAMBDA_WARMUP_P = 0.05  # floor on p → λ ≈ 0.24 at epoch 0 (avoids cold-sta
 # At fs = 1 Hz (arousal/HR/vehicle logged at ~1 Hz), Nyquist = 0.5 Hz.
 # Three bands chosen to isolate known driving-distraction frequency signatures.
 SPECTRAL_BANDS = [(0.0, 0.1), (0.1, 0.3), (0.3, 0.501)]   # 0.501 to include 0.5 Hz cleanly
-SPECTRAL_DIM   = len(KIN_COLS) * len(SPECTRAL_BANDS)   # 4 × 3 = 12
+SPECTRAL_DIM   = (len(KIN_COLS) + len(PHYS_COLS)) * len(SPECTRAL_BANDS)   # 6 × 3 = 18
 
 # Gate personalisation
 GATE_ADAPT_K     = 15
@@ -1161,7 +1161,7 @@ def main():
     n_kin_feat   = len(KIN_COLS)  * 5    # 20
     n_all_feat   = len(SIGNAL_COLS) * 5  # 30
     fusion_dim   = DANNDualBranchTCN.PHYS_D + DANNDualBranchTCN.KIN_D   # 96
-    head_dim     = fusion_dim + SPECTRAL_DIM                             # 108
+    head_dim     = fusion_dim + SPECTRAL_DIM                             # 114
 
     mw_pvals = print_validity_report(X_raw_te, y_te_all, scores_te, pid_te_all)
 
@@ -1178,7 +1178,7 @@ def main():
     print(f"Cross-modal attn  : bidirectional (phys↔kin) with residual enhancement")
     print(f"Modality gate     : α = σ(MLP([phys_pool, kin_pool]))  ∈ (0,1)")
     print(f"Fusion            : concat(α·phys_enh, (1−α)·kin_enh) → {fusion_dim}-d")
-    print(f"Spectral features : {len(KIN_COLS)} signals × {len(SPECTRAL_BANDS)} bands = {SPECTRAL_DIM}-d")
+    print(f"Spectral features : {len(SIGNAL_COLS)} signals × {len(SPECTRAL_BANDS)} bands = {SPECTRAL_DIM}-d")
     print(f"  Bands (Hz)      : [0.00,0.10)  [0.10,0.30)  [0.30,0.50]")
     print(f"  Normalisation   : relative band power (÷ total window power)")
     print(f"Head input        : {fusion_dim} (fusion) + {SPECTRAL_DIM} (spectral) = {head_dim}-d")
@@ -1267,24 +1267,44 @@ def main():
             Xte_k_feat.reshape(-1, n_kin_feat)).reshape(-1, LOOKBACK_S, n_kin_feat)
 
         # ── Spectral features — scaler fit on training fold only ─────────────────
-        Xtr_s_raw  = compute_spectral_features_batch(X_tr[~vmask][:, :, KIN_IDX])
-        Xval_s_raw = compute_spectral_features_batch(X_tr[vmask][:,  :, KIN_IDX])
-        Xte_s_raw  = compute_spectral_features_batch(X_te[:,         :, KIN_IDX])
+        # Kinematics spectral (existing)
+        Xtr_sk_raw  = compute_spectral_features_batch(X_tr[~vmask][:, :, KIN_IDX])
+        Xval_sk_raw = compute_spectral_features_batch(X_tr[vmask][:,  :, KIN_IDX])
+        Xte_sk_raw  = compute_spectral_features_batch(X_te[:,         :, KIN_IDX])
+        # Physiology spectral (HR/arousal slow-frequency structure)
+        Xtr_sp_raw  = compute_spectral_features_batch(X_tr[~vmask][:, :, PHYS_IDX])
+        Xval_sp_raw = compute_spectral_features_batch(X_tr[vmask][:,  :, PHYS_IDX])
+        Xte_sp_raw  = compute_spectral_features_batch(X_te[:,         :, PHYS_IDX])
+
+        # Interleave kin+phys per band: [kin_b0|phys_b0, kin_b1|phys_b1, kin_b2|phys_b2]
+        _n_kin  = len(KIN_COLS)
+        _n_phys = len(PHYS_COLS)
+        _n_spec = _n_kin + _n_phys
+
+        def _concat_spec(sk, sp):
+            return np.hstack([
+                np.hstack([sk[:, b*_n_kin:(b+1)*_n_kin],
+                           sp[:, b*_n_phys:(b+1)*_n_phys]])
+                for b in range(len(SPECTRAL_BANDS))
+            ])
+
+        Xtr_s_raw  = _concat_spec(Xtr_sk_raw,  Xtr_sp_raw)
+        Xval_s_raw = _concat_spec(Xval_sk_raw, Xval_sp_raw)
+        Xte_s_raw  = _concat_spec(Xte_sk_raw,  Xte_sp_raw)
 
         # Per-band normalization: fit a separate StandardScaler for each frequency
         # band so that low-freq power (typically larger) does not dominate.
-        _n_sigs = len(KIN_COLS)
         _scaler_s_bands = [StandardScaler() for _ in SPECTRAL_BANDS]
         Xtr_s_sc  = np.hstack([
-            _scaler_s_bands[b].fit_transform(Xtr_s_raw[:, b*_n_sigs:(b+1)*_n_sigs])
+            _scaler_s_bands[b].fit_transform(Xtr_s_raw[:, b*_n_spec:(b+1)*_n_spec])
             for b in range(len(SPECTRAL_BANDS))
         ])
         Xval_s_sc = np.hstack([
-            _scaler_s_bands[b].transform(Xval_s_raw[:, b*_n_sigs:(b+1)*_n_sigs])
+            _scaler_s_bands[b].transform(Xval_s_raw[:, b*_n_spec:(b+1)*_n_spec])
             for b in range(len(SPECTRAL_BANDS))
         ])
         Xte_s_sc  = np.hstack([
-            _scaler_s_bands[b].transform(Xte_s_raw[:, b*_n_sigs:(b+1)*_n_sigs])
+            _scaler_s_bands[b].transform(Xte_s_raw[:, b*_n_spec:(b+1)*_n_spec])
             for b in range(len(SPECTRAL_BANDS))
         ])
 
@@ -1551,7 +1571,7 @@ def main():
     sig_importance  = {col: [] for col in SIGNAL_COLS}
     spec_importance = []
     band_importance = {f"[{lo:.2f},{hi:.2f})Hz": [] for lo, hi in SPECTRAL_BANDS}
-    n_kin_sigs      = len(KIN_COLS)
+    n_kin_sigs      = len(KIN_COLS) + len(PHYS_COLS)  # total signals per spectral band
 
     for i in range(N_PERM_DRIVERS):
         m   = pool_models_dann[i]; m.eval()
