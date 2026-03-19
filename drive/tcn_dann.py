@@ -498,12 +498,15 @@ class SubjectDiscriminator(nn.Module):
     """
     def __init__(self, d_in: int, n_subjects: int):
         super().__init__()
+        sn = nn.utils.spectral_norm
         self.net = nn.Sequential(
-            nn.Linear(d_in, 64),
+            sn(nn.Linear(d_in, 128)),
             nn.ReLU(),
-            nn.BatchNorm1d(64),
-            nn.Dropout(0.5),
-            nn.Linear(64, n_subjects),
+            nn.Dropout(0.3),
+            sn(nn.Linear(128, 64)),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            sn(nn.Linear(64, n_subjects)),
         )
 
     def forward(self, fusion: torch.Tensor, lambda_: float) -> torch.Tensor:
