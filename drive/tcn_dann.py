@@ -23,9 +23,10 @@ Extension of tcn_dual_branch.py with two complementary improvements:
     to simultaneously predict risk well AND confuse the discriminator.
     Net effect: representations invariant to subject identity.
 
-    Lambda annealing (standard DANN schedule, Ganin et al.):
+    Lambda annealing (modified DANN schedule, Ganin et al.):
         λ(p) = λ_max · (2 / (1 + exp(−10·p)) − 1),  p = epoch / T_max
-    Starts at 0 (warm-up), ramps smoothly to λ_max.
+    p is floored at LAMBDA_WARMUP_P=0.05 so λ ≈ 0.24 at epoch 0, avoiding a
+    cold-start instability seen when the discriminator dominates at λ=0.
 
 2.  Kinematic Spectral Features
     ─────────────────────────────
@@ -124,17 +125,18 @@ CUTOUT_PROB    = 0.2
 # Training
 EPOCHS  = 100
 LR      = 1e-3
-PATIENCE = 10       # early-stopping patience (epochs without val-AUC improvement)
+PATIENCE      = 10  # early-stopping patience for DB-TCN (epochs without val-AUC improvement)
+DANN_PATIENCE = 15  # longer patience for DANN: adversarial + GRL annealing makes val-AUC noisier
 
 # ── DANN hyperparameters ─────────────────────────────────────────────────────────
 LAMBDA_MAX      = 1.0   # maximum GRL reversal strength
 ADV_WEIGHT      = 0.1   # weight of adversarial loss in total loss
-LAMBDA_WARMUP_P = 0.05  # floor on annealing progress p → λ_min ≈ 0.24 at epoch 0
+LAMBDA_WARMUP_P = 0.05  # floor on p → λ ≈ 0.24 at epoch 0 (avoids cold-start instability)
 
 # ── Spectral features ─────────────────────────────────────────────────────────────
 # At fs = 1 Hz (arousal/HR/vehicle logged at ~1 Hz), Nyquist = 0.5 Hz.
 # Three bands chosen to isolate known driving-distraction frequency signatures.
-SPECTRAL_BANDS = [(0.0, 0.1), (0.1, 0.3), (0.3, 0.5 + 1e-9)]
+SPECTRAL_BANDS = [(0.0, 0.1), (0.1, 0.3), (0.3, 0.501)]   # 0.501 to include 0.5 Hz cleanly
 SPECTRAL_DIM   = len(KIN_COLS) * len(SPECTRAL_BANDS)   # 4 × 3 = 12
 
 # Gate personalisation
@@ -279,10 +281,16 @@ def future_error_types(future_df):
 
 def build_windows(df, fine_stride=True):
     windows, labels, scores, pids, etypes, routes, t_starts = [], [], [], [], [], [], []
+    min_session_len = LOOKBACK_S + GAP + HORIZON
     for (pid, route), grp in df.groupby(["id", "route"]):
         grp = grp.sort_values("Timestamp").reset_index(drop=True)
         n   = len(grp)
         ts  = grp["Timestamp"].values
+
+        if n < min_session_len:
+            print(f"  [WARN] build_windows: session (pid={pid}, route={route}) has {n} rows "
+                  f"< minimum {min_session_len} — skipping.")
+            continue
 
         if fine_stride:
             pos_starts = set()
@@ -413,8 +421,12 @@ def grad_reverse(x, lambda_):
 class ResBlock(nn.Module):
     def __init__(self, in_c, out_c, d):
         super().__init__()
+        # Causal convolution: pad (kernel_size-1)*dilation = 2*d timesteps on the
+        # left only, so position t can only attend to positions [t-2d, t-d, t].
+        causal_pad = 2 * d
         self.conv = nn.Sequential(
-            nn.Conv1d(in_c, out_c, 3, padding=d, dilation=d),
+            nn.ConstantPad1d((causal_pad, 0), 0.0),
+            nn.Conv1d(in_c, out_c, 3, padding=0, dilation=d),
             nn.BatchNorm1d(out_c), nn.ReLU(), nn.Dropout1d(0.1),
         )
         self.res = nn.Conv1d(in_c, out_c, 1) if in_c != out_c else nn.Identity()
@@ -690,13 +702,18 @@ def bootstrap_auc_ci_windows(y_true, y_score, n_boot=N_BOOTSTRAP, seed=SEED):
         idx = rng.integers(0, n, n)
         if len(np.unique(y_true[idx])) < 2: continue
         aucs.append(roc_auc_score(y_true[idx], y_score[idx]))
-    if len(aucs) < 10: return float("nan"), float("nan")
+    if len(aucs) < 10:
+        print(f"  [WARN] bootstrap_auc_ci_windows: only {len(aucs)} valid bootstrap samples "
+              f"(need ≥10); returning NaN CI.")
+        return float("nan"), float("nan")
     return tuple(np.percentile(aucs, [2.5, 97.5]))
 
 
 def bootstrap_auc_ci_drivers(driver_aucs, n_boot=N_BOOTSTRAP, seed=SEED):
     aucs = np.array(driver_aucs); n = len(aucs)
-    if n < 2: return float("nan"), float("nan")
+    if n < 2:
+        print(f"  [WARN] bootstrap_auc_ci_drivers: need ≥2 drivers (got {n}); returning NaN CI.")
+        return float("nan"), float("nan")
     rng  = np.random.default_rng(seed)
     boot = [rng.choice(aucs, n, replace=True).mean() for _ in range(n_boot)]
     return tuple(np.percentile(boot, [2.5, 97.5]))
@@ -808,8 +825,14 @@ def train_dann_tcn(model, discriminator,
                 no_improve = 0
             else:
                 no_improve += 1
-                if no_improve >= PATIENCE:
+                if no_improve >= DANN_PATIENCE:
                     break
+        else:
+            # Single-class val fold edge case: still advance patience so early
+            # stopping eventually triggers rather than running all EPOCHS silently.
+            no_improve += 1
+            if no_improve >= DANN_PATIENCE:
+                break
 
     if best_w is not None:
         model.load_state_dict(best_w)
@@ -859,6 +882,10 @@ def train_db_tcn(model, Xtr_p, Xtr_k, Xtr_s, y_tr, Xval_p, Xval_k, Xval_s, y_val
                 no_improve += 1
                 if no_improve >= PATIENCE:
                     break
+        else:
+            no_improve += 1
+            if no_improve >= PATIENCE:
+                break
 
     if best_w is not None:
         model.load_state_dict(best_w)
@@ -880,7 +907,13 @@ def train_single_tcn(model, Xtr_sc, y_tr, Xval_sc, y_val):
     for _ in range(EPOCHS):
         model.train()
         for xb, yb in loader:
-            loss = focal_loss(model(xb.to(DEVICE)), yb.to(DEVICE))
+            xb = xb.to(DEVICE)
+            # Apply the same augmentation as DB-TCN/DANN-DB-TCN for fair comparison.
+            xb = xb + torch.randn_like(xb) * JITTER_STD
+            if random.random() < CUTOUT_PROB:
+                t0 = random.randint(0, xb.shape[1] - CUTOUT_LEN)
+                xb[:, t0: t0 + CUTOUT_LEN, :] = 0.0
+            loss = focal_loss(model(xb), yb.to(DEVICE))
             opt.zero_grad(); loss.backward(); opt.step()
         sched.step()
         model.eval()
@@ -895,6 +928,10 @@ def train_single_tcn(model, Xtr_sc, y_tr, Xval_sc, y_val):
                 no_improve += 1
                 if no_improve >= PATIENCE:
                     break
+        else:
+            no_improve += 1
+            if no_improve >= PATIENCE:
+                break
 
     if best_w is not None:
         model.load_state_dict(best_w)
@@ -929,6 +966,62 @@ def platt_adapt(pop_scores: np.ndarray, y_te: np.ndarray) -> np.ndarray:
     platt_eval = lr.predict_proba(s_eval.reshape(-1, 1))[:, 1]
 
     return np.concatenate([s_sup, platt_eval])
+
+
+def head_adapt(model_pop, Xte_p, Xte_k, Xte_s, y_te,
+               n_steps: int = 25, lr: float = 1e-3):
+    """
+    Online head fine-tuning personalisation on the first GATE_ADAPT_K test windows.
+
+    Freezes everything except self.head; overfits the classification head to
+    this driver's support set so it learns their specific decision boundary.
+
+    - Support set  : y_te[:GATE_ADAPT_K]  — used for head fine-tuning
+    - Evaluation   : y_te[GATE_ADAPT_K:]  — fine-tuned model scores only
+    - Support scores come from the frozen population model (no leakage)
+    - Returns full-length score array: [pop_support | head_adapted_eval]
+    """
+    K = GATE_ADAPT_K
+    if len(y_te) <= K:
+        return None
+
+    model = copy.deepcopy(model_pop)
+    model.to(DEVICE)
+
+    # Freeze everything except the head
+    for name, param in model.named_parameters():
+        param.requires_grad = name.startswith("head.")
+
+    Xp = torch.as_tensor(Xte_p[:K]).to(DEVICE)
+    Xk = torch.as_tensor(Xte_k[:K]).to(DEVICE)
+    Xs = torch.as_tensor(Xte_s[:K]).to(DEVICE)
+    ys = torch.as_tensor(y_te[:K], dtype=torch.float32).to(DEVICE)
+
+    pos_w = float(np.clip(
+        (y_te[:K] == 0).sum() / max((y_te[:K] == 1).sum(), 1), 0.2, 5.0))
+
+    opt = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=1e-3)
+
+    model.train()
+    for _ in range(n_steps):
+        opt.zero_grad()
+        logits, _ = model(Xp, Xk, Xs)
+        loss = focal_loss(logits, ys, pos_weight=pos_w)
+        loss.backward()
+        opt.step()
+
+    # Population scores on support set (no leakage), fine-tuned on eval set
+    model_pop.eval()
+    model.eval()
+    with torch.no_grad():
+        sup_scores = torch.sigmoid(
+            model_pop(Xp, Xk, Xs)[0]).cpu().numpy()
+        Xp_e = torch.as_tensor(Xte_p[K:]).to(DEVICE)
+        Xk_e = torch.as_tensor(Xte_k[K:]).to(DEVICE)
+        Xs_e = torch.as_tensor(Xte_s[K:]).to(DEVICE)
+        eval_scores = torch.sigmoid(model(Xp_e, Xk_e, Xs_e)[0]).cpu().numpy()
+
+    return np.concatenate([sup_scores, eval_scores])
 
 
 def gate_adapt(model_pop, Xte_p, Xte_k, Xte_s, y_te):
@@ -1104,11 +1197,10 @@ def main():
 
     drivers  = [d for d in np.unique(pid_te_all)
                 if y_te_all[pid_te_all == d].sum() >= MIN_POSITIVES]
-    rng_perm = np.random.default_rng(SEED + 1)
 
     hdr = (f"{'Driver':<10} | {'N_win':>5} {'PosR%':>6} | "
            f"{'LR':>7} {'XGB':>7} {'DB-TCN':>7} | "
-           f"{'DANN-Pop':>8} {'GateAdpt†':>9} {'Platt†':>8} {'Gain':>6} | "
+           f"{'DANN-Pop':>8} {'GateAdpt†':>9} {'Platt†':>8} {'HeadFT†':>8} {'Gain':>6} | "
            f"{'gate(α)':>7}")
     print(hdr)
     print("-" * len(hdr))
@@ -1279,6 +1371,9 @@ def main():
         # ── Platt scaling personalisation ────────────────────────────────────────
         platt_scores = platt_adapt(dann_scores, y_te)
 
+        # ── Head fine-tuning personalisation ─────────────────────────────────────
+        head_scores = head_adapt(dann_model, Xte_p_sc, Xte_k_sc, Xte_s_sc, y_te)
+
         # ── Gate values ──────────────────────────────────────────────────────────
         gate_vals = dann_model.gate_values(torch.as_tensor(Xte_p_sc),
                                            torch.as_tensor(Xte_k_sc))
@@ -1291,11 +1386,12 @@ def main():
         auc_dann  = safe_auc(y_te, dann_scores)  or float("nan")
         auc_ga    = (safe_auc(y_te, gate_scores) or float("nan")) if gate_scores is not None else float("nan")
         auc_platt = safe_auc(y_te, platt_scores) or float("nan")
+        auc_head  = (safe_auc(y_te, head_scores) or float("nan")) if head_scores is not None else float("nan")
         gain      = auc_dann - auc_db
 
         print(f"{d:<10} | {len(y_te):>5}  {100*y_te.mean():>5.1f}% | "
               f"{auc_lr:>7.4f} {auc_xgb:>7.4f} {auc_db:>7.4f} | "
-              f"{auc_dann:>8.4f} {auc_ga:>8.4f} {auc_platt:>8.4f} {gain:>+6.4f} | "
+              f"{auc_dann:>8.4f} {auc_ga:>8.4f} {auc_platt:>8.4f} {auc_head:>8.4f} {gain:>+6.4f} | "
               f"{mean_gate:>7.3f}")
 
         pool_y.append(y_te);    pool_db.append(db_scores)
@@ -1312,6 +1408,7 @@ def main():
             "pos_rate": float(y_te.mean()),
             "auc_lr": auc_lr, "auc_xgb": auc_xgb, "auc_db": auc_db,
             "auc_dann": auc_dann, "auc_gate": auc_ga, "auc_platt": auc_platt,
+            "auc_head": auc_head,
             "dann_gain": gain, "mean_gate": mean_gate, "adv_acc": adv_acc,
         })
 
@@ -1373,13 +1470,13 @@ def main():
         print(f"    ECE           : {ece:.4f}")
 
     print(f"\n{'='*72}")
-    print("POOLED EVALUATION")
+    print("POOLED EVALUATION — POPULATION MODELS (zero-shot generalisation)")
     print(f"{'='*72}")
+    print(f"  These models never see test-participant labels. Results are comparable.")
     _print_pooled("LR baseline",      all_lr,   drv_aucs_lr)
     _print_pooled("XGB baseline",     all_xgb,  drv_aucs_xgb)
     _print_pooled("DB-TCN (no DANN)", all_db,   drv_aucs_db)
     _print_pooled("DANN-DB-TCN",      all_dann, drv_aucs_dann)
-    _print_pooled("DANN + GateAdapt† (online)", all_ga,   drv_aucs_ga)
 
     # Wilcoxon signed-rank: DANN-DB-TCN > DB-TCN (paired per driver)
     paired = [(r["auc_db"], r["auc_dann"]) for r in per_driver_results
@@ -1394,9 +1491,15 @@ def main():
             print(f"  Mean per-driver gain     : {mean_gain:+.4f}")
         except Exception:
             pass
-    print(f"  † GateAdapt† is online personalisation: it uses y_te[:GATE_ADAPT_K] labels")
-    print(f"    from the test participant for gate-only fine-tuning.  It is NOT a")
-    print(f"    held-out generalisation estimate — do not compare directly with population models.")
+    print(f"{'='*72}")
+
+    print(f"\n{'='*72}")
+    print("POOLED EVALUATION — ONLINE PERSONALISATION (uses test-participant labels)")
+    print(f"{'='*72}")
+    print(f"  WARNING: these methods observe y_te[:GATE_ADAPT_K={GATE_ADAPT_K}] from the test")
+    print(f"  participant. They are NOT held-out generalisation estimates and MUST NOT")
+    print(f"  be compared directly to the population models above.")
+    _print_pooled("DANN + GateAdapt (online)", all_ga, drv_aucs_ga)
     print(f"{'='*72}")
 
     # ── THRESHOLD METRICS ────────────────────────────────────────────────────────
