@@ -1221,17 +1221,15 @@ def main():
                            torch.as_tensor(Xte_s_sc).to(DEVICE))[0]
             ).cpu().numpy()
 
-        # Adversarial accuracy on validation set (diagnostic)
-        # All validation drivers must be in subj2id (val fold is drawn from training drivers).
-        unknown_val = [p for p in pid_tr[vmask] if p not in subj2id]
-        if unknown_val:
-            raise ValueError(
-                f"gate_adapt fold for driver {d!r}: validation fold contains subject(s) "
-                f"{unknown_val!r} not seen during training. Check vmask construction."
-            )
-        val_subj_ids = np.array([subj2id[p] for p in pid_tr[vmask]], dtype=np.int64)
+        # Adversarial accuracy on a subsample of training data (diagnostic).
+        # Val drivers are held out at driver-level so they are never seen by the
+        # discriminator; evaluate on training windows instead.
+        rng_adv  = np.random.default_rng(seed_d + 1)
+        n_adv    = min(512, len(y_tr_train))
+        adv_idx  = rng_adv.choice(len(y_tr_train), n_adv, replace=False)
         adv_acc  = _adv_accuracy(dann_model, disc,
-                                 Xval_p_sc, Xval_k_sc, Xval_s_sc, val_subj_ids)
+                                 Xtr_p_sc[adv_idx], Xtr_k_sc[adv_idx],
+                                 Xtr_s_sc[adv_idx], subj_ids_tr[adv_idx])
         chance   = 1.0 / len(tr_subjects)
         dann_diagnostics.append({
             "driver": d, "adv_acc": adv_acc, "chance": chance,
