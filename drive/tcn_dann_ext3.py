@@ -1399,6 +1399,7 @@ def main():
         ])
 
         y_tr_train = y_tr[~vmask]; y_val_d = y_tr[vmask]
+        y_tr_orig  = y_tr_train.copy()  # pre-SMOTE labels for ablation models
 
         # ── SMOTE oversampling (training fold only, never val/test) ──────────────
         smote_rng = np.random.default_rng(SEED ^ seed_d ^ 0xABCD)
@@ -1552,7 +1553,7 @@ def main():
             Xte_abl_sc  = sc_abl.transform(
                 Xte_abl.reshape(-1, n_abl_feat)).reshape(-1, LOOKBACK_S, n_abl_feat)
             abl_m = SingleBranchTCN(n_abl_feat).to(DEVICE)
-            abl_m = train_single_tcn(abl_m, Xtr_abl_sc, y_tr_train, Xval_abl_sc, y_val_d)
+            abl_m = train_single_tcn(abl_m, Xtr_abl_sc, y_tr_orig, Xval_abl_sc, y_val_d)
             abl_m.eval()
             with torch.no_grad():
                 abl_sc = torch.sigmoid(
