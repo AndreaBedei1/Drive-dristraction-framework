@@ -93,12 +93,12 @@ import random
 SEED   = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-SIGNAL_COLS  = ["arousal", "hr", "speed.x"]
-VEHICLE_COLS = ["speed.x"]
+SIGNAL_COLS  = ["arousal", "hr", "steeringWheelAngle", "steeringTorq", "acceleration.y", "speed.x"]
+VEHICLE_COLS = ["steeringWheelAngle", "steeringTorq", "acceleration.y", "speed.x"]
 PHYS_COLS    = ["arousal", "hr"]
-KIN_COLS     = ["speed.x"]
+KIN_COLS     = ["steeringWheelAngle", "steeringTorq", "acceleration.y", "speed.x"]
 PHYS_IDX     = [SIGNAL_COLS.index(c) for c in PHYS_COLS]   # [0, 1]
-KIN_IDX      = [SIGNAL_COLS.index(c) for c in KIN_COLS]    # [2]
+KIN_IDX      = [SIGNAL_COLS.index(c) for c in KIN_COLS]    # [2, 3, 4, 5]
 
 SEVERITY = {
     "Collision":               5,
