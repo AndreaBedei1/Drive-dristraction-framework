@@ -1291,12 +1291,12 @@ def main():
     hdr = (f"{'Driver':<10} | {'N_win':>5} {'PosR%':>6} | "
            f"{'LR':>7} {'XGB':>7} {'DB-TCN':>7} | "
            f"{'DANN-Pop':>8} {'GateAdpt†':>9} {'Platt†':>8} {'HeadFT†':>8} {'Gain':>6} | "
-           f"{'gate(α)':>7}")
+           f"{'ValBlend':>8} | {'gate(α)':>7}")
     print(hdr)
     print("-" * len(hdr))
 
     per_driver_results = []
-    pool_y, pool_db, pool_dann, pool_ga = [], [], [], []
+    pool_y, pool_db, pool_dann, pool_ga, pool_blend = [], [], [], [], []
     pool_lr, pool_xgb = [], []
     pool_Xte_p, pool_Xte_k, pool_Xte_s = [], [], []
     pool_models_dann  = []
@@ -1473,6 +1473,24 @@ def main():
                            torch.as_tensor(Xte_s_sc).to(DEVICE))[0]
             ).cpu().numpy()
 
+        # ── Val-weighted blend (no test leakage) ─────────────────────────────────
+        with torch.no_grad():
+            val_db_sc = torch.sigmoid(
+                db_model(torch.as_tensor(Xval_p_sc).to(DEVICE),
+                         torch.as_tensor(Xval_k_sc).to(DEVICE),
+                         torch.as_tensor(Xval_s_sc).to(DEVICE))[0]
+            ).cpu().numpy()
+            val_dann_sc = torch.sigmoid(
+                dann_model(torch.as_tensor(Xval_p_sc).to(DEVICE),
+                           torch.as_tensor(Xval_k_sc).to(DEVICE),
+                           torch.as_tensor(Xval_s_sc).to(DEVICE))[0]
+            ).cpu().numpy()
+        val_auc_db   = safe_auc(y_val_d, val_db_sc)   or 0.5
+        val_auc_dann = safe_auc(y_val_d, val_dann_sc) or 0.5
+        denom = val_auc_db + val_auc_dann
+        w_dann  = val_auc_dann / denom if denom > 0 else 0.5
+        blend_scores = w_dann * dann_scores + (1.0 - w_dann) * db_scores
+
         # Adversarial accuracy on a subsample of training data (diagnostic).
         # Val drivers are held out at driver-level so they are never seen by the
         # discriminator; evaluate on training windows instead.
@@ -1514,16 +1532,18 @@ def main():
         auc_ga    = (safe_auc(y_te, gate_scores) or float("nan")) if gate_scores is not None else float("nan")
         auc_platt = safe_auc(y_te, platt_scores) or float("nan")
         auc_head  = (safe_auc(y_te, head_scores) or float("nan")) if head_scores is not None else float("nan")
+        auc_blend = safe_auc(y_te, blend_scores) or float("nan")
         gain      = auc_dann - auc_db
 
         print(f"{d:<10} | {len(y_te):>5}  {100*y_te.mean():>5.1f}% | "
               f"{auc_lr:>7.4f} {auc_xgb:>7.4f} {auc_db:>7.4f} | "
               f"{auc_dann:>8.4f} {auc_ga:>8.4f} {auc_platt:>8.4f} {auc_head:>8.4f} {gain:>+6.4f} | "
-              f"{mean_gate:>7.3f}")
+              f"{auc_blend:>8.4f} | {mean_gate:>7.3f}")
 
         pool_y.append(y_te);    pool_db.append(db_scores)
         pool_dann.append(dann_scores)
         pool_ga.append(gate_scores if gate_scores is not None else dann_scores)
+        pool_blend.append(blend_scores)
         pool_lr.append(lr_scores); pool_xgb.append(xgb_scores)
         pool_Xte_p.append(Xte_p_sc); pool_Xte_k.append(Xte_k_sc)
         pool_Xte_s.append(Xte_s_sc)
@@ -1535,7 +1555,8 @@ def main():
             "pos_rate": float(y_te.mean()),
             "auc_lr": auc_lr, "auc_xgb": auc_xgb, "auc_db": auc_db,
             "auc_dann": auc_dann, "auc_gate": auc_ga, "auc_platt": auc_platt,
-            "auc_head": auc_head,
+            "auc_head": auc_head, "auc_blend": auc_blend,
+            "val_auc_db": val_auc_db, "val_auc_dann": val_auc_dann, "w_dann": w_dann,
             "dann_gain": gain, "mean_gate": mean_gate, "adv_acc": adv_acc,
         })
 
@@ -1564,18 +1585,20 @@ def main():
     # ════════════════════════════════════════════════════════════════════════════
     # POOLED EVALUATION
     # ════════════════════════════════════════════════════════════════════════════
-    all_y    = np.concatenate(pool_y)
-    all_db   = np.concatenate(pool_db)
-    all_dann = np.concatenate(pool_dann)
-    all_ga   = np.concatenate(pool_ga)
-    all_lr   = np.concatenate(pool_lr)
-    all_xgb  = np.concatenate(pool_xgb)
+    all_y     = np.concatenate(pool_y)
+    all_db    = np.concatenate(pool_db)
+    all_dann  = np.concatenate(pool_dann)
+    all_ga    = np.concatenate(pool_ga)
+    all_blend = np.concatenate(pool_blend)
+    all_lr    = np.concatenate(pool_lr)
+    all_xgb   = np.concatenate(pool_xgb)
 
-    drv_aucs_lr   = [safe_auc(y, s) for y, s in zip(pool_y, pool_lr)   if safe_auc(y, s) is not None]
-    drv_aucs_xgb  = [safe_auc(y, s) for y, s in zip(pool_y, pool_xgb)  if safe_auc(y, s) is not None]
-    drv_aucs_db   = [safe_auc(y, s) for y, s in zip(pool_y, pool_db)   if safe_auc(y, s) is not None]
-    drv_aucs_dann = [safe_auc(y, s) for y, s in zip(pool_y, pool_dann) if safe_auc(y, s) is not None]
-    drv_aucs_ga   = [safe_auc(y, s) for y, s in zip(pool_y, pool_ga)   if safe_auc(y, s) is not None]
+    drv_aucs_lr    = [safe_auc(y, s) for y, s in zip(pool_y, pool_lr)    if safe_auc(y, s) is not None]
+    drv_aucs_xgb   = [safe_auc(y, s) for y, s in zip(pool_y, pool_xgb)   if safe_auc(y, s) is not None]
+    drv_aucs_db    = [safe_auc(y, s) for y, s in zip(pool_y, pool_db)    if safe_auc(y, s) is not None]
+    drv_aucs_dann  = [safe_auc(y, s) for y, s in zip(pool_y, pool_dann)  if safe_auc(y, s) is not None]
+    drv_aucs_ga    = [safe_auc(y, s) for y, s in zip(pool_y, pool_ga)    if safe_auc(y, s) is not None]
+    drv_aucs_blend = [safe_auc(y, s) for y, s in zip(pool_y, pool_blend) if safe_auc(y, s) is not None]
 
     ci_dann_win = bootstrap_auc_ci_windows(all_y, all_dann)
     ci_dann_drv = bootstrap_auc_ci_drivers(drv_aucs_dann)
@@ -1600,10 +1623,11 @@ def main():
     print("POOLED EVALUATION — POPULATION MODELS (zero-shot generalisation)")
     print(f"{'='*72}")
     print(f"  These models never see test-participant labels. Results are comparable.")
-    _print_pooled("LR baseline",      all_lr,   drv_aucs_lr)
-    _print_pooled("XGB baseline",     all_xgb,  drv_aucs_xgb)
-    _print_pooled("DB-TCN (no DANN)", all_db,   drv_aucs_db)
-    _print_pooled("DANN-DB-TCN",      all_dann, drv_aucs_dann)
+    _print_pooled("LR baseline",      all_lr,    drv_aucs_lr)
+    _print_pooled("XGB baseline",     all_xgb,   drv_aucs_xgb)
+    _print_pooled("DB-TCN (no DANN)", all_db,    drv_aucs_db)
+    _print_pooled("DANN-DB-TCN",      all_dann,  drv_aucs_dann)
+    _print_pooled("ValBlend (DB+DANN, val-weighted)", all_blend, drv_aucs_blend)
 
     # Wilcoxon signed-rank: DANN-DB-TCN > DB-TCN (paired per driver)
     paired = [(r["auc_db"], r["auc_dann"]) for r in per_driver_results
