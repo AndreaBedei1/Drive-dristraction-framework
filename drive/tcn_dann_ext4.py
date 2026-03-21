@@ -166,6 +166,7 @@ GATE_ADAPT_LR    = 5e-4
 N_BOOTSTRAP        = 2000
 MIN_POSITIVES      = 1
 MIN_EVAL_POSITIVES = 5   # exclude drivers with < 5 real positives from evaluation
+N_PERM_DRIVERS     = 10  # max drivers used for permutation importance (capped by available folds)
 
 # SMOTE oversampling
 SMOTE_K_NEIGHBORS  = 5   # k for SMOTE nearest-neighbour search
@@ -1422,12 +1423,21 @@ def main():
         Xval_sp_raw = compute_spectral_features_batch(X_tr[vmask][:,  :, PHYS_IDX])
         Xte_sp_raw  = compute_spectral_features_batch(X_te[:,         :, PHYS_IDX])
 
-        # Interleave kin+phys per band: [kin_b0|phys_b0, kin_b1|phys_b1, kin_b2|phys_b2]
+        # Interleave kin+phys per band into a single (N, SPECTRAL_DIM=18) vector.
+        # Final layout per row (6 signals × 3 bands = 18 dims):
+        #   [ steer|torq|acc|spd|aro|hr ]_band0
+        #   [ steer|torq|acc|spd|aro|hr ]_band1
+        #   [ steer|torq|acc|spd|aro|hr ]_band2
+        # where each 6-element block is [kin_b(i) (4 cols) | phys_b(i) (2 cols)].
+        # The per-band StandardScaler (below) is applied to each block independently.
         _n_kin  = len(KIN_COLS)
         _n_phys = len(PHYS_COLS)
         _n_spec = _n_kin + _n_phys
 
         def _concat_spec(sk, sp):
+            # sk: (N, n_kin * n_bands)  — from compute_spectral_features_batch on KIN_IDX
+            # sp: (N, n_phys * n_bands) — from compute_spectral_features_batch on PHYS_IDX
+            # Returns (N, n_spec * n_bands) with kin and phys interleaved within each band.
             return np.hstack([
                 np.hstack([sk[:, b*_n_kin:(b+1)*_n_kin],
                            sp[:, b*_n_phys:(b+1)*_n_phys]])
@@ -1505,7 +1515,13 @@ def main():
         tr_subjects = np.unique(pid_tr[~vmask])
         subj2id     = {s: i for i, s in enumerate(tr_subjects)}
         subj_ids_orig = np.array([subj2id[p] for p in pid_tr[~vmask]], dtype=np.int64)
-        # Synthetic SMOTE samples have no real subject id — assign a random real subj id
+        # SMOTE-synthesised samples have no ground-truth subject identity.
+        # We assign each synthetic sample a randomly drawn real subject ID from the
+        # training fold. This is intentional: the discriminator sees synthetic samples
+        # as plausible realisations of existing subjects, which is preferable to
+        # withholding them from adversarial training (which would break batch balance).
+        # Using smote_rng (same seed used to generate the interpolations) ensures
+        # the assignment is deterministic and tied to this fold's synthetic data.
         n_synthetic = len(y_tr_train) - len(subj_ids_orig)
         if n_synthetic > 0:
             syn_sids = smote_rng.choice(subj_ids_orig, n_synthetic, replace=True)
@@ -1598,6 +1614,9 @@ def main():
 
         pool_y.append(y_te);    pool_db.append(db_scores)
         pool_dann.append(dann_scores)
+        # gate_scores is None when gate adaptation was skipped (e.g. < GATE_ADAPT_K
+        # support windows available for this driver). Fall back to population DANN
+        # scores so pool_ga is always populated and pooled metrics remain comparable.
         pool_ga.append(gate_scores if gate_scores is not None else dann_scores)
         pool_blend.append(blend_scores)
         pool_lr.append(lr_scores); pool_xgb.append(xgb_scores)
@@ -1755,8 +1774,7 @@ def main():
     print("PERMUTATION FEATURE IMPORTANCE — DANN-DB-TCN")
     print(f"{'='*72}")
 
-    N_PERM_DRIVERS = min(10, len(pool_models_dann))
-    rng_imp = np.random.default_rng(SEED + 2)
+    N_PERM_DRIVERS = min(N_PERM_DRIVERS, len(pool_models_dann))
 
     sig_importance  = {col: [] for col in SIGNAL_COLS}
     spec_importance = []
@@ -1764,6 +1782,10 @@ def main():
     n_kin_sigs      = len(KIN_COLS) + len(PHYS_COLS)  # total signals per spectral band
 
     for i in range(N_PERM_DRIVERS):
+        # Per-driver RNG: seeded from both the global seed and the driver index so
+        # that permutation results are independently reproducible per fold.
+        seed_d_imp = int(hashlib.md5(str(per_driver_results[i]["driver"]).encode()).hexdigest(), 16) & 0xFFFFFFFF
+        rng_imp = np.random.default_rng(SEED + 2 ^ seed_d_imp)
         m   = pool_models_dann[i]; m.eval()
         Xp  = torch.as_tensor(pool_Xte_p[i]).to(DEVICE)
         Xk  = torch.as_tensor(pool_Xte_k[i]).to(DEVICE)
