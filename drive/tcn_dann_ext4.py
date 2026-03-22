@@ -1811,14 +1811,14 @@ def main():
     print("PERMUTATION FEATURE IMPORTANCE — DANN-DB-TCN")
     print(f"{'='*72}")
 
-    N_PERM_DRIVERS = min(N_PERM_DRIVERS, len(pool_models_dann))
+    n_perm_drivers = min(N_PERM_DRIVERS, len(pool_models_dann))
 
     sig_importance  = {col: [] for col in SIGNAL_COLS}
     spec_importance = []
     band_importance = {f"[{lo:.2f},{hi:.2f})Hz": [] for lo, hi in SPECTRAL_BANDS}
     n_kin_sigs      = len(KIN_COLS) + len(PHYS_COLS)  # total signals per spectral band
 
-    for i in range(N_PERM_DRIVERS):
+    for i in range(n_perm_drivers):
         # Per-driver RNG: seeded from both the global seed and the driver index so
         # that permutation results are independently reproducible per fold.
         seed_d_imp = int(hashlib.md5(str(per_driver_results[i]["driver"]).encode()).hexdigest(), 16) & 0xFFFFFFFF
@@ -1876,7 +1876,7 @@ def main():
             if perm_b_auc is not None:
                 band_importance[lbl].append(base_auc - perm_b_auc)
 
-    print(f"\n  Signal importance (mean ΔAUC when permuted, {N_PERM_DRIVERS} drivers):")
+    print(f"\n  Signal importance (mean ΔAUC when permuted, {n_perm_drivers} drivers):")
     for col, drops in sorted(sig_importance.items(),
                              key=lambda x: -np.mean(x[1]) if x[1] else 0):
         if not drops: continue
