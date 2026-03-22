@@ -1326,6 +1326,8 @@ def print_validity_report(X_raw, y, scores, pids):
 
 def main():
     df = pd.read_csv(Path(__file__).parent / "relab+unibo_dataset.csv")
+    EXCLUDE_DRIVERS = {"0D04", "0C03", "0B07", "0D05", "0C06", "0D02", "0C04", "0C11"}
+    df = df[~df["id"].isin(EXCLUDE_DRIVERS)].reset_index(drop=True)
     df = mark_event_onsets(df)
     df = normalize_signals(df)
 
