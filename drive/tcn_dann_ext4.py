@@ -85,6 +85,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import numpy as np
 import pandas as pd
 import torch
@@ -169,14 +170,22 @@ MIN_EVAL_POSITIVES = 5   # exclude drivers with < 5 real positives from evaluati
 N_PERM_DRIVERS     = 10  # max drivers used for permutation importance (capped by available folds)
 
 # SMOTE oversampling
-SMOTE_K_NEIGHBORS  = 5   # k for SMOTE nearest-neighbour search
+SMOTE_K_NEIGHBORS  = 5      # k for SMOTE nearest-neighbour search
+# Salt added to per-fold seed when constructing the SMOTE RNG so that it is
+# independent of fold_rng (which uses the same SEED ^ seed_d base).
+# Prevents SMOTE interpolation choices from being correlated with the val split.
+SMOTE_SEED_SALT    = 0xABCD
 
+os.environ["PYTHONHASHSEED"] = str(SEED)    # affects child processes; for the current
+                                             # process set PYTHONHASHSEED=42 in the shell
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True   # ensures bit-exact reproducibility
 torch.backends.cudnn.benchmark     = False  # benchmark=True disables determinism
+# Note: for strict CPU reproducibility across machines with different thread counts,
+# add torch.set_num_threads(1) here.
 
 OUT_DIR = Path(__file__).parent / "impairment_results"
 OUT_DIR.mkdir(exist_ok=True)
@@ -406,6 +415,15 @@ def build_windows(df, fine_stride=True):
             continue
 
         if fine_stride:
+            # fine_stride=True (training): uses WINDOW_STEP globally but
+            # oversamples the EVENT_VICINITY steps immediately before each
+            # positive window at stride 1.  This creates temporal overlap
+            # between windows near events, which is intentional — it gives
+            # the model more gradient signal at the most discriminative moments.
+            # LOPO splits by driver (not by time), so windows from the same
+            # route are never split across train/test; the overlap is
+            # confined to the training fold.
+            # fine_stride=False (test): uniform WINDOW_STEP only, no overlap.
             pos_starts = set()
             idx = 0
             while idx + LOOKBACK_S + GAP + HORIZON <= n:
@@ -484,8 +502,10 @@ class DANNDataset(Dataset):
         if self.augment:
             xp += torch.randn_like(xp) * JITTER_STD
             xk += torch.randn_like(xk) * JITTER_STD
-            if random.random() < CUTOUT_PROB:
-                t0 = random.randint(0, xp.shape[0] - CUTOUT_LEN)
+            # Use torch random ops (not global Python random) so augmentation
+            # respects torch.manual_seed and is deterministic across runs.
+            if torch.rand(1).item() < CUTOUT_PROB:
+                t0 = torch.randint(0, xp.shape[0] - CUTOUT_LEN, (1,)).item()
                 xp[t0: t0 + CUTOUT_LEN] = 0.0
                 xk[t0: t0 + CUTOUT_LEN] = 0.0
         return xp, xk, xs, self.y[idx], self.sids[idx]
@@ -749,7 +769,7 @@ class DANNDualBranchTCN(nn.Module):
         if x_spec is None:
             x_spec = torch.zeros(fused.shape[0], SPECTRAL_DIM,
                                  dtype=fused.dtype, device=fused.device)
-        head_in = torch.cat([fused, x_spec], dim=-1)    # (B, 108)
+        head_in = torch.cat([fused, x_spec], dim=-1)    # (B, 114)  = 96 fusion + 18 spectral
         phys_logits = self.phys_head(phys_pool).squeeze(-1)   # (B,)
         self._last_phys_logits = phys_logits
         return self.head(head_in).squeeze(-1), fused     # (B,), (B, 96)
@@ -874,15 +894,17 @@ def _signal_feat_cols(local_signal_idx, n_branch_signals, n_feat_types=5):
     n_feat_types must match the number of feature blocks in engineer_features().
     If engineer_features() is ever changed, update this constant accordingly.
     """
-    assert n_feat_types == 5, (
-        "_signal_feat_cols: n_feat_types must equal the number of concatenated "
-        "blocks in engineer_features() [raw, diff1, roll_mean, roll_std, z_score]. "
-        f"Got {n_feat_types}."
-    )
-    assert 0 <= local_signal_idx < n_branch_signals, (
-        f"_signal_feat_cols: local_signal_idx {local_signal_idx} out of range "
-        f"[0, {n_branch_signals})."
-    )
+    if n_feat_types != 5:
+        raise ValueError(
+            "_signal_feat_cols: n_feat_types must equal the number of concatenated "
+            "blocks in engineer_features() [raw, diff1, roll_mean, roll_std, z_score]. "
+            f"Got {n_feat_types}."
+        )
+    if not (0 <= local_signal_idx < n_branch_signals):
+        raise ValueError(
+            f"_signal_feat_cols: local_signal_idx {local_signal_idx} out of range "
+            f"[0, {n_branch_signals})."
+        )
     C = n_branch_signals
     return [local_signal_idx + k * C for k in range(n_feat_types)]
 
@@ -940,7 +962,11 @@ def train_dann_tcn(model, discriminator,
             loss = cls_loss + AUX_PHYS_WEIGHT * aux_phys_loss + ADV_WEIGHT * adv_loss
             opt.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(all_params, 1.0)
+            # Clip model and discriminator separately: the GRL already scales
+            # gradients into the feature extractor by −λ; applying the same norm
+            # cap to the discriminator would over-constrain its updates.
+            torch.nn.utils.clip_grad_norm_(model.parameters(),         1.0)
+            torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 5.0)
             opt.step()
 
             ep_cls += cls_loss.item(); ep_adv += adv_loss.item(); n_b += 1
@@ -1006,7 +1032,9 @@ def train_db_tcn(model, Xtr_p, Xtr_k, Xtr_s, y_tr, Xval_p, Xval_k, Xval_s, y_val
             loss = (focal_loss(logits, yb_d, pos_weight=pos_weight)
                     + AUX_PHYS_WEIGHT * focal_loss(model._last_phys_logits, yb_d,
                                                    pos_weight=pos_weight))
-            opt.zero_grad(); loss.backward(); opt.step()
+            opt.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
         sched.step()
 
         model.eval()
@@ -1053,8 +1081,8 @@ def train_single_tcn(model, Xtr_sc, y_tr, Xval_sc, y_val):
             xb = xb.to(DEVICE)
             # Apply the same augmentation as DB-TCN/DANN-DB-TCN for fair comparison.
             xb = xb + torch.randn_like(xb) * JITTER_STD
-            if random.random() < CUTOUT_PROB:
-                t0 = random.randint(0, xb.shape[1] - CUTOUT_LEN)
+            if torch.rand(1).item() < CUTOUT_PROB:
+                t0 = torch.randint(0, xb.shape[1] - CUTOUT_LEN, (1,)).item()
                 xb[:, t0: t0 + CUTOUT_LEN, :] = 0.0
             loss = focal_loss(model(xb), yb.to(DEVICE))
             opt.zero_grad(); loss.backward(); opt.step()
@@ -1205,10 +1233,14 @@ def gate_adapt(model_pop, Xte_p, Xte_k, Xte_s, y_te):
     gate_params = [p for p in model_adapt.parameters() if p.requires_grad]
     opt_g = torch.optim.Adam(gate_params, lr=GATE_ADAPT_LR, weight_decay=1e-2)
 
+    # Freeze BN running stats while adapting the gate.
+    # model_adapt.train() re-enables gradient tracking for gate_net, but BN layers
+    # (all in frozen branches) must stay in eval mode so their accumulated statistics
+    # are not corrupted by the tiny K-sample support set.
+    model_adapt.train()
     for bn_m in model_adapt.modules():
         if isinstance(bn_m, nn.BatchNorm1d):
             bn_m.eval()
-    model_adapt.train()
 
     for _ in range(GATE_ADAPT_STEPS):
         logits, _ = model_adapt(X_sup_p, X_sup_k, X_sup_s)
@@ -1468,7 +1500,7 @@ def main():
         y_tr_orig  = y_tr_train.copy()  # pre-SMOTE labels for ablation models
 
         # ── SMOTE oversampling (training fold only, never val/test) ──────────────
-        smote_rng = np.random.default_rng(SEED ^ seed_d ^ 0xABCD)
+        smote_rng = np.random.default_rng(SEED ^ seed_d ^ SMOTE_SEED_SALT)
         Xtr_p_sc, Xtr_k_sc, Xtr_s_sc, y_tr_train = smote_oversample(
             Xtr_p_sc, Xtr_k_sc, Xtr_s_sc, y_tr_train, rng=smote_rng
         )
@@ -1478,7 +1510,12 @@ def main():
         # ── LR & XGB baselines ──────────────────────────────────────────────────
         bl_feats_tr = window_baseline_feats(X_tr[~vmask])
         bl_feats_te = window_baseline_feats(X_te)
-        y_tr_bl = y_tr[~vmask]  # pre-SMOTE labels, consistent with bl_feats_tr
+        # Intentionally use pre-SMOTE labels for LR/XGB: these models handle
+        # class imbalance internally (class_weight="balanced" / scale_pos_weight)
+        # so adding synthetic SMOTE samples would artificially inflate their
+        # training set without a principled justification.  TCN uses SMOTE for
+        # data augmentation, not solely for rebalancing.
+        y_tr_bl = y_tr[~vmask]
         pw_bl = (y_tr_bl == 0).sum() / max((y_tr_bl == 1).sum(), 1)
 
         lr_model = LogisticRegression(max_iter=5000, class_weight="balanced",
@@ -1785,7 +1822,7 @@ def main():
         # Per-driver RNG: seeded from both the global seed and the driver index so
         # that permutation results are independently reproducible per fold.
         seed_d_imp = int(hashlib.md5(str(per_driver_results[i]["driver"]).encode()).hexdigest(), 16) & 0xFFFFFFFF
-        rng_imp = np.random.default_rng(SEED + 2 ^ seed_d_imp)
+        rng_imp = np.random.default_rng(SEED + 2 + seed_d_imp)
         m   = pool_models_dann[i]; m.eval()
         Xp  = torch.as_tensor(pool_Xte_p[i]).to(DEVICE)
         Xk  = torch.as_tensor(pool_Xte_k[i]).to(DEVICE)
