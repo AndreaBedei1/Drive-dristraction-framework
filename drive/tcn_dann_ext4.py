@@ -155,7 +155,7 @@ AUX_PHYS_WEIGHT = 0.3
 # ── Spectral features ─────────────────────────────────────────────────────────────
 # At fs = 1 Hz (arousal/HR/vehicle logged at ~1 Hz), Nyquist = 0.5 Hz.
 # Three bands chosen to isolate known driving-distraction frequency signatures.
-SPECTRAL_BANDS = [(0.0, 0.1), (0.1, 0.3), (0.3, 0.501)]   # 0.501 to include 0.5 Hz cleanly
+SPECTRAL_BANDS = [(0.0, 0.1), (0.1, 0.3), (0.3, 0.5)]   # inclusive upper bound on final band
 SPECTRAL_DIM   = (len(KIN_COLS) + len(PHYS_COLS)) * len(SPECTRAL_BANDS)   # 6 × 3 = 18
 
 # Gate personalisation
@@ -170,6 +170,7 @@ MIN_EVAL_POSITIVES = 5   # exclude drivers with < 5 real positives from evaluati
 N_PERM_DRIVERS     = 10  # max drivers used for permutation importance (capped by available folds)
 
 # SMOTE oversampling
+USE_SMOTE          = True   # set False to disable SMOTE (uses class-weighted focal loss only)
 SMOTE_K_NEIGHBORS  = 5      # k for SMOTE nearest-neighbour search
 # Salt added to per-fold seed when constructing the SMOTE RNG so that it is
 # independent of fold_rng (which uses the same SEED ^ seed_d base).
@@ -294,7 +295,10 @@ def compute_spectral_features_batch(X_kin_raw):
         # rfft on a length-1 window yields only DC — band powers are meaningless.
         return np.zeros((N, C * len(SPECTRAL_BANDS)), dtype=np.float32)
     freqs   = np.fft.rfftfreq(T, d=1.0)      # (T//2 + 1,) at fs=1 Hz
-    masks   = [(freqs >= lo) & (freqs < hi) for lo, hi in SPECTRAL_BANDS]
+    # All bands use half-open [lo, hi); the final band uses closed [lo, hi] so
+    # the Nyquist bin (0.5 Hz) is always included regardless of FFT resolution.
+    masks   = [(freqs >= lo) & (freqs < hi) for lo, hi in SPECTRAL_BANDS[:-1]]
+    masks  += [(freqs >= SPECTRAL_BANDS[-1][0]) & (freqs <= SPECTRAL_BANDS[-1][1])]
 
     out = np.zeros((N, C * len(SPECTRAL_BANDS)), dtype=np.float32)
     for i, win in enumerate(X_kin_raw):           # win: (T, C)
@@ -504,7 +508,7 @@ class DANNDataset(Dataset):
             xk += torch.randn_like(xk) * JITTER_STD
             # Use torch random ops (not global Python random) so augmentation
             # respects torch.manual_seed and is deterministic across runs.
-            if torch.rand(1).item() < CUTOUT_PROB:
+            if torch.rand(1).item() < CUTOUT_PROB and xp.shape[0] > CUTOUT_LEN:
                 t0 = torch.randint(0, xp.shape[0] - CUTOUT_LEN, (1,)).item()
                 xp[t0: t0 + CUTOUT_LEN] = 0.0
                 xk[t0: t0 + CUTOUT_LEN] = 0.0
@@ -1081,7 +1085,7 @@ def train_single_tcn(model, Xtr_sc, y_tr, Xval_sc, y_val):
             xb = xb.to(DEVICE)
             # Apply the same augmentation as DB-TCN/DANN-DB-TCN for fair comparison.
             xb = xb + torch.randn_like(xb) * JITTER_STD
-            if torch.rand(1).item() < CUTOUT_PROB:
+            if torch.rand(1).item() < CUTOUT_PROB and xb.shape[1] > CUTOUT_LEN:
                 t0 = torch.randint(0, xb.shape[1] - CUTOUT_LEN, (1,)).item()
                 xb[:, t0: t0 + CUTOUT_LEN, :] = 0.0
             loss = focal_loss(model(xb), yb.to(DEVICE))
@@ -1326,7 +1330,7 @@ def print_validity_report(X_raw, y, scores, pids):
 
 def main():
     df = pd.read_csv(Path(__file__).parent / "relab+unibo_dataset.csv")
-    EXCLUDE_DRIVERS = {"0D04", "0C03", "0B07", "0D05", "0C06", "0D02", "0C04", "0C11"}
+    EXCLUDE_DRIVERS = {"0D04", "0C03", "0B07", "0D05", "0C06", "0D02", "0C04", "0C11", "0D03R"}
     df = df[~df["id"].isin(EXCLUDE_DRIVERS)].reset_index(drop=True)
     df = mark_event_onsets(df)
     df = normalize_signals(df)
@@ -1353,7 +1357,7 @@ def main():
     print(f"  TCN blocks      : d=1,2,4,8,32  →  RF ≈ 95 timesteps")
     print(f"  Output channels : {DANNDualBranchTCN.KIN_D}")
     print(f"CLC excluded      : center_line_crossing removed from SEVERITY")
-    print(f"SMOTE             : minority oversampling on training fold (k={SMOTE_K_NEIGHBORS})")
+    print(f"SMOTE             : {'minority oversampling on training fold (k=' + str(SMOTE_K_NEIGHBORS) + ')' if USE_SMOTE else 'DISABLED — class-weighted focal loss only'}")
     print(f"Min eval positives: {MIN_EVAL_POSITIVES} (drivers below threshold excluded from eval)")
     print(f"Cross-modal attn  : bidirectional (phys↔kin) with residual enhancement")
     print(f"Modality gate     : α = σ(MLP([phys_pool, kin_pool]))  ∈ (0,1)")
@@ -1502,11 +1506,12 @@ def main():
         y_tr_orig  = y_tr_train.copy()  # pre-SMOTE labels for ablation models
 
         # ── SMOTE oversampling (training fold only, never val/test) ──────────────
-        smote_rng = np.random.default_rng(SEED ^ seed_d ^ SMOTE_SEED_SALT)
-        Xtr_p_sc, Xtr_k_sc, Xtr_s_sc, y_tr_train = smote_oversample(
-            Xtr_p_sc, Xtr_k_sc, Xtr_s_sc, y_tr_train, rng=smote_rng
-        )
-        # Rebuild pos_weight after SMOTE (now balanced → pw ≈ 1.0)
+        if USE_SMOTE:
+            smote_rng = np.random.default_rng(SEED ^ seed_d ^ SMOTE_SEED_SALT)
+            Xtr_p_sc, Xtr_k_sc, Xtr_s_sc, y_tr_train = smote_oversample(
+                Xtr_p_sc, Xtr_k_sc, Xtr_s_sc, y_tr_train, rng=smote_rng
+            )
+        # pos_weight: ~1.0 after SMOTE (balanced), or true imbalance ratio without SMOTE
         pw_bl_smote = (y_tr_train == 0).sum() / max((y_tr_train == 1).sum(), 1)
 
         # ── LR & XGB baselines ──────────────────────────────────────────────────
@@ -1596,21 +1601,24 @@ def main():
                            torch.as_tensor(Xval_k_sc).to(DEVICE),
                            torch.as_tensor(Xval_s_sc).to(DEVICE))[0]
             ).cpu().numpy()
-        val_auc_db   = safe_auc(y_val_d, val_db_sc)   or 0.5
-        val_auc_dann = safe_auc(y_val_d, val_dann_sc) or 0.5
-        denom = val_auc_db + val_auc_dann
-        w_dann  = val_auc_dann / denom if denom > 0 else 0.5
+        # Fixed equal-weight blend: using validation AUC to tune w_dann would leak
+        # validation performance structure into test predictions, violating LOPO-CV.
+        val_auc_db   = safe_auc(y_val_d, val_db_sc)   or float("nan")
+        val_auc_dann = safe_auc(y_val_d, val_dann_sc) or float("nan")
+        w_dann  = 0.5
         blend_scores = w_dann * dann_scores + (1.0 - w_dann) * db_scores
 
-        # Adversarial accuracy on a subsample of training data (diagnostic).
-        # Val drivers are held out at driver-level so they are never seen by the
-        # discriminator; evaluate on training windows instead.
-        rng_adv  = np.random.default_rng(seed_d + 1)
-        n_adv    = min(512, len(y_tr_train))
-        adv_idx  = rng_adv.choice(len(y_tr_train), n_adv, replace=False)
-        adv_acc  = _adv_accuracy(dann_model, disc,
-                                 Xtr_p_sc[adv_idx], Xtr_k_sc[adv_idx],
-                                 Xtr_s_sc[adv_idx], subj_ids_tr[adv_idx])
+        # Adversarial accuracy on all original (non-synthetic) training windows.
+        # Validation drivers are held out at driver-level and not in subj2id, so
+        # they cannot be used here.  Instead, evaluate on the N_orig pre-SMOTE
+        # training windows (SMOTE appends synthetic rows, so [:n_orig_tr] are real).
+        # These windows were seen during training, so a score near chance-level
+        # indicates that the GRL successfully confused the discriminator on its own
+        # training distribution — the intended diagnostic.
+        n_orig_tr = len(subj_ids_orig)
+        adv_acc   = _adv_accuracy(dann_model, disc,
+                                  Xtr_p_sc[:n_orig_tr], Xtr_k_sc[:n_orig_tr],
+                                  Xtr_s_sc[:n_orig_tr], subj_ids_orig)
         chance   = 1.0 / len(tr_subjects)
         dann_diagnostics.append({
             "driver": d, "adv_acc": adv_acc, "chance": chance,
@@ -1669,14 +1677,21 @@ def main():
             "driver": d, "n_windows": int(len(y_te)),
             "pos_rate": float(y_te.mean()),
             "auc_lr": auc_lr, "auc_xgb": auc_xgb, "auc_db": auc_db,
-            "auc_dann": auc_dann, "auc_gate": auc_ga, "auc_platt": auc_platt,
-            "auc_head": auc_head, "auc_blend": auc_blend,
-            "val_auc_db": val_auc_db, "val_auc_dann": val_auc_dann, "w_dann": w_dann,
+            "auc_dann": auc_dann, "auc_blend": auc_blend,
+            "val_auc_db": val_auc_db, "val_auc_dann": val_auc_dann,
             "dann_gain": gain, "mean_gate": mean_gate, "adv_acc": adv_acc,
+            # personalisation: these methods observe y_te[:GATE_ADAPT_K] (test-participant
+            # labels) and are NOT held-out generalisation estimates. Keep separate from
+            # population metrics above to prevent conflation in downstream analysis.
+            "personalisation": {
+                "auc_gate":  auc_ga,
+                "auc_platt": auc_platt,
+                "auc_head":  auc_head,
+            },
         })
 
         # ── Ablation single-branch TCNs ──────────────────────────────────────────
-        for abl_name, abl_idx in ABLATION.items():
+        for abl_i, (abl_name, abl_idx) in enumerate(ABLATION.items()):
             n_abl_feat = len(abl_idx) * 5
             Xtr_abl    = apply_features_branch(X_tr[~vmask], abl_idx)
             Xval_abl   = apply_features_branch(X_tr[vmask],  abl_idx)
@@ -1688,8 +1703,22 @@ def main():
                 Xval_abl.reshape(-1, n_abl_feat)).reshape(-1, LOOKBACK_S, n_abl_feat)
             Xte_abl_sc  = sc_abl.transform(
                 Xte_abl.reshape(-1, n_abl_feat)).reshape(-1, LOOKBACK_S, n_abl_feat)
+            # Apply SMOTE to ablation features so SingleBranchTCN trains on a balanced
+            # set comparable to DB-TCN / DANN-DB-TCN.  Pass zero-filled dummy arrays for
+            # the unused modalities so smote_oversample neighbour search operates solely
+            # on the ablation branch features. Seed offset per ablation prevents
+            # correlated interpolation choices with the main SMOTE run.
+            if USE_SMOTE:
+                _dk = np.zeros((len(y_tr_orig), 1, 1), dtype=np.float32)
+                _ds = np.zeros((len(y_tr_orig), 1),    dtype=np.float32)
+                _abl_smote_rng = np.random.default_rng(
+                    SEED ^ seed_d ^ SMOTE_SEED_SALT ^ (0xAB00 + abl_i))
+                Xtr_abl_aug, _, _, y_tr_abl = smote_oversample(
+                    Xtr_abl_sc, _dk, _ds, y_tr_orig, rng=_abl_smote_rng)
+            else:
+                Xtr_abl_aug, y_tr_abl = Xtr_abl_sc, y_tr_orig
             abl_m = SingleBranchTCN(n_abl_feat).to(DEVICE)
-            abl_m = train_single_tcn(abl_m, Xtr_abl_sc, y_tr_orig, Xval_abl_sc, y_val_d)
+            abl_m = train_single_tcn(abl_m, Xtr_abl_aug, y_tr_abl, Xval_abl_sc, y_val_d)
             abl_m.eval()
             with torch.no_grad():
                 abl_sc = torch.sigmoid(
@@ -1813,7 +1842,7 @@ def main():
     print("PERMUTATION FEATURE IMPORTANCE — DANN-DB-TCN")
     print(f"{'='*72}")
 
-    n_perm_drivers = min(N_PERM_DRIVERS, len(pool_models_dann))
+    n_perm_drivers = len(pool_models_dann)   # use all available folds
 
     sig_importance  = {col: [] for col in SIGNAL_COLS}
     spec_importance = []
@@ -1843,10 +1872,11 @@ def main():
             local_i       = PHYS_IDX.index(ci) if is_phys else KIN_IDX.index(ci)
             feat_cols     = _signal_feat_cols(local_i, n_branch_sigs)  # 5 columns
 
-            bt_perm  = branch_tensor.clone()
-            idx_perm = torch.from_numpy(rng_imp.permutation(len(yt))).to(DEVICE)
+            bt_perm  = branch_tensor.cpu().numpy().copy()
+            idx_perm = rng_imp.permutation(len(yt))
             for fc in feat_cols:
                 bt_perm[:, :, fc] = bt_perm[idx_perm, :, fc]
+            bt_perm = torch.as_tensor(bt_perm).to(DEVICE)
 
             with torch.no_grad():
                 perm_s = torch.sigmoid(
@@ -1858,8 +1888,8 @@ def main():
                 sig_importance[col].append(base_auc - perm_auc)
 
         # All spectral features
-        perm_idx = torch.from_numpy(rng_imp.permutation(len(yt))).to(DEVICE)
-        Xs_perm  = Xs[perm_idx]
+        perm_idx = rng_imp.permutation(len(yt))
+        Xs_perm  = torch.as_tensor(Xs.cpu().numpy()[perm_idx]).to(DEVICE)
         with torch.no_grad():
             perm_sp = torch.sigmoid(m(Xp, Xk, Xs_perm)[0]).cpu().numpy()
         perm_sp_auc = safe_auc(yt, perm_sp)
@@ -1868,17 +1898,18 @@ def main():
 
         # Per-band spectral importance
         for b_i, lbl in enumerate(band_importance.keys()):
-            Xs_b = Xs.clone()
+            Xs_b = Xs.cpu().numpy().copy()
             cols_b = list(range(b_i * n_kin_sigs, (b_i + 1) * n_kin_sigs))
-            perm_b = torch.from_numpy(rng_imp.permutation(len(yt))).to(DEVICE)
+            perm_b = rng_imp.permutation(len(yt))
             Xs_b[:, cols_b] = Xs_b[perm_b][:, cols_b]
+            Xs_b = torch.as_tensor(Xs_b).to(DEVICE)
             with torch.no_grad():
                 perm_b_s = torch.sigmoid(m(Xp, Xk, Xs_b)[0]).cpu().numpy()
             perm_b_auc = safe_auc(yt, perm_b_s)
             if perm_b_auc is not None:
                 band_importance[lbl].append(base_auc - perm_b_auc)
 
-    print(f"\n  Signal importance (mean ΔAUC when permuted, {n_perm_drivers} drivers):")
+    print(f"\n  Signal importance (mean ΔAUC when permuted, all {n_perm_drivers} drivers):")
     for col, drops in sorted(sig_importance.items(),
                              key=lambda x: -np.mean(x[1]) if x[1] else 0):
         if not drops: continue
@@ -1898,8 +1929,8 @@ def main():
     print(f"\n{'='*72}")
     print("DANN ADVERSARIAL DIAGNOSTIC")
     print(f"{'='*72}")
-    print(f"  Discriminator accuracy on validation set after training.")
-    print(f"  Lower accuracy → stronger subject invariance in feature extractor.")
+    print(f"  Discriminator accuracy on all original (non-synthetic) training windows.")
+    print(f"  Score near chance → GRL successfully confused discriminator on training distribution.")
     print(f"  Chance level ≈ 1/N_subjects.  Ratio = AdvAcc/Chance.\n")
     print(f"  {'Driver':<10}  {'N_subj':>6}  {'Chance':>7}  {'AdvAcc':>7}  {'Ratio':>7}  {'Invariant?'}")
     print(f"  {'-'*58}")
