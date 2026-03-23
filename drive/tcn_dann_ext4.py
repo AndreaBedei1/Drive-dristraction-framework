@@ -1806,7 +1806,8 @@ def main():
     print(f"\n{'='*72}")
     print("THRESHOLD-DEPENDENT METRICS  (Youden's J threshold)")
     print(f"{'='*72}")
-    for name, scores in [("DB-TCN (no DANN)", all_db), ("DANN-DB-TCN", all_dann)]:
+    for name, scores in [("DB-TCN (no DANN)", all_db), ("DANN-DB-TCN", all_dann),
+                         ("Ensemble (DB+DANN)", all_blend)]:
         if len(np.unique(all_y)) < 2: continue
         f1, prec, rec, thresh = threshold_metrics(all_y, scores)
         print(f"  {name:<20}  F1={f1:.3f}  Prec={prec:.3f}  Rec={rec:.3f}  @thresh={thresh:.3f}")
