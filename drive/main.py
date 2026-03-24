@@ -612,7 +612,7 @@ def main() -> int:
     preview_emotion_provider = None
 
     arousal_client = None
-    baseline_requires_sensor = dataset_profile == "baseline"
+    baseline_required_for_run = dataset_profile in ("baseline", "distraction")
     if cfg.arousal_sensor.enabled:
         try:
             from src.arousal_ble import BleArousalProvider
@@ -641,13 +641,15 @@ def main() -> int:
         )
         print("[Runner] Arousal pipeline disabled by config.")
 
-    if baseline_requires_sensor and not cfg.arousal_sensor.enabled:
+    if baseline_required_for_run and not cfg.arousal_sensor.enabled:
         raise RuntimeError(
-            "Baseline run requires arousal sensor: set arousal_sensor.enabled=true."
+            f"Dataset profile '{dataset_profile}' requires arousal sensor: "
+            "set arousal_sensor.enabled=true."
         )
-    if baseline_requires_sensor and arousal_client is None:
+    if baseline_required_for_run and arousal_client is None:
         raise RuntimeError(
-            "Baseline run requires arousal sensor data, but the BLE provider is unavailable."
+            f"Dataset profile '{dataset_profile}' requires arousal sensor data, "
+            "but the BLE provider is unavailable."
         )
 
     if cfg.arousal_sensor.enabled and arousal_client is not None:
@@ -660,7 +662,7 @@ def main() -> int:
                 + 10.0,
             )
             calibration_wait = baseline_wait + 5.0
-            if baseline_requires_sensor:
+            if baseline_required_for_run:
                 print(
                     "[Runner] Waiting for first arousal sample "
                     f"(timeout={first_sample_wait:.0f}s), then {baseline_wait:.0f}s of baseline calibration..."
@@ -669,7 +671,7 @@ def main() -> int:
                     first_sample_ready = bool(arousal_client.wait_for_first_sample(timeout=first_sample_wait))
                 except Exception as exc:
                     raise RuntimeError(
-                        f"Baseline run aborted: failed while waiting for first sensor sample ({exc})."
+                        f"Run aborted: failed while waiting for first sensor sample ({exc})."
                     ) from exc
                 if not first_sample_ready:
                     last_error = ""
@@ -680,7 +682,7 @@ def main() -> int:
                     except Exception:
                         last_error = ""
                     raise RuntimeError(
-                        "Baseline run aborted: no arousal sensor data received before calibration timeout."
+                        "Run aborted: no arousal sensor data received before calibration timeout."
                         f"{last_error}"
                     )
             else:
@@ -689,15 +691,15 @@ def main() -> int:
             try:
                 baseline_ready = bool(arousal_client.wait_for_baseline(timeout=calibration_wait))
             except Exception as exc:
-                if baseline_requires_sensor:
+                if baseline_required_for_run:
                     raise RuntimeError(
-                        f"Baseline run aborted: failed while waiting for sensor calibration ({exc})."
+                        f"Run aborted: failed while waiting for sensor calibration ({exc})."
                     ) from exc
                 time.sleep(baseline_wait)
             else:
                 if not baseline_ready:
                     msg = "Baseline not completed yet (no data or still calibrating)."
-                    if baseline_requires_sensor:
+                    if baseline_required_for_run:
                         last_error = ""
                         try:
                             raw_error = arousal_client.last_error()
@@ -705,7 +707,7 @@ def main() -> int:
                                 last_error = f" last_error={raw_error}"
                         except Exception:
                             last_error = ""
-                        raise RuntimeError(f"Baseline run aborted: {msg}{last_error}")
+                        raise RuntimeError(f"Run aborted: {msg}{last_error}")
                     print(f"[Runner] {msg}")
 
     try:
@@ -802,7 +804,7 @@ def main() -> int:
         sync_provider=sync_inference,
     )
     baseline_time_logger = None
-    if dataset_profile in ("baseline", "distraction"):
+    if baseline_required_for_run:
         baseline_time_logger = BaselineDrivingTimeLogger(
             output_dir=output_dir,
             context=context,
@@ -854,12 +856,29 @@ def main() -> int:
     elif not cfg.inference.enable_preview:
         print("[Runner] Camera preview disabled by config.")
     distraction_windows = []
+    coord = None
 
     if distractions_enabled:
-        coord = DistractionCoordinator(cfg.distractions.min_gap_between_windows_seconds)
+        coord = DistractionCoordinator(
+            initial_free_drive_seconds=cfg.distractions.initial_free_drive_seconds,
+            recovery_seconds=cfg.distractions.recovery_seconds,
+            post_recovery_min_interval_seconds=cfg.distractions.post_recovery_min_interval_seconds,
+            post_recovery_max_interval_seconds=cfg.distractions.post_recovery_max_interval_seconds,
+            final_free_drive_seconds=cfg.distractions.final_free_drive_seconds,
+        )
         window_titles = list(cfg.distractions.window_titles)
         while len(window_titles) < 2:
             window_titles.append(f"Distrazione {len(window_titles) + 1}")
+        print(
+            "[Runner] Distraction protocol: "
+            f"initial_free={cfg.distractions.initial_free_drive_seconds:.0f}s, "
+            f"recovery={cfg.distractions.recovery_seconds:.0f}s, "
+            "post_recovery_gap="
+            f"{cfg.distractions.post_recovery_min_interval_seconds:.0f}-"
+            f"{cfg.distractions.post_recovery_max_interval_seconds:.0f}s, "
+            f"final_free={cfg.distractions.final_free_drive_seconds:.0f}s, "
+            f"keypresses={cfg.distractions.min_keypresses}-{cfg.distractions.max_keypresses}."
+        )
 
         def _with_hero(fn) -> None:
             hero = find_hero_vehicle(world, preferred_role="hero")
@@ -883,8 +902,6 @@ def main() -> int:
                 coordinator=coord,
                 min_keypresses=cfg.distractions.min_keypresses,
                 max_keypresses=cfg.distractions.max_keypresses,
-                min_interval_seconds=cfg.distractions.min_interval_seconds,
-                max_interval_seconds=cfg.distractions.max_interval_seconds,
                 flash_duration_seconds=cfg.distractions.flash_duration_seconds,
                 flash_start_interval_seconds=cfg.distractions.flash_start_interval_seconds,
                 flash_min_interval_seconds=cfg.distractions.flash_min_interval_seconds,
@@ -906,8 +923,6 @@ def main() -> int:
                 coordinator=coord,
                 min_keypresses=cfg.distractions.min_keypresses,
                 max_keypresses=cfg.distractions.max_keypresses,
-                min_interval_seconds=cfg.distractions.min_interval_seconds,
-                max_interval_seconds=cfg.distractions.max_interval_seconds,
                 flash_duration_seconds=cfg.distractions.flash_duration_seconds,
                 flash_start_interval_seconds=cfg.distractions.flash_start_interval_seconds,
                 flash_min_interval_seconds=cfg.distractions.flash_min_interval_seconds,
@@ -925,6 +940,8 @@ def main() -> int:
             ),
         ]
         for w in distraction_windows:
+            coord.register_window(w)
+        for w in distraction_windows:
             w.start()
     else:
         if dataset_profile == "baseline":
@@ -940,11 +957,11 @@ def main() -> int:
         if not cfg.arousal_sensor.enabled:
             return None
         if arousal_client is None:
-            if baseline_requires_sensor:
-                raise RuntimeError("Baseline run aborted: arousal sensor provider unavailable at start.")
+            if baseline_required_for_run:
+                raise RuntimeError("Run aborted: arousal sensor provider unavailable at start.")
             return None
         wait_for_valid_seconds = 0.0
-        if baseline_requires_sensor:
+        if baseline_required_for_run:
             # After baseline completion, one additional HR sample may be needed
             # before normalized arousal becomes available.
             wait_for_valid_seconds = max(
@@ -962,9 +979,9 @@ def main() -> int:
             try:
                 snapshot = arousal_client.get_snapshot()
             except Exception as exc:
-                if baseline_requires_sensor:
+                if baseline_required_for_run:
                     raise RuntimeError(
-                        f"Baseline run aborted: failed to read arousal sensor at start ({exc})."
+                        f"Run aborted: failed to read arousal sensor at start ({exc})."
                     ) from exc
                 print(f"[Runner] Initial arousal snapshot unavailable: {exc}")
                 return None
@@ -992,7 +1009,7 @@ def main() -> int:
             else:
                 last_issue = "invalid arousal sample"
 
-            if not baseline_requires_sensor:
+            if not baseline_required_for_run:
                 if not hr_valid:
                     print("[Runner] Initial heart-rate sample invalid; run-level baseline columns will be empty.")
                 else:
@@ -1012,13 +1029,13 @@ def main() -> int:
                     detail_bits.append(f"arousal={arousal_value:.3f}")
                 details = f" ({', '.join(detail_bits)})" if detail_bits else ""
                 raise RuntimeError(
-                    "Baseline run aborted: no valid pre-drive arousal sample available at start "
+                    "Run aborted: no valid pre-drive HR/arousal baseline available at start "
                     f"within {wait_for_valid_seconds:.1f}s ({last_issue}){details}."
                 )
 
             if not waiting_log_printed:
                 print(
-                    "[Runner] Waiting for valid pre-drive arousal sample "
+                    "[Runner] Waiting for valid pre-drive HR/arousal baseline sample "
                     f"(timeout={wait_for_valid_seconds:.1f}s)..."
                 )
                 waiting_log_printed = True
@@ -1035,6 +1052,27 @@ def main() -> int:
         mc_env["SDL_VIDEO_WINDOW_POS"] = f"{x},{y}"
     try:
         baseline_pre_drive_snapshot = _capture_pre_drive_arousal_snapshot()
+        if baseline_required_for_run:
+            if baseline_time_logger is None:
+                raise RuntimeError(
+                    f"Dataset profile '{dataset_profile}' requires baseline logging, "
+                    "but the driving-time logger is unavailable."
+                )
+            try:
+                locked_hr_baseline, locked_arousal_baseline = (
+                    baseline_time_logger.require_pre_drive_baseline_metrics(
+                        pre_drive_snapshot=baseline_pre_drive_snapshot
+                    )
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "Run aborted: failed to register valid pre-drive HR/arousal baseline "
+                    f"for dataset logging ({exc})."
+                ) from exc
+            print(
+                "[Runner] Pre-drive baseline locked "
+                f"(hr={locked_hr_baseline} bpm, arousal={locked_arousal_baseline:.3f})."
+            )
         timeline_logger.set_run_baseline_snapshot(baseline_pre_drive_snapshot)
         error_logger.set_run_baseline_snapshot(baseline_pre_drive_snapshot)
         distraction_logger.set_run_baseline_snapshot(baseline_pre_drive_snapshot)
@@ -1054,6 +1092,11 @@ def main() -> int:
                 env=mc_env,
             )
             drive_start_monotonic = time.monotonic()
+            if coord is not None:
+                coord.arm(
+                    start_time_monotonic=drive_start_monotonic,
+                    run_duration_seconds=max_duration_seconds if max_duration_seconds > 0.0 else None,
+                )
 
             while True:
                 if max_duration_seconds > 0.0 and drive_start_monotonic is not None:
@@ -1080,6 +1123,11 @@ def main() -> int:
         else:
             print("[Runner] --no-launch-manual set. Scenario running; you can start manual_control separately.")
             drive_start_monotonic = time.monotonic()
+            if coord is not None:
+                coord.arm(
+                    start_time_monotonic=drive_start_monotonic,
+                    run_duration_seconds=max_duration_seconds if max_duration_seconds > 0.0 else None,
+                )
             while True:
                 if max_duration_seconds > 0.0 and drive_start_monotonic is not None:
                     elapsed = time.monotonic() - drive_start_monotonic
@@ -1130,6 +1178,11 @@ def main() -> int:
             timeline_logger.flush_pending()
         except Exception:
             pass
+        if coord is not None:
+            try:
+                coord.stop()
+            except Exception:
+                pass
         for w in distraction_windows:
             w.stop()
         for w in distraction_windows:

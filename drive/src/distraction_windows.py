@@ -6,7 +6,7 @@ import random
 import string
 import threading
 import time
-from typing import Callable, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 import sys
 
 try:
@@ -21,30 +21,167 @@ except Exception:
 
 
 class DistractionCoordinator:
-    """Ensure only one distraction window is active at a time."""
+    """Central scheduler controlling distraction onset timing."""
 
-    def __init__(self, min_gap_seconds: float) -> None:
-        """Create a coordinator with a minimum gap between alerts."""
+    def __init__(
+        self,
+        initial_free_drive_seconds: float,
+        recovery_seconds: float,
+        post_recovery_min_interval_seconds: float,
+        post_recovery_max_interval_seconds: float,
+        final_free_drive_seconds: float = 0.0,
+    ) -> None:
+        """Create a coordinator for the distraction protocol timing."""
         self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
         self._active_id: Optional[str] = None
-        self._next_allowed_time = 0.0
-        self._min_gap = float(min_gap_seconds)
+        self._next_allowed_time = float("inf")
+        self._initial_free_drive = max(0.0, float(initial_free_drive_seconds))
+        self._recovery_seconds = max(0.0, float(recovery_seconds))
+        self._post_recovery_min_interval = max(0.0, float(post_recovery_min_interval_seconds))
+        self._post_recovery_max_interval = max(
+            self._post_recovery_min_interval,
+            float(post_recovery_max_interval_seconds),
+        )
+        self._final_free_drive = max(0.0, float(final_free_drive_seconds))
+        self._armed = False
+        self._latest_start_time: Optional[float] = None
+        self._stop_requested = False
+        self._windows: Dict[str, "DistractionWindow"] = {}
+        self._window_order: List[str] = []
+        self._ready_window_ids: Set[str] = set()
+        self._next_window_index = 0
+        self._scheduler_thread = threading.Thread(target=self._run_scheduler, daemon=True)
+        self._scheduler_thread.start()
 
-    def request_start(self, window_id: str) -> bool:
-        """Request permission to start an alert for a window."""
-        with self._lock:
-            now = time.monotonic()
-            if self._active_id is None and now >= self._next_allowed_time:
-                self._active_id = window_id
-                return True
-            return False
+    def register_window(self, window: "DistractionWindow") -> None:
+        """Register a distraction window for future scheduling."""
+        with self._cond:
+            self._windows[window.window_id] = window
+            if window.window_id not in self._window_order:
+                self._window_order.append(window.window_id)
+            self._cond.notify_all()
+
+    def notify_window_ready(self, window_id: str) -> None:
+        """Mark a distraction window as ready to receive start requests."""
+        with self._cond:
+            self._ready_window_ids.add(str(window_id))
+            self._cond.notify_all()
+
+    def arm(
+        self,
+        start_time_monotonic: Optional[float] = None,
+        run_duration_seconds: Optional[float] = None,
+    ) -> None:
+        """Start the protocol clock from the driving run start."""
+        with self._cond:
+            start_time = time.monotonic() if start_time_monotonic is None else float(start_time_monotonic)
+            self._next_allowed_time = start_time + self._initial_free_drive
+            self._armed = True
+            if run_duration_seconds is None or float(run_duration_seconds) <= 0.0:
+                self._latest_start_time = None
+            else:
+                self._latest_start_time = start_time + max(
+                    0.0,
+                    float(run_duration_seconds) - self._final_free_drive,
+                )
+            self._cond.notify_all()
 
     def finish(self, window_id: str) -> None:
         """Mark a window as finished and set the next allowed time."""
-        with self._lock:
+        with self._cond:
             if self._active_id == window_id:
                 self._active_id = None
-                self._next_allowed_time = time.monotonic() + self._min_gap
+                post_recovery_gap = random.uniform(
+                    self._post_recovery_min_interval,
+                    self._post_recovery_max_interval,
+                )
+                self._next_allowed_time = (
+                    time.monotonic()
+                    + self._recovery_seconds
+                    + post_recovery_gap
+                )
+                self._cond.notify_all()
+
+    def stop(self) -> None:
+        """Stop the central scheduler thread."""
+        with self._cond:
+            self._stop_requested = True
+            self._cond.notify_all()
+        try:
+            self._scheduler_thread.join(timeout=1.0)
+        except Exception:
+            pass
+
+    def _pick_next_window_id_locked(self) -> Optional[str]:
+        ready_ids = [wid for wid in self._window_order if wid in self._ready_window_ids]
+        if not ready_ids:
+            return None
+        total = len(self._window_order)
+        if total <= 0:
+            return None
+        for offset in range(total):
+            idx = (self._next_window_index + offset) % total
+            window_id = self._window_order[idx]
+            if window_id in self._ready_window_ids:
+                self._next_window_index = (idx + 1) % total
+                return window_id
+        return ready_ids[0]
+
+    def _run_scheduler(self) -> None:
+        while True:
+            target_window: Optional["DistractionWindow"] = None
+            target_window_id: Optional[str] = None
+            with self._cond:
+                while True:
+                    if self._stop_requested:
+                        return
+                    if not self._armed or not self._ready_window_ids:
+                        self._cond.wait()
+                        continue
+                    if self._active_id is not None:
+                        self._cond.wait()
+                        continue
+                    now = time.monotonic()
+                    if self._latest_start_time is not None:
+                        if now >= self._latest_start_time:
+                            self._armed = False
+                            self._cond.wait()
+                            continue
+                        if self._next_allowed_time > self._latest_start_time:
+                            self._armed = False
+                            self._cond.wait()
+                            continue
+                    delay = self._next_allowed_time - now
+                    if delay > 0.0:
+                        self._cond.wait(timeout=delay)
+                        continue
+                    target_window_id = self._pick_next_window_id_locked()
+                    if target_window_id is None:
+                        self._cond.wait()
+                        continue
+                    target_window = self._windows.get(target_window_id)
+                    if target_window is None:
+                        self._ready_window_ids.discard(target_window_id)
+                        target_window_id = None
+                        self._cond.wait()
+                        continue
+                    self._active_id = target_window_id
+                    break
+
+            started = False
+            try:
+                started = bool(target_window.trigger_alert()) if target_window is not None else False
+            except Exception:
+                started = False
+
+            if started:
+                continue
+
+            with self._cond:
+                if target_window_id is not None and self._active_id == target_window_id:
+                    self._active_id = None
+                self._cond.notify_all()
 
 
 def focus_simulation_window(window_title: str) -> None:
@@ -69,8 +206,6 @@ class DistractionWindow(threading.Thread):
         coordinator: DistractionCoordinator,
         min_keypresses: int,
         max_keypresses: int,
-        min_interval_seconds: float,
-        max_interval_seconds: float,
         flash_duration_seconds: float,
         flash_start_interval_seconds: float,
         flash_min_interval_seconds: float,
@@ -94,8 +229,6 @@ class DistractionWindow(threading.Thread):
         self._coord = coordinator
         self._min_keypresses = max(1, int(min_keypresses))
         self._max_keypresses = max(self._min_keypresses, int(max_keypresses))
-        self._min_interval = float(min_interval_seconds)
-        self._max_interval = float(max_interval_seconds)
         self._flash_duration = float(flash_duration_seconds)
         self._flash_start_interval = float(flash_start_interval_seconds)
         self._flash_min_interval = float(flash_min_interval_seconds)
@@ -128,6 +261,10 @@ class DistractionWindow(threading.Thread):
         self._expected_vk = None
         self._beep_wav: Optional[bytes] = None
 
+    @property
+    def window_id(self) -> str:
+        return self._id
+
     def stop(self) -> None:
         """Stop the window and any active audio."""
         self._stop_event.set()
@@ -142,7 +279,7 @@ class DistractionWindow(threading.Thread):
         # will observe _stop_event and destroy the root safely.
 
     def run(self) -> None:
-        """Start the Tkinter event loop and schedule alerts."""
+        """Start the Tkinter event loop."""
         if tk is None:
             return
 
@@ -187,8 +324,8 @@ class DistractionWindow(threading.Thread):
 
         self._set_idle()
         self._start_key_listener()
+        self._coord.notify_window_ready(self._id)
         self._root.after(100, self._poll_stop)
-        self._schedule_next()
         self._root.mainloop()
 
     def _poll_stop(self) -> None:
@@ -217,21 +354,17 @@ class DistractionWindow(threading.Thread):
         self._expected_vk = None
         self._label.configure(text="", font=("Arial", 18, "bold"))
 
-    def _schedule_next(self) -> None:
-        """Schedule the next alert window."""
+    def trigger_alert(self) -> bool:
+        """Request alert start from a non-Tk thread."""
         if self._stop_event.is_set() or self._root is None:
-            return
-        delay = random.uniform(self._min_interval, self._max_interval)
-        self._root.after(int(delay * 1000), self._try_start_alert)
-
-    def _try_start_alert(self) -> None:
-        """Attempt to start an alert if coordination allows it."""
-        if self._stop_event.is_set() or self._root is None:
-            return
-        if not self._coord.request_start(self._id):
-            self._root.after(500, self._try_start_alert)
-            return
-        self._start_alert()
+            return False
+        if self._awaiting_ack:
+            return False
+        try:
+            self._root.after(0, self._start_alert)
+            return True
+        except Exception:
+            return False
 
     def _start_alert(self) -> None:
         """Start the alert immediately and wait for acknowledgment."""
@@ -328,7 +461,7 @@ class DistractionWindow(threading.Thread):
         threading.Thread(target=_target, daemon=True).start()
 
     def _acknowledge(self) -> None:
-        """Clear the alarm state and schedule the next alert."""
+        """Clear the alarm state and notify the coordinator."""
         if self._root is None:
             return
         if not self._awaiting_ack:
@@ -345,7 +478,6 @@ class DistractionWindow(threading.Thread):
         self._coord.finish(self._id)
         self._set_idle()
         self._focus_callback()
-        self._schedule_next()
         self._run_callback_async(self._on_finish, self._id)
 
     def _start_key_listener(self) -> None:

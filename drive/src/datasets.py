@@ -454,6 +454,18 @@ class BaselineDrivingTimeLogger:
         arousal_value = self._format_arousal(pre_drive_snapshot.value)
         return hr_value, arousal_value
 
+    def require_pre_drive_baseline_metrics(
+        self,
+        pre_drive_snapshot: Optional[ArousalSnapshot] = None,
+    ) -> Tuple[int, float]:
+        """Return CSV-safe baseline metrics or raise if either value is missing."""
+        hr_value, arousal_value = self._resolve_baseline_metrics(
+            pre_drive_snapshot=pre_drive_snapshot
+        )
+        if hr_value == "" or arousal_value == "":
+            raise ValueError("pre-drive snapshot missing valid hr/arousal baseline values")
+        return int(hr_value), float(arousal_value)
+
     def log_run_duration(
         self,
         run_duration_seconds: float,

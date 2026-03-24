@@ -144,9 +144,11 @@ class DistractionConfig:
     excluded_letters: List[str]
     min_keypresses: int
     max_keypresses: int
-    min_interval_seconds: float
-    max_interval_seconds: float
-    min_gap_between_windows_seconds: float
+    initial_free_drive_seconds: float
+    recovery_seconds: float
+    post_recovery_min_interval_seconds: float
+    post_recovery_max_interval_seconds: float
+    final_free_drive_seconds: float
     flash_duration_seconds: float
     flash_start_interval_seconds: float
     flash_min_interval_seconds: float
@@ -350,17 +352,25 @@ def load_config(path: str) -> ScenarioConfig:
     )
 
     dis_raw = _get(raw, "distractions", {})
+    post_recovery_min_interval = float(
+        _get(dis_raw, "post_recovery_min_interval_seconds", _get(dis_raw, "min_interval_seconds", 30.0))
+    )
+    post_recovery_max_interval = float(
+        _get(dis_raw, "post_recovery_max_interval_seconds", _get(dis_raw, "max_interval_seconds", 40.0))
+    )
     dis_cfg = DistractionConfig(
         enabled=bool(_get(dis_raw, "enabled", True)),
         fullscreen=bool(_get(dis_raw, "fullscreen", False)),
         fill_monitor=bool(_get(dis_raw, "fill_monitor", False)),
         steal_focus=bool(_get(dis_raw, "steal_focus", False)),
         excluded_letters=[str(x) for x in _get(dis_raw, "excluded_letters", []) or []],
-        min_keypresses=int(_get(dis_raw, "min_keypresses", 2)),
-        max_keypresses=int(_get(dis_raw, "max_keypresses", 6)),
-        min_interval_seconds=float(_get(dis_raw, "min_interval_seconds", 25.0)),
-        max_interval_seconds=float(_get(dis_raw, "max_interval_seconds", 35.0)),
-        min_gap_between_windows_seconds=float(_get(dis_raw, "min_gap_between_windows_seconds", 5.0)),
+        min_keypresses=int(_get(dis_raw, "min_keypresses", 3)),
+        max_keypresses=int(_get(dis_raw, "max_keypresses", 5)),
+        initial_free_drive_seconds=float(_get(dis_raw, "initial_free_drive_seconds", 30.0)),
+        recovery_seconds=float(_get(dis_raw, "recovery_seconds", 15.0)),
+        post_recovery_min_interval_seconds=post_recovery_min_interval,
+        post_recovery_max_interval_seconds=max(post_recovery_min_interval, post_recovery_max_interval),
+        final_free_drive_seconds=float(_get(dis_raw, "final_free_drive_seconds", 30.0)),
         flash_duration_seconds=float(_get(dis_raw, "flash_duration_seconds", 5.0)),
         flash_start_interval_seconds=float(_get(dis_raw, "flash_start_interval_seconds", 0.5)),
         flash_min_interval_seconds=float(_get(dis_raw, "flash_min_interval_seconds", 0.05)),

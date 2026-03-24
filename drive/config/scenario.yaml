@@ -102,9 +102,9 @@ experiment:
   run_id: 1
   weather_label: "day"
   output_dir: "data"
-  max_duration_seconds: 300  # stop scenario after 5 minutes; <= 0 disables timeout
+  max_duration_seconds: 900  # stop scenario after 15 minutes; <= 0 disables timeout
   # baseline | distraction
-  dataset_profile: "baseline"
+  dataset_profile: "distraction"
   baseline_dataset_suffix: "_baseline"
   distraction_dataset_suffix: "_distraction"
   mode: "train"  # train | test
@@ -145,8 +145,13 @@ distractions:
   fullscreen: false
   fill_monitor: true
   steal_focus: false
-  min_keypresses: 2
+  min_keypresses: 3
   max_keypresses: 5
+  initial_free_drive_seconds: 30.0
+  recovery_seconds: 15.0
+  post_recovery_min_interval_seconds: 30.0
+  post_recovery_max_interval_seconds: 40.0
+  final_free_drive_seconds: 30.0
   excluded_letters:
     - W
     - S
@@ -167,9 +172,6 @@ distractions:
     - B
     - R
     - H
-  min_interval_seconds: 12.0
-  max_interval_seconds: 20.0
-  min_gap_between_windows_seconds: 7.0
   flash_duration_seconds: 5.0
   flash_start_interval_seconds: 0.5
   flash_min_interval_seconds: 0.05
