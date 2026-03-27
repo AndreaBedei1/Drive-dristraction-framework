@@ -125,7 +125,7 @@ SEVERITY = {
 # suppresses physiological signal in population-level LOPO.
 
 # Windowing
-LOOKBACK_S     = 45
+LOOKBACK_S     = 90
 WINDOW_STEP    = 5
 GAP, HORIZON   = 5, 10
 EVENT_VICINITY = 10
@@ -689,20 +689,22 @@ class DANNDualBranchTCN(nn.Module):
     def __init__(self, n_phys_feats: int, n_kin_feats: int):
         super().__init__()
 
-        # Physiology branch — RF ≈ 43 ts (d=1,4,16), captures tonic arousal/HR lag
+        # Physiology branch — RF ≈ 171 ts (d=1,4,16,64), captures tonic arousal/HR lag
         self.phys_branch = nn.Sequential(
             ResBlock(n_phys_feats, self.PHYS_D,  1),
             ResBlock(self.PHYS_D,  self.PHYS_D,  4),
             ResBlock(self.PHYS_D,  self.PHYS_D, 16),
+            ResBlock(self.PHYS_D,  self.PHYS_D, 64),
         )
         self.phys_attn = TemporalAttention(self.PHYS_D)
 
-        # Kinematics branch — RF ≈ 47 ts (d=1,2,4,16), captures reactive deviations
+        # Kinematics branch — RF ≈ 95 ts (d=1,2,4,8,32), captures reactive deviations
         self.kin_branch = nn.Sequential(
             ResBlock(n_kin_feats,      self.KIN_D // 2,  1),
             ResBlock(self.KIN_D // 2,  self.KIN_D,       2),
             ResBlock(self.KIN_D,       self.KIN_D,        4),
-            ResBlock(self.KIN_D,       self.KIN_D,       16),
+            ResBlock(self.KIN_D,       self.KIN_D,        8),
+            ResBlock(self.KIN_D,       self.KIN_D,       32),
         )
         self.kin_attn = TemporalAttention(self.KIN_D)
 
@@ -797,7 +799,9 @@ class SingleBranchTCN(nn.Module):
             ResBlock(in_channels, 32,  1),
             ResBlock(32,          64,  2),
             ResBlock(64,          64,  4),
+            ResBlock(64,          64,  8),
             ResBlock(64,          64, 16),
+            ResBlock(64,          64, 32),
         )
         self.attention = TemporalAttention(64)
         self.head = nn.Sequential(
@@ -1347,10 +1351,10 @@ def main():
     print(f"{'='*72}")
     print(f"Signals           : {SIGNAL_COLS}")
     print(f"Physiology branch : {PHYS_COLS}  ({n_phys_feat} engineered features)")
-    print(f"  TCN blocks      : d=1,4,16  →  RF ≈ 43 timesteps")
+    print(f"  TCN blocks      : d=1,4,16,64  →  RF ≈ 171 timesteps")
     print(f"  Output channels : {DANNDualBranchTCN.PHYS_D}")
     print(f"Kinematics branch : {KIN_COLS}  ({n_kin_feat} engineered features)")
-    print(f"  TCN blocks      : d=1,2,4,16  →  RF ≈ 47 timesteps")
+    print(f"  TCN blocks      : d=1,2,4,8,32  →  RF ≈ 95 timesteps")
     print(f"  Output channels : {DANNDualBranchTCN.KIN_D}")
     print(f"CLC excluded      : center_line_crossing removed from SEVERITY")
     print(f"SMOTE             : {'minority oversampling on training fold (k=' + str(SMOTE_K_NEIGHBORS) + ')' if USE_SMOTE else 'DISABLED — class-weighted focal loss only'}")
