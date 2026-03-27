@@ -99,6 +99,7 @@ from sklearn.metrics import (roc_auc_score, roc_curve, brier_score_loss,
                               precision_score, recall_score)
 from sklearn.preprocessing import StandardScaler
 from scipy.stats import mannwhitneyu, wilcoxon, pearsonr
+from scipy.spatial.distance import cdist
 import xgboost as xgb
 import random
 
@@ -363,8 +364,7 @@ def smote_oversample(X_p, X_k, X_s, y, k=SMOTE_K_NEIGHBORS, rng=None):
                 np.concatenate([y,   np.ones(n_synthetic, dtype=y.dtype)]))
 
     # For each positive, find k nearest neighbours (among positives only)
-    diffs = X_concat[:, None, :] - X_concat[None, :, :]   # (n_pos, n_pos, D)
-    dists = np.sqrt((diffs ** 2).sum(axis=-1))             # (n_pos, n_pos)
+    dists = cdist(X_concat, X_concat, metric="euclidean")  # (n_pos, n_pos)
     np.fill_diagonal(dists, np.inf)
     nn_idx = np.argsort(dists, axis=1)[:, :k_eff]         # (n_pos, k_eff)
 
