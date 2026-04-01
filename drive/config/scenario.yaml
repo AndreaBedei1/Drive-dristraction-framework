@@ -71,7 +71,7 @@ route:
   sampling_resolution: 2.0
   waypoint_reached_threshold: 4.0
 
-  draw: true
+  draw: false
   draw_step: 10
   draw_life_time: 999999.0
 
@@ -98,7 +98,7 @@ manual_control:
     # - "-a"
 
 experiment:
-  user_id: "participant_8"
+  user_id: "participant_10"
   run_id: 1
   weather_label: "day"
   output_dir: "data"
