@@ -877,7 +877,8 @@ def main() -> int:
             f"{cfg.distractions.post_recovery_min_interval_seconds:.0f}-"
             f"{cfg.distractions.post_recovery_max_interval_seconds:.0f}s, "
             f"final_free={cfg.distractions.final_free_drive_seconds:.0f}s, "
-            f"keypresses={cfg.distractions.min_keypresses}-{cfg.distractions.max_keypresses}."
+            f"keypresses={cfg.distractions.min_keypresses}-{cfg.distractions.max_keypresses}, "
+            "keys=0-9."
         )
 
         def _with_hero(fn) -> None:
@@ -915,7 +916,7 @@ def main() -> int:
                 fill_monitor=cfg.distractions.fill_monitor,
                 steal_focus=cfg.distractions.steal_focus,
                 anchor="top_left",
-                excluded_letters=tuple(cfg.distractions.excluded_letters),
+                excluded_digits=tuple(cfg.distractions.excluded_digits),
             ),
             DistractionWindow(
                 window_id="window_2",
@@ -936,7 +937,7 @@ def main() -> int:
                 fill_monitor=cfg.distractions.fill_monitor,
                 steal_focus=cfg.distractions.steal_focus,
                 anchor="top_right",
-                excluded_letters=tuple(cfg.distractions.excluded_letters),
+                excluded_digits=tuple(cfg.distractions.excluded_digits),
             ),
         ]
         for w in distraction_windows:

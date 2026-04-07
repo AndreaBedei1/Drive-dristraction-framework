@@ -141,7 +141,7 @@ class DistractionConfig:
     fullscreen: bool
     fill_monitor: bool
     steal_focus: bool
-    excluded_letters: List[str]
+    excluded_digits: List[str]
     min_keypresses: int
     max_keypresses: int
     initial_free_drive_seconds: float
@@ -363,7 +363,10 @@ def load_config(path: str) -> ScenarioConfig:
         fullscreen=bool(_get(dis_raw, "fullscreen", False)),
         fill_monitor=bool(_get(dis_raw, "fill_monitor", False)),
         steal_focus=bool(_get(dis_raw, "steal_focus", False)),
-        excluded_letters=[str(x) for x in _get(dis_raw, "excluded_letters", []) or []],
+        excluded_digits=[
+            str(x)
+            for x in _get(dis_raw, "excluded_digits", _get(dis_raw, "excluded_letters", [])) or []
+        ],
         min_keypresses=int(_get(dis_raw, "min_keypresses", 3)),
         max_keypresses=int(_get(dis_raw, "max_keypresses", 5)),
         initial_free_drive_seconds=float(_get(dis_raw, "initial_free_drive_seconds", 30.0)),

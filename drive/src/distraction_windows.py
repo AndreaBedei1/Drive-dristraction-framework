@@ -3,7 +3,6 @@ from __future__ import annotations
 """Distraction window UI and coordination logic."""
 
 import random
-import string
 import threading
 import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
@@ -18,6 +17,18 @@ try:
     import tkinter as tk
 except Exception:
     tk = None
+
+
+_ALLOWED_DIGITS = tuple(str(i) for i in range(10))
+_NUMPAD_VK_BASE = 0x60
+
+
+def _digit_to_virtual_keys(digit: str) -> Tuple[int, ...]:
+    """Return the top-row and numpad virtual keys for a digit."""
+    if len(digit) != 1 or not digit.isdigit():
+        return tuple()
+    value = int(digit)
+    return (ord(digit), _NUMPAD_VK_BASE + value)
 
 
 class DistractionCoordinator:
@@ -220,7 +231,7 @@ class DistractionWindow(threading.Thread):
         fill_monitor: bool = False,
         steal_focus: bool = False,
         anchor: str = "center",
-        excluded_letters: Optional[Tuple[str, ...]] = None,
+        excluded_digits: Optional[Tuple[str, ...]] = None,
     ) -> None:
         """Create a distraction window with timing and audio settings."""
         super().__init__(daemon=True)
@@ -243,10 +254,14 @@ class DistractionWindow(threading.Thread):
         self._fill_monitor = bool(fill_monitor)
         self._steal_focus = bool(steal_focus)
         self._anchor = str(anchor or "center").lower()
-        self._excluded_letters = {str(x).upper() for x in (excluded_letters or ())}
-        self._allowed_letters = [c for c in string.ascii_uppercase if c not in self._excluded_letters]
-        if not self._allowed_letters:
-            self._allowed_letters = list(string.ascii_uppercase)
+        self._excluded_digits = {
+            str(x).strip()
+            for x in (excluded_digits or ())
+            if len(str(x).strip()) == 1 and str(x).strip().isdigit()
+        }
+        self._allowed_digits = [digit for digit in _ALLOWED_DIGITS if digit not in self._excluded_digits]
+        if not self._allowed_digits:
+            self._allowed_digits = list(_ALLOWED_DIGITS)
 
         self._root = None
         self._label = None
@@ -255,10 +270,10 @@ class DistractionWindow(threading.Thread):
         self._alert_start_time = 0.0
         self._flash_interval = self._flash_start_interval
         self._awaiting_ack = False
-        self._expected_letters = []
+        self._expected_digits = []
         self._expected_index = 0
-        self._expected_letter = None
-        self._expected_vk = None
+        self._expected_digit = None
+        self._expected_vks: Tuple[int, ...] = tuple()
         self._beep_wav: Optional[bytes] = None
 
     @property
@@ -348,10 +363,10 @@ class DistractionWindow(threading.Thread):
         if self._root is None or self._label is None:
             return
         self._root.configure(bg="#1e1e1e")
-        self._expected_letters = []
+        self._expected_digits = []
         self._expected_index = 0
-        self._expected_letter = None
-        self._expected_vk = None
+        self._expected_digit = None
+        self._expected_vks = tuple()
         self._label.configure(text="", font=("Arial", 18, "bold"))
 
     def trigger_alert(self) -> bool:
@@ -371,13 +386,13 @@ class DistractionWindow(threading.Thread):
         if self._root is None or self._label is None:
             return
         self._root.configure(bg="#b00020")
-        max_count = max(1, min(self._max_keypresses, len(self._allowed_letters)))
+        max_count = max(1, min(self._max_keypresses, len(self._allowed_digits)))
         min_count = max(1, min(self._min_keypresses, max_count))
         count = random.randint(min_count, max_count)
-        self._expected_letters = random.sample(self._allowed_letters, k=count)
+        self._expected_digits = random.sample(self._allowed_digits, k=count)
         self._expected_index = 0
-        self._expected_letter = self._expected_letters[0] if self._expected_letters else None
-        self._expected_vk = ord(self._expected_letter) if self._expected_letter else None
+        self._expected_digit = self._expected_digits[0] if self._expected_digits else None
+        self._expected_vks = _digit_to_virtual_keys(self._expected_digit) if self._expected_digit else tuple()
         font_size = 96
         if count == 2:
             font_size = 84
@@ -404,23 +419,23 @@ class DistractionWindow(threading.Thread):
         """Handle a keyboard acknowledgment."""
         if not self._awaiting_ack:
             return
-        if not self._expected_letter:
+        if not self._expected_digit:
             return
         try:
-            pressed = event.char.upper() if event.char else ""
+            pressed = event.char if event.char else ""
         except Exception:
             pressed = ""
-        if pressed == self._expected_letter:
+        if pressed == self._expected_digit:
             self._advance_expected()
 
     def _on_global_vk(self, vk: int) -> None:
         """Advance only if the global key still matches the expected key."""
         if not self._awaiting_ack:
             return
-        if self._expected_vk is None:
+        if not self._expected_vks:
             return
         try:
-            if int(vk) != int(self._expected_vk):
+            if int(vk) not in self._expected_vks:
                 return
         except Exception:
             return
@@ -430,19 +445,19 @@ class DistractionWindow(threading.Thread):
         if not self._awaiting_ack:
             return
         self._expected_index += 1
-        if self._expected_index >= len(self._expected_letters):
+        if self._expected_index >= len(self._expected_digits):
             self._acknowledge()
             return
-        self._expected_letter = self._expected_letters[self._expected_index]
-        self._expected_vk = ord(self._expected_letter)
+        self._expected_digit = self._expected_digits[self._expected_index]
+        self._expected_vks = _digit_to_virtual_keys(self._expected_digit)
         if self._label is not None:
             self._label.configure(text=self._format_prompt())
 
     def _format_prompt(self) -> str:
-        if not self._expected_letters:
+        if not self._expected_digits:
             return ""
         parts = []
-        for i, ch in enumerate(self._expected_letters):
+        for i, ch in enumerate(self._expected_digits):
             if i == self._expected_index:
                 parts.append(f"[{ch}]")
             else:
@@ -486,28 +501,33 @@ class DistractionWindow(threading.Thread):
             return
 
         def _loop() -> None:
-            last_down = False
-            last_vk = None
+            last_down_vks: Set[int] = set()
+            last_vks: Tuple[int, ...] = tuple()
             while not self._stop_event.is_set():
-                vk = self._expected_vk if self._awaiting_ack else None
-                if vk != last_vk:
-                    last_down = False
-                    last_vk = vk
-                if vk is None:
+                vks = self._expected_vks if self._awaiting_ack else tuple()
+                if vks != last_vks:
+                    last_down_vks.clear()
+                    last_vks = vks
+                if not vks:
                     time.sleep(0.05)
                     continue
-                try:
-                    down = bool(ctypes.windll.user32.GetAsyncKeyState(int(vk)) & 0x8000)
-                except Exception:
-                    time.sleep(0.05)
-                    continue
-                if down and not last_down and self._awaiting_ack:
+                current_down_vks: Set[int] = set()
+                for vk in vks:
+                    try:
+                        down = bool(ctypes.windll.user32.GetAsyncKeyState(int(vk)) & 0x8000)
+                    except Exception:
+                        continue
+                    if not down:
+                        continue
+                    current_down_vks.add(int(vk))
+                    if int(vk) in last_down_vks or not self._awaiting_ack:
+                        continue
                     try:
                         if self._root is not None:
                             self._root.after(0, lambda _vk=vk: self._on_global_vk(_vk))
                     except Exception:
                         pass
-                last_down = down
+                last_down_vks = current_down_vks
                 time.sleep(0.03)
 
         threading.Thread(target=_loop, daemon=True).start()
