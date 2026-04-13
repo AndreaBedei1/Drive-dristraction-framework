@@ -7,7 +7,11 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\(''drive/tcn_fomaml.py''\\).read\\(\\)\\); print\\(''syntax OK''\\)\")",
       "Bash(python -m py_compile drive/tcn_fomaml.py)",
       "Bash(ls -la /Users/lorenzobacchiani/Desktop/Drive-dristraction-framework/drive/*.py)",
-      "Read(//Users/lorenzobacchiani/~/.claude/projects/-Users-lorenzobacchiani-Desktop-Drive-dristraction-framework/0d354d8a-9fb4-468d-97af-d06d3a2606b2/tool-results/**)"
+      "Read(//Users/lorenzobacchiani/~/.claude/projects/-Users-lorenzobacchiani-Desktop-Drive-dristraction-framework/0d354d8a-9fb4-468d-97af-d06d3a2606b2/tool-results/**)",
+      "Bash(python -m py_compile drive/tcn_dann_ext4.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''drive/tcn_dann_ext4.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\(''drive/tcn_dann_ext4.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''drive/tcn_dann_ext4.py''\\).read\\(\\)\\); print\\(''OK''\\)\")"
     ]
   }
 }
