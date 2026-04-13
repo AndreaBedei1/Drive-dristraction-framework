@@ -27,7 +27,7 @@ Rationale (from ext4 LOPO ablation, N=31 drivers):
 
 Architecture:
   1. Single kinematics TCN branch (4 signals × 5 engineered features = 20-d input).
-     ResBlocks d=1,2,4,8,32 → RF ≈ 95 timesteps, TemporalAttention → 64-d pool.
+     ResBlocks d=1,2,4,8,16 → RF ≈ 63 timesteps, TemporalAttention → 64-d pool.
   2. Physiological scalars injected at head:
      [mean(arousal), std(arousal), mean(HR), std(HR)] computed from the raw 90s
      window after LOO route renormalisation; scaled by a separate StandardScaler.
@@ -533,7 +533,7 @@ class KinTCN(nn.Module):
             ResBlock(self.KIN_D // 2, self.KIN_D,       2),
             ResBlock(self.KIN_D,      self.KIN_D,        4),
             ResBlock(self.KIN_D,      self.KIN_D,        8),
-            ResBlock(self.KIN_D,      self.KIN_D,       32),
+            ResBlock(self.KIN_D,      self.KIN_D,       16),
         )
         self.kin_attn = TemporalAttention(self.KIN_D)
         head_in       = self.KIN_D + phys_scalar_d + spectral_dim
@@ -886,7 +886,7 @@ def main():
     print("KIN-TCN+PHYS — PIPELINE CONFIGURATION")
     print(f"{'='*72}")
     print(f"Kinematics branch : {KIN_COLS}  ({n_kin_feat} engineered features)")
-    print(f"  TCN blocks      : d=1,2,4,8,32  →  RF ≈ 95 timesteps")
+    print(f"  TCN blocks      : d=1,2,4,8,16  →  RF ≈ 63 timesteps")
     print(f"  Output channels : {KinTCN.KIN_D}")
     print(f"Phys scalars      : {PHYS_COLS}  →  [mean, std] each = {PHYS_SCALAR_D}-d")
     print(f"Spectral features : {len(KIN_COLS)} kin signals × {len(SPECTRAL_BANDS)} bands = {KIN_SPECTRAL_DIM}-d")
