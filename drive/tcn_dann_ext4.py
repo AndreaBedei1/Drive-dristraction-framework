@@ -418,16 +418,13 @@ SMOTE_K_NEIGHBORS  = 5      # k for SMOTE nearest-neighbour search
 # Prevents SMOTE interpolation choices from being correlated with the val split.
 SMOTE_SEED_SALT    = 0xABCD
 
-# PYTHONHASHSEED must be set *before* interpreter startup (CPython limitation).
-# Setting it here via os.environ only propagates to child processes, not to the
-# running interpreter — so we do NOT set it here (that would defeat the guard).
+# PYTHONHASHSEED must be set before interpreter startup (CPython limitation).
+# If not already set correctly, re-exec this script with the env var in place.
 if os.environ.get("PYTHONHASHSEED") != str(SEED):
-    sys.exit(
-        f"[ERROR] PYTHONHASHSEED must be set to {SEED} before the interpreter starts.\n"
-        f"  os.environ changes have no effect on the running process (CPython limitation).\n"
-        f"  Relaunch with:  PYTHONHASHSEED={SEED} python {os.path.basename(__file__)}\n"
-        f"  Current value : {os.environ.get('PYTHONHASHSEED', 'unset')}"
-    )
+    import subprocess
+    env = os.environ.copy()
+    env["PYTHONHASHSEED"] = str(SEED)
+    sys.exit(subprocess.call([sys.executable] + sys.argv, env=env))
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
@@ -435,6 +432,8 @@ torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True   # ensures bit-exact reproducibility
 torch.backends.cudnn.benchmark     = False  # benchmark=True disables determinism
 torch.set_num_threads(1)                    # strict cross-machine CPU reproducibility
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"   # add this
+torch.use_deterministic_algorithms(True)             # unconditional
 
 OUT_DIR = Path(__file__).parent / "impairment_results"
 OUT_DIR.mkdir(exist_ok=True)
