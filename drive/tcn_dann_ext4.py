@@ -2054,6 +2054,7 @@ def _loo_renorm(X_arr, pid_arr, routes_arr,
 
 def main():
     df = pd.read_csv(Path(__file__).parent / "relab+unibo_dataset.csv")
+    df["Timestamp"] = pd.to_numeric(df["Timestamp"], errors="coerce")
     global_sample_dt = _check_sampling_rate(df)   # median Δt in seconds; used for FFT bin labels
     df = mark_event_onsets(df)
 
