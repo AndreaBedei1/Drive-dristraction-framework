@@ -2027,6 +2027,8 @@ def _loo_renorm(X_arr, pid_arr, routes_arr,
                 if key_own not in all_session_stats or key_rte not in route_sum_mus:
                     continue
                 own_mu, own_sig_raw = all_session_stats[key_own]   # raw σ, no epsilon
+                if math.isnan(own_mu) or math.isnan(own_sig_raw):
+                    continue  # session had all-NaN prefix for this column — skip renorm
                 n_rte = route_counts[key_rte]
                 if n_rte < 2:
                     # Singleton route: LOO undefined, per-session z-score retained.
@@ -2054,7 +2056,7 @@ def _loo_renorm(X_arr, pid_arr, routes_arr,
 
 def main():
     df = pd.read_csv(Path(__file__).parent / "relab+unibo_dataset.csv")
-    df["Timestamp"] = pd.to_numeric(df["Timestamp"], errors="coerce")
+    df["Timestamp"] = pd.to_datetime(df["Timestamp"], utc=True).astype("int64") / 1e9
     global_sample_dt = _check_sampling_rate(df)   # median Δt in seconds; used for FFT bin labels
     df = mark_event_onsets(df)
 
@@ -2230,6 +2232,8 @@ def main():
             if pid_s == d:
                 continue  # exclude test driver from both references
             key = (route_s, col_s)
+            if math.isnan(mu_s) or math.isnan(sig_s):
+                continue  # skip sessions with all-NaN prefix for this column
             # Test reference: all non-test drivers (val included) for a larger,
             # lower-variance normalization pool.
             _route_mus_d.setdefault(key, []).append(mu_s)
@@ -2237,6 +2241,8 @@ def main():
             # Training LOO reference: exclude val drivers to prevent any indirect
             # path from val data into training window normalization.
             if pid_s not in val_ids_set:
+                if math.isnan(mu_s) or math.isnan(sig_s):
+                    continue  # skip sessions with all-NaN prefix for this column
                 _route_sum_mus[key]   = _route_sum_mus.get(key,   0.0) + mu_s
                 _route_sum_sigs2[key] = _route_sum_sigs2.get(key, 0.0) + sig_s ** 2
                 _route_counts[key]    = _route_counts.get(key,    0)   + 1
