@@ -2278,6 +2278,7 @@ def main():
                 X_te[r_mask, :, ci_v] = (
                     X_te[r_mask, :, ci_v] * (test_sig_raw_v + 1e-6) + test_mu_v - tr_mu_v
                 ) / max(tr_sig_v, 1e-6)
+        X_te = np.clip(X_te, -5.0, 5.0)
 
         # ── Re-normalise training windows with LOO route statistics ───────────────
         # normalize_signals() z-scored each driver by their own session stats.
@@ -2288,6 +2289,10 @@ def main():
         X_tr = _loo_renorm(X_tr, pid_tr, routes_tr,
                            all_session_stats, _route_sum_mus, _route_sum_sigs2,
                            _route_counts, ci_norm_map, f"train (test={d})")
+        print(f"  [DIAG] X_tr after renorm: mean={X_tr.mean():.4f}  std={X_tr.std():.4f}  "
+              f"nan={np.isnan(X_tr).sum()}  inf={np.isinf(X_tr).sum()}  "
+              f"max={np.abs(X_tr).max():.2f}")
+        X_tr = np.clip(X_tr, -5.0, 5.0)
 
         # Build val windows directly from the globally normalized df for val-driver
         # sessions only, using uniform stride (fine_stride=False).
@@ -2320,6 +2325,7 @@ def main():
                     X_val_raw[_vmask, :, _vci] = (
                         X_val_raw[_vmask, :, _vci] * (_vsig_raw + 1e-6) + _vmu - _tr_mu
                     ) / max(_tr_sig, 1e-6)
+        X_val_raw = np.clip(X_val_raw, -5.0, 5.0)
 
         if len(np.unique(y_val_d)) < 2:
             print(f"{d:<10} | [WARN] val fold single-class — "
