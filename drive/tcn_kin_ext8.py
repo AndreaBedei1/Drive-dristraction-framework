@@ -880,7 +880,6 @@ def main():
     print(f"  Output channels : {KinTCN.KIN_D}")
     print(f"Phys scalars      : {PHYS_COLS}  →  [mean, std] each = {PHYS_SCALAR_D}-d")
     print(f"Spectral features : dropped (permutation Δ≈0 in ext7)")
-    print(f"  Bands (Hz)      : [0.00,0.10)  [0.10,0.30)  [0.30,0.50]")
     print(f"Head input        : {KinTCN.KIN_D} + {PHYS_SCALAR_D} = {KinTCN.KIN_D + PHYS_SCALAR_D}-d")
     print(f"CLC excluded      : center_line_crossing removed from SEVERITY")
     print(f"SMOTE             : {'k=' + str(SMOTE_K_NEIGHBORS) if USE_SMOTE else 'DISABLED'}")
@@ -1350,31 +1349,9 @@ def main():
         if deltas:
             print(f"    [{branch}] {col:<30} Δ={np.mean(deltas):+.4f} ± {np.std(deltas):.4f}")
 
-    # Spectral band importance
-    print(f"\n  Per-band spectral importance (ΔAUC when band permuted):")
-    for bi, (lo, hi) in enumerate(SPECTRAL_BANDS):
-        band_deltas = []
-        for fi, (model_i, Xk_i, Xps_i, Xs_i, y_i) in enumerate(
-                zip(pool_models_tcnp, pool_Xte_k, pool_Xte_ps, pool_Xte_s, pool_y)):
-            base = safe_auc(y_i, torch.sigmoid(model_i(
-                torch.as_tensor(Xk_i).to(DEVICE),
-                torch.as_tensor(Xps_i).to(DEVICE),
-                torch.as_tensor(Xs_i).to(DEVICE))).detach().cpu().numpy())
-            if base is None: continue
-            rng_pi = np.random.default_rng(SEED ^ fi ^ bi)
-            for _ in range(N_PERM_REPEATS):
-                Xs_perm = Xs_i.copy()
-                perm_idx = rng_pi.permutation(len(Xs_perm))
-                cols = list(range(bi * n_kin, (bi + 1) * n_kin))
-                Xs_perm[:, cols] = Xs_perm[perm_idx, :][:, cols]
-                perm_auc = safe_auc(y_i, torch.sigmoid(model_i(
-                    torch.as_tensor(Xk_i).to(DEVICE),
-                    torch.as_tensor(Xps_i).to(DEVICE),
-                    torch.as_tensor(Xs_perm).to(DEVICE))).detach().cpu().numpy())
-                if perm_auc is not None:
-                    band_deltas.append(base - perm_auc)
-        if band_deltas:
-            print(f"    [{lo:.2f},{hi:.2f})Hz   Δ={np.mean(band_deltas):+.4f} ± {np.std(band_deltas):.4f}")
+    # Spectral band importance — skipped (spectral features dropped in ext8)
+    if KIN_SPECTRAL_DIM > 0:
+        print(f"\n  Per-band spectral importance (ΔAUC when band permuted): N/A (dropped)")
 
     # Per-driver summary
     print(f"\n{'='*72}")
