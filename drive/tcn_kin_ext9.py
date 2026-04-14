@@ -882,6 +882,16 @@ def main():
     (X_raw_all, y_all, scores_all,
      pid_all, etypes_all, routes_all, ts_all) = build_windows(df)
 
+    # Exclude drivers entirely (training + evaluation)
+    keep = ~np.isin(pid_all, list(EXCLUDE_EVAL_DRIVERS))
+    X_raw_all  = X_raw_all[keep]
+    y_all      = y_all[keep]
+    scores_all = scores_all[keep]
+    pid_all    = pid_all[keep]
+    etypes_all = etypes_all[keep]
+    routes_all = routes_all[keep]
+    ts_all     = ts_all[keep]
+
     n_kin_feat = len(KIN_COLS) * 5   # 20
 
     mw_pvals = print_validity_report(X_raw_all, y_all, scores_all, pid_all)
@@ -896,7 +906,7 @@ def main():
     print(f"Spectral features : dropped (permutation Δ≈0 in ext7)")
     print(f"Head input        : {KinTCN.KIN_D} + {PHYS_SCALAR_D} = {KinTCN.KIN_D + PHYS_SCALAR_D}-d")
     print(f"CLC excluded      : center_line_crossing removed from SEVERITY")
-    print(f"Eval excluded     : {sorted(EXCLUDE_EVAL_DRIVERS)} (trained on, not evaluated)")
+    print(f"Excluded entirely : {sorted(EXCLUDE_EVAL_DRIVERS)} (removed from training + evaluation)")
     print(f"SMOTE             : {'k=' + str(SMOTE_K_NEIGHBORS) if USE_SMOTE else 'DISABLED'}")
     print(f"Renorm clip       : ±{RENORM_CLIP}σ (applied after LOO renorm)")
     print(f"Loss              : BCE (balanced by SMOTE; no focal, no pos_weight)")
@@ -911,8 +921,7 @@ def main():
     ci_norm_map = {col: SIGNAL_COLS.index(col) for col in COLS_TO_NORM if col in SIGNAL_COLS}
 
     drivers = [d for d in np.unique(pid_all)
-               if y_all[pid_all == d].sum() >= MIN_EVAL_POSITIVES
-               and d not in EXCLUDE_EVAL_DRIVERS]
+               if y_all[pid_all == d].sum() >= MIN_EVAL_POSITIVES]
 
     hdr = (f"{'Driver':<10} | {'N_win':>5} {'PosR%':>6} | "
            f"{'LR':>7} {'XGB':>7} {'KinTCN':>7} {'Kin+Phys':>9} | "
