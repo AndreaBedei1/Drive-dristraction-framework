@@ -365,30 +365,30 @@ class KinTCN(nn.Module):
             nn.Linear(head_in, 64), nn.ReLU(), nn.Dropout(0.15), nn.Linear(64, 1)
         )
 
-def forward(self, x_kin, x_phys, x_spec):
-        # 1. Kinematic Branch
-        k = x_kin.permute(0, 2, 1)
-        k = self.kin_branch(k)
-        k_pooled = self.kin_attn(k)
+    def forward(self, x_kin, x_phys, x_spec):
+            # 1. Kinematic Branch
+            k = x_kin.permute(0, 2, 1)
+            k = self.kin_branch(k)
+            k_pooled = self.kin_attn(k)
 
-        # 2. Physiological FiLM Generation
-        film_params = self.film(x_phys)
-        gamma, beta = torch.chunk(film_params, 2, dim=1)
-        gamma = torch.tanh(gamma) 
+            # 2. Physiological FiLM Generation
+            film_params = self.film(x_phys)
+            gamma, beta = torch.chunk(film_params, 2, dim=1)
+            gamma = torch.tanh(gamma) 
 
-        # --- OPTION A: PATH DROPOUT ---
-        # During training, we randomly 'mute' the kinematic signal (e.g., 20% of the time).
-        # This forces the head to learn from the 'beta' (bias) which is purely physiological.
-        if self.training and torch.rand(1) < 0.20:
-            k_pooled = torch.zeros_like(k_pooled)
-        # ------------------------------
+            # --- OPTION A: PATH DROPOUT ---
+            # During training, we randomly 'mute' the kinematic signal (e.g., 20% of the time).
+            # This forces the head to learn from the 'beta' (bias) which is purely physiological.
+            if self.training and torch.rand(1) < 0.20:
+                k_pooled = torch.zeros_like(k_pooled)
+            # ------------------------------
 
-        # 3. Modulation
-        # If path is dropped, k_mod becomes purely 'beta'
-        k_mod = k_pooled * (1.0 + gamma) + beta
-        
-        # 4. Final Classification
-        return self.head(k_mod).squeeze(-1)
+            # 3. Modulation
+            # If path is dropped, k_mod becomes purely 'beta'
+            k_mod = k_pooled * (1.0 + gamma) + beta
+            
+            # 4. Final Classification
+            return self.head(k_mod).squeeze(-1)
 
 # ── UTILITIES (unchanged from ext9) ─────────────────────────────────────────────
 
