@@ -159,7 +159,7 @@ MIN_EVAL_POSITIVES = 5
 # Drivers excluded from evaluation (but retained in training for all other folds).
 # These six drivers showed persistent below-chance or near-chance KinTCN performance
 # across ext5/ext7/ext8, indicating structurally atypical impairment profiles.
-EXCLUDE_EVAL_DRIVERS = {"0C06", "0A02", "0B05", "0B07", "0B08R", "0D10"}
+EXCLUDE_EVAL_DRIVERS = {}#{"0C06", "0A02", "0B05", "0B07", "0B08R", "0D10"}
 N_PERM_REPEATS     = 10
 
 # SMOTE
