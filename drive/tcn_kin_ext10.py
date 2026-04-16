@@ -130,11 +130,11 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark     = False
-torch.set_num_threads(1)
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.deterministic = False
+torch.backends.cudnn.benchmark     = True
+# torch.set_num_threads(1)
+# os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+# torch.use_deterministic_algorithms(True)
 
 OUT_DIR = Path(__file__).parent / "impairment_results"
 OUT_DIR.mkdir(exist_ok=True)
