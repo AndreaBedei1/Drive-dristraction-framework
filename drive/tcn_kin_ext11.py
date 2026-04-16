@@ -342,8 +342,10 @@ class TemporalAttention(nn.Module):
 
 class KinTCN(nn.Module):
     KIN_D = 64
+
     def __init__(self, n_kin_feats: int, phys_scalar_d: int, spectral_dim: int):
         super().__init__()
+        # 1. Kinematic Branch
         self.kin_branch = nn.Sequential(
             ResBlock(n_kin_feats, self.KIN_D//2, 1),
             ResBlock(self.KIN_D//2, self.KIN_D, 2),
@@ -353,42 +355,49 @@ class KinTCN(nn.Module):
         )
         self.kin_attn = TemporalAttention(self.KIN_D)
 
-        # FiLM conditioner with a bit more capacity for the dropout challenge
+        # 2. FiLM Generator
         self.film = nn.Sequential(
             nn.Linear(phys_scalar_d, 32),
             nn.ReLU(),
             nn.Linear(32, self.KIN_D * 2) 
         )
 
-        head_in = self.KIN_D + phys_scalar_d + spectral_dim
+        # --- DIMENSION FIX ---
+        # Since we use FiLM, physiology is embedded in the 64-D k_mod.
+        # We no longer concat raw phys here, so head_in must be KIN_D.
+        head_in = self.KIN_D 
+        # ---------------------
+
         self.head = nn.Sequential(
-            nn.Linear(head_in, 64), nn.ReLU(), nn.Dropout(0.15), nn.Linear(64, 1)
+            nn.Linear(head_in, 64), 
+            nn.ReLU(), 
+            nn.Dropout(0.15), 
+            nn.Linear(64, 1)
         )
 
     def forward(self, x_kin, x_phys, x_spec):
-            # 1. Kinematic Branch
-            k = x_kin.permute(0, 2, 1)
-            k = self.kin_branch(k)
-            k_pooled = self.kin_attn(k)
+        # A. Kinematic Path
+        k = x_kin.permute(0, 2, 1)
+        k = self.kin_branch(k)
+        k_pooled = self.kin_attn(k)
 
-            # 2. Physiological FiLM Generation
-            film_params = self.film(x_phys)
-            gamma, beta = torch.chunk(film_params, 2, dim=1)
-            gamma = torch.tanh(gamma) 
+        # B. FiLM Parameters
+        film_params = self.film(x_phys)
+        gamma, beta = torch.chunk(film_params, 2, dim=1)
+        gamma = torch.tanh(gamma) 
 
-            # --- OPTION A: PATH DROPOUT ---
-            # During training, we randomly 'mute' the kinematic signal (e.g., 20% of the time).
-            # This forces the head to learn from the 'beta' (bias) which is purely physiological.
-            if self.training and torch.rand(1) < 0.20:
-                k_pooled = torch.zeros_like(k_pooled)
-            # ------------------------------
+        # --- OPTION A: PATH DROPOUT (Stochastic Depth) ---
+        # 20% of the time during training, we zero out the kinematics.
+        # This forces the model to rely solely on the 'beta' shift from physiology.
+        if self.training and torch.rand(1) < 0.20:
+            k_pooled = torch.zeros_like(k_pooled)
+        # -------------------------------------------------
 
-            # 3. Modulation
-            # If path is dropped, k_mod becomes purely 'beta'
-            k_mod = k_pooled * (1.0 + gamma) + beta
-            
-            # 4. Final Classification
-            return self.head(k_mod).squeeze(-1)
+        # C. Modulation
+        k_mod = k_pooled * (1.0 + gamma) + beta
+        
+        # D. Output
+        return self.head(k_mod).squeeze(-1)
 
 # ── UTILITIES (unchanged from ext9) ─────────────────────────────────────────────
 
