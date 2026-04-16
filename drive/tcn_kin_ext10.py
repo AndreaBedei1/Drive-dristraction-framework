@@ -1,36 +1,14 @@
 """
 tcn_kin_ext11.py
 
-Kinematics TCN with FiLM Physiological Conditioning (Kin-TCN+Phys ext11).
+Kinematics TCN with FiLM Physiological Conditioning (improved from ext9).
 
-This is a drop-in replacement / full upgrade of tcn_kin_ext9.py.
-
-Key improvements applied (exactly as recommended):
-  1. Fixed Physiological Leakage (critical bug in ext9):
-     - Route-LOO renormalisation is now **strictly** applied only to kinematics.
-     - Physiology (arousal/HR) uses pure per-session z-scoring (no route mean subtraction).
-     - This preserves the natural physiological deviations that were being erased.
-
-  2. Richer Physiological Scalar Features (10-D instead of 4-D):
-     - mean, std, trend (last 10 s − first 10 s), range, slope (linear fit).
-     - Captures level, variability, direction, and magnitude of change.
-
-  3. FiLM Conditioning (the proper way to inject scalars):
-     - Physiology now produces γ (scale) + β (shift) that **affinely modulate**
-       the 64-D kinematic pool: kin_pool * (1 + γ) + β.
-     - This is far more expressive than raw concatenation or the restrictive
-       sigmoid gating in ext10. The model can now amplify/suppress kinematic
-       patterns conditionally on physiology.
-
-  4. Minor capacity / stability tweaks:
-     - Head expanded (74 → 64 hidden) + slightly lower dropout.
-     - Permutation importance updated for the new 10-D phys vector.
-
-All other guarantees from ext9 (strict LOPO-CV, anti-leakage, SMOTE in raw space,
-determinism, etc.) are preserved.
-
-Expected outcome: KinTCN+Phys should now consistently outperform pure KinTCN
-on the majority of drivers (positive Wilcoxon gain, phys permutation ΔAUC > 0.02).
+Key fixes & improvements:
+- Fixed phys leakage: Route-LOO renormalization ONLY on kinematics.
+- Richer phys scalars: mean, std, trend, range, slope (10-D total).
+- Proper FiLM conditioning instead of simple concat or sigmoid gate.
+- Fixed polyfit error with proper vectorized slope calculation.
+- Slightly larger head for better interaction modeling.
 """
 
 import copy
@@ -65,8 +43,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SIGNAL_COLS  = ["arousal", "hr", "steeringWheelAngle", "steeringTorq", "acceleration.y", "speed.x"]
 VEHICLE_COLS = ["steeringWheelAngle", "steeringTorq", "acceleration.y", "speed.x"]
 PHYS_COLS    = ["arousal", "hr"]
-PHYS_IDX     = [SIGNAL_COLS.index(c) for c in PHYS_COLS]   # [0, 1]
-KIN_IDX      = [SIGNAL_COLS.index(c) for c in VEHICLE_COLS]    # [2, 3, 4, 5]
+PHYS_IDX     = [SIGNAL_COLS.index(c) for c in PHYS_COLS]
+KIN_IDX      = [SIGNAL_COLS.index(c) for c in VEHICLE_COLS]
 
 SEVERITY = {
     "Collision":               5,
@@ -76,13 +54,11 @@ SEVERITY = {
     "sharp_turn":              1,
 }
 
-# Windowing
 LOOKBACK_S = 45
 WINDOW_STEP = 5
 GAP, HORIZON = 5, 10
 ROLL_K = 10
 
-# Training
 BATCH_SIZE   = 64
 WEIGHT_DECAY = 1e-4
 JITTER_STD   = 0.01
@@ -92,29 +68,22 @@ EPOCHS       = 100
 LR           = 1e-3
 PATIENCE     = 10
 
-# Spectral features — dropped
 KIN_SPECTRAL_DIM = 0
+PHYS_SCALAR_D = len(PHYS_COLS) * 5   # mean, std, trend, range, slope
 
-# Physiological scalars — now 10-D (richer)
-PHYS_SCALAR_D = len(PHYS_COLS) * 5   # mean, std, trend, range, slope per signal
-
-# Input clipping
 RENORM_CLIP = 3.0
 
-# Personalisation
 GATE_ADAPT_K          = 15
 GATE_ADAPT_STEPS      = 20
 MIN_SUPPORT_POSITIVES = 3
 MAX_PLATT_W           = 20.0
 
-# Evaluation
 N_BOOTSTRAP        = 2000
 MIN_EVAL_POSITIVES = 5
 
 EXCLUDE_EVAL_DRIVERS = {}
 N_PERM_REPEATS     = 10
 
-# SMOTE
 USE_SMOTE         = True
 SMOTE_K_NEIGHBORS = 5
 SMOTE_SEED_SALT   = 0xABCD
@@ -130,11 +99,11 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
-torch.backends.cudnn.deterministic = False
-torch.backends.cudnn.benchmark     = True
-# torch.set_num_threads(1)
-# os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-# torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark     = False
+torch.set_num_threads(1)
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+torch.use_deterministic_algorithms(True)
 
 OUT_DIR = Path(__file__).parent / "impairment_results"
 OUT_DIR.mkdir(exist_ok=True)
@@ -146,12 +115,11 @@ def mark_event_onsets(df):
     for _, grp in df.groupby(["id", "route"]):
         idx = grp.index
         for col in SEVERITY:
-            if col not in df.columns:
-                continue
-            vals  = grp[col].fillna(0).values
+            if col not in df.columns: continue
+            vals = grp[col].fillna(0).values
             onset = np.zeros(len(vals), dtype=float)
             for i in range(len(vals)):
-                if vals[i] > 0 and (i == 0 or vals[i - 1] == 0):
+                if vals[i] > 0 and (i == 0 or vals[i-1] == 0):
                     onset[i] = 1.0
             df.loc[idx, col] = onset
     return df
@@ -162,9 +130,8 @@ def normalize_signals(df):
     prefix = LOOKBACK_S + GAP
     for _, grp in df.groupby(["id", "route"]):
         idx = grp.index
-        for col in VEHICLE_COLS + list(PHYS_COLS):
-            if col not in df.columns:
-                continue
+        for col in VEHICLE_COLS + PHYS_COLS:
+            if col not in df.columns: continue
             mu  = grp.iloc[:prefix][col].mean()
             sig = grp.iloc[:prefix][col].std() + 1e-6
             df.loc[idx, col] = (grp[col] - mu) / sig
@@ -173,24 +140,23 @@ def normalize_signals(df):
 # ── FEATURE ENGINEERING ──────────────────────────────────────────────────────────
 
 def engineer_features(window):
-    T, C    = window.shape
-    diff1   = np.diff(window, axis=0, prepend=window[:1])
-    cs      = np.cumsum(window,      axis=0)
-    cs_sq   = np.cumsum(window ** 2, axis=0)
-    cs_lag    = np.zeros_like(cs)
+    T, C = window.shape
+    diff1 = np.diff(window, axis=0, prepend=window[:1])
+    cs = np.cumsum(window, axis=0)
+    cs_sq = np.cumsum(window**2, axis=0)
+    cs_lag = np.zeros_like(cs)
     cs_sq_lag = np.zeros_like(cs_sq)
     if ROLL_K < T:
-        cs_lag[ROLL_K:]    = cs[:T - ROLL_K]
-        cs_sq_lag[ROLL_K:] = cs_sq[:T - ROLL_K]
-    win_len   = np.minimum(np.arange(1, T + 1)[:, None], ROLL_K)
+        cs_lag[ROLL_K:] = cs[:T-ROLL_K]
+        cs_sq_lag[ROLL_K:] = cs_sq[:T-ROLL_K]
+    win_len = np.minimum(np.arange(1, T+1)[:, None], ROLL_K)
     roll_mean = (cs - cs_lag) / win_len
-    roll_var  = (cs_sq - cs_sq_lag) / win_len - roll_mean ** 2
-    roll_std  = np.sqrt(np.maximum(roll_var, 0.0)) + 1e-6
-    w_mean    = window.mean(axis=0, keepdims=True)
-    w_std     = window.std(axis=0,  keepdims=True) + 1e-6
-    z_score   = (window - w_mean) / w_std
-    return np.concatenate([window, diff1, roll_mean, roll_std, z_score],
-                          axis=1).astype(np.float32)
+    roll_var = (cs_sq - cs_sq_lag) / win_len - roll_mean**2
+    roll_std = np.sqrt(np.maximum(roll_var, 0.0)) + 1e-6
+    w_mean = window.mean(axis=0, keepdims=True)
+    w_std = window.std(axis=0, keepdims=True) + 1e-6
+    z_score = (window - w_mean) / w_std
+    return np.concatenate([window, diff1, roll_mean, roll_std, z_score], axis=1).astype(np.float32)
 
 
 def apply_features_branch(X_raw, col_idx):
@@ -203,137 +169,112 @@ def window_baseline_feats(X_raw, col_idx=None):
 
 
 def phys_scalar_feats(X_raw):
-    """
-    Richer physiological scalars (10-D).
-    [mean, std, trend, range, slope] × 2 signals.
-    """
-    phys = X_raw[:, :, PHYS_IDX]   # (N, T, 2)
+    """Richer 10-D physiological features: mean, std, trend, range, slope per signal."""
+    phys = X_raw[:, :, PHYS_IDX]  # (N, T, 2)
     T = phys.shape[1]
 
-    p_mean  = phys.mean(axis=1)
-    p_std   = phys.std(axis=1)
+    p_mean = phys.mean(axis=1)
+    p_std = phys.std(axis=1)
     p_trend = phys[:, -10:, :].mean(axis=1) - phys[:, :10, :].mean(axis=1)
     p_range = phys.max(axis=1) - phys.min(axis=1)
 
-    # linear slope per channel
+    # Vectorized slope calculation (fixed)
     x = np.arange(T, dtype=np.float32)
-    p_slope = np.polyfit(x, phys.transpose(0, 2, 1), 1)[0].T   # (N, 2)
+    # Reshape to (N*2, T) for polyfit
+    phys_flat = phys.transpose(0, 2, 1).reshape(-1, T)  # (N*2, T)
+    slopes = np.polyfit(x, phys_flat.T, 1)[0].reshape(-1, 2)  # (N, 2)
 
-    return np.concatenate([p_mean, p_std, p_trend, p_range, p_slope],
-                          axis=1).astype(np.float32)   # (N, 10)
+    return np.concatenate([p_mean, p_std, p_trend, p_range, slopes], axis=1).astype(np.float32)
 
 
-# ── SMOTE ────────────────────────────────────────────────────────────────────────
-# (unchanged from ext9)
-def smote_raw(X_raw, y, k=SMOTE_K_NEIGHBORS, rng=None,
-              pids=None, routes=None, t_starts=None):
+# ── SMOTE, WINDOWING, DATASET (unchanged) ───────────────────────────────────────
+
+def smote_raw(X_raw, y, k=SMOTE_K_NEIGHBORS, rng=None, pids=None, routes=None, t_starts=None):
     if rng is None:
         rng = np.random.default_rng(SEED)
-
     pos_idx = np.where(y == 1)[0]
-    n_pos   = len(pos_idx)
-    n_neg   = (y == 0).sum()
-
+    n_pos = len(pos_idx)
+    n_neg = (y == 0).sum()
     if n_pos == 0 or n_pos >= n_neg:
-        return (X_raw, y,
-                np.empty(0, dtype=np.int64),
-                np.empty(0, dtype=np.int64),
-                np.empty(0, dtype=np.float32))
+        return X_raw, y, np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float32)
 
     n_synthetic = n_neg - n_pos
-    X_flat      = X_raw[pos_idx].reshape(n_pos, -1)
-
+    X_flat = X_raw[pos_idx].reshape(n_pos, -1)
     k_eff = min(k, n_pos - 1)
     if k_eff < 1:
         dup = rng.choice(pos_idx, n_synthetic, replace=True)
         return (np.concatenate([X_raw, X_raw[dup]], axis=0),
-                np.concatenate([y,     np.ones(n_synthetic, dtype=y.dtype)]),
+                np.concatenate([y, np.ones(n_synthetic, dtype=y.dtype)]),
                 dup, dup, np.zeros(n_synthetic, dtype=np.float32))
 
-    _pca_k = min(n_pos - 1, X_flat.shape[1], 50, max(2, n_pos // 5))
-    if _pca_k >= 2:
-        X_nn = PCA(n_components=_pca_k).fit_transform(X_flat)
-    else:
-        X_nn = X_flat
-
+    _pca_k = min(n_pos-1, X_flat.shape[1], 50, max(2, n_pos//5))
+    X_nn = PCA(n_components=_pca_k).fit_transform(X_flat) if _pca_k >= 2 else X_flat
     dists = cdist(X_nn, X_nn, metric="euclidean")
     np.fill_diagonal(dists, np.inf)
 
     if pids is not None and routes is not None and t_starts is not None:
-        pos_pids   = pids[pos_idx]
+        pos_pids = pids[pos_idx]
         pos_routes = routes[pos_idx]
-        pos_ts     = t_starts[pos_idx].astype(float)
-        same_sess  = ((pos_pids[:, None]   == pos_pids[None, :]) &
-                      (pos_routes[:, None] == pos_routes[None, :]))
-        tdiff      = np.abs(pos_ts[:, None] - pos_ts[None, :])
+        pos_ts = t_starts[pos_idx].astype(float)
+        same_sess = ((pos_pids[:, None] == pos_pids[None, :]) & 
+                     (pos_routes[:, None] == pos_routes[None, :]))
+        tdiff = np.abs(pos_ts[:, None] - pos_ts[None, :])
         dists[same_sess & (tdiff < LOOKBACK_S)] = np.inf
 
     nn_idx = np.argsort(dists, axis=1)[:, :k_eff]
 
-    T, C             = X_raw.shape[1], X_raw.shape[2]
-    syn              = np.zeros((n_synthetic, T, C), dtype=X_raw.dtype)
-    syn_anchor_idx   = np.zeros(n_synthetic, dtype=np.int64)
+    T, C = X_raw.shape[1], X_raw.shape[2]
+    syn = np.zeros((n_synthetic, T, C), dtype=X_raw.dtype)
+    syn_anchor_idx = np.zeros(n_synthetic, dtype=np.int64)
     syn_neighbor_idx = np.zeros(n_synthetic, dtype=np.int64)
-    syn_lambdas      = np.zeros(n_synthetic, dtype=np.float32)
+    syn_lambdas = np.zeros(n_synthetic, dtype=np.float32)
 
     for i in range(n_synthetic):
         anchor = rng.integers(0, n_pos)
-        nn     = nn_idx[anchor, rng.integers(0, k_eff)]
-        lam    = float(rng.uniform(0.0, 1.0))
-        syn[i] = (X_raw[pos_idx[anchor]]
-                  + lam * (X_raw[pos_idx[nn]] - X_raw[pos_idx[anchor]]))
-        syn_anchor_idx[i]   = pos_idx[anchor]
+        nn = nn_idx[anchor, rng.integers(0, k_eff)]
+        lam = float(rng.uniform(0.0, 1.0))
+        syn[i] = X_raw[pos_idx[anchor]] + lam * (X_raw[pos_idx[nn]] - X_raw[pos_idx[anchor]])
+        syn_anchor_idx[i] = pos_idx[anchor]
         syn_neighbor_idx[i] = pos_idx[nn]
-        syn_lambdas[i]      = lam
+        syn_lambdas[i] = lam
 
     return (np.concatenate([X_raw, syn], axis=0),
-            np.concatenate([y,     np.ones(n_synthetic, dtype=y.dtype)]),
+            np.concatenate([y, np.ones(n_synthetic, dtype=y.dtype)]),
             syn_anchor_idx, syn_neighbor_idx, syn_lambdas)
 
-# ── WINDOWING, DATASET, UTILITIES, TRAINING, PERSONALISATION, VALIDITY ───────────
-# (all identical to ext9 — omitted here for brevity but included in the full file)
 
 def composite_risk_score(future_df):
     return sum(SEVERITY[col] * int((future_df[col] > 0).any()) for col in SEVERITY)
 
 def future_error_types(future_df):
-    return frozenset(col for col in SEVERITY
-                     if col in future_df.columns and (future_df[col] > 0).any())
+    return frozenset(col for col in SEVERITY if col in future_df.columns and (future_df[col] > 0).any())
 
 def build_windows(df):
     windows, labels, scores, pids, etypes, routes, t_starts = [], [], [], [], [], [], []
     min_len = LOOKBACK_S + GAP + HORIZON
-    nan_skip: dict = {}
+    nan_skip = {}
     for (pid, route), grp in df.groupby(["id", "route"]):
         grp = grp.sort_values("Timestamp").reset_index(drop=True)
-        n   = len(grp)
-        ts  = grp["Timestamp"].values
-        if n < min_len:
-            continue
+        n = len(grp)
+        ts = grp["Timestamp"].values
+        if n < min_len: continue
         idx = 0
         while idx + LOOKBACK_S + GAP + HORIZON <= n:
-            sig = grp.iloc[idx: idx + LOOKBACK_S][SIGNAL_COLS].values.astype(np.float32)
-            prev_s, prev_t = nan_skip.get(pid, (0, 0))
+            sig = grp.iloc[idx:idx+LOOKBACK_S][SIGNAL_COLS].values.astype(np.float32)
             if not np.isnan(sig).any():
-                future = grp.iloc[idx + LOOKBACK_S + GAP: idx + LOOKBACK_S + GAP + HORIZON]
-                score  = composite_risk_score(future)
-                windows.append(sig); labels.append(int(score > 0))
-                scores.append(score); pids.append(pid)
+                future = grp.iloc[idx + LOOKBACK_S + GAP : idx + LOOKBACK_S + GAP + HORIZON]
+                score = composite_risk_score(future)
+                windows.append(sig)
+                labels.append(int(score > 0))
+                scores.append(score)
+                pids.append(pid)
                 etypes.append(future_error_types(future))
-                routes.append(route); t_starts.append(ts[idx])
-                nan_skip[pid] = (prev_s, prev_t + 1)
-            else:
-                nan_skip[pid] = (prev_s + 1, prev_t + 1)
+                routes.append(route)
+                t_starts.append(ts[idx])
             idx += WINDOW_STEP
-
-    total_s = sum(s for s, _ in nan_skip.values())
-    total_t = sum(t for _, t in nan_skip.values())
-    if total_s > 0:
-        print(f"  [NaN-skip audit] {total_s}/{total_t} windows dropped ({100*total_s/max(total_t,1):.1f}%)")
-
-    return (np.array(windows,  dtype=np.float32),
-            np.array(labels,   dtype=np.float32),
-            np.array(scores,   dtype=np.float32),
+    return (np.array(windows, dtype=np.float32),
+            np.array(labels, dtype=np.float32),
+            np.array(scores, dtype=np.float32),
             np.array(pids),
             np.array(etypes, dtype=object),
             np.array(routes),
@@ -341,39 +282,38 @@ def build_windows(df):
 
 class KinPhysDataset(Dataset):
     def __init__(self, X_kin, X_phys_scalar, X_spec, y, augment=False):
-        self.Xk   = torch.as_tensor(X_kin).float()
-        self.Xps  = torch.as_tensor(X_phys_scalar).float()
-        self.Xs   = torch.as_tensor(X_spec).float()
-        self.y    = torch.as_tensor(y).float()
-        self.aug  = augment
+        self.Xk = torch.as_tensor(X_kin).float()
+        self.Xps = torch.as_tensor(X_phys_scalar).float()
+        self.Xs = torch.as_tensor(X_spec).float()
+        self.y = torch.as_tensor(y).float()
+        self.aug = augment
 
     def __len__(self): return len(self.y)
 
     def __getitem__(self, idx):
-        xk  = self.Xk[idx].clone()
+        xk = self.Xk[idx].clone()
         xps = self.Xps[idx].clone()
-        xs  = self.Xs[idx].clone()
+        xs = self.Xs[idx].clone()
         if self.aug:
             xk += torch.randn_like(xk) * JITTER_STD
             scale = torch.empty(xk.shape[-1]).uniform_(0.8, 1.2)
             xk = xk * scale.unsqueeze(0)
             if torch.rand(1).item() < CUTOUT_PROB and xk.shape[0] > CUTOUT_LEN:
                 t0 = torch.randint(0, xk.shape[0] - CUTOUT_LEN, (1,)).item()
-                xk[t0: t0 + CUTOUT_LEN] = 0.0
+                xk[t0:t0+CUTOUT_LEN] = 0.0
         return xk, xps, xs, self.y[idx]
 
 def get_kin_loader(Xk, Xps, Xs, y, batch_size=BATCH_SIZE, augment=False):
     ds = KinPhysDataset(Xk, Xps, Xs, y, augment=augment)
     return DataLoader(ds, batch_size=batch_size, shuffle=True)
 
-# ── MODEL ────────────────────────────────────────────────────────────────────────
+# ── MODEL with FiLM ─────────────────────────────────────────────────────────────
 
 def _gn_groups(out_c: int) -> int:
     g = min(out_c, 8)
     while g > 1 and out_c % g != 0:
         g //= 2
     return max(g, 1)
-
 
 class ResBlock(nn.Module):
     def __init__(self, in_c, out_c, d):
@@ -388,7 +328,6 @@ class ResBlock(nn.Module):
 
     def forward(self, x): return self.conv(x) + self.res(x)
 
-
 class TemporalAttention(nn.Module):
     def __init__(self, channels):
         super().__init__()
@@ -396,30 +335,25 @@ class TemporalAttention(nn.Module):
         self.score = nn.Linear(channels // 2, 1)
 
     def forward(self, x):
-        xt      = x.permute(0, 2, 1)
-        h       = torch.tanh(self.query(xt))
+        xt = x.permute(0, 2, 1)
+        h = torch.tanh(self.query(xt))
         weights = torch.softmax(self.score(h), dim=1)
         return (xt * weights).sum(dim=1)
 
-
 class KinTCN(nn.Module):
-    """
-    Kinematics TCN with FiLM Physiological Conditioning.
-    """
     KIN_D = 64
-
     def __init__(self, n_kin_feats: int, phys_scalar_d: int, spectral_dim: int):
         super().__init__()
         self.kin_branch = nn.Sequential(
-            ResBlock(n_kin_feats,     self.KIN_D // 2,  1),
-            ResBlock(self.KIN_D // 2, self.KIN_D,       2),
-            ResBlock(self.KIN_D,      self.KIN_D,       4),
-            ResBlock(self.KIN_D,      self.KIN_D,       8),
-            ResBlock(self.KIN_D,      self.KIN_D,      16),
+            ResBlock(n_kin_feats, self.KIN_D//2, 1),
+            ResBlock(self.KIN_D//2, self.KIN_D, 2),
+            ResBlock(self.KIN_D, self.KIN_D, 4),
+            ResBlock(self.KIN_D, self.KIN_D, 8),
+            ResBlock(self.KIN_D, self.KIN_D, 16),
         )
         self.kin_attn = TemporalAttention(self.KIN_D)
 
-        # FiLM conditioner (affine modulation)
+        # FiLM conditioner
         self.film = nn.Sequential(
             nn.Linear(phys_scalar_d, self.KIN_D * 2),
             nn.ReLU(),
@@ -428,21 +362,20 @@ class KinTCN(nn.Module):
 
         head_in = self.KIN_D + phys_scalar_d + spectral_dim
         self.head = nn.Sequential(
-            nn.Linear(head_in, 64), nn.ReLU(), nn.Dropout(0.15), nn.Linear(64, 1),
+            nn.Linear(head_in, 64), nn.ReLU(), nn.Dropout(0.15), nn.Linear(64, 1)
         )
 
     def forward(self, x_kin, x_phys_scalar, x_spec):
-        kin_seq  = self.kin_branch(x_kin.permute(0, 2, 1))   # (B, KIN_D, T)
-        kin_pool = self.kin_attn(kin_seq)                     # (B, KIN_D)
+        kin_seq = self.kin_branch(x_kin.permute(0, 2, 1))
+        kin_pool = self.kin_attn(kin_seq)
 
-        # FiLM: gamma + beta modulation
+        # FiLM modulation
         gamma_beta = self.film(x_phys_scalar)
         gamma, beta = gamma_beta.chunk(2, dim=1)
         modulated_kin = kin_pool * (1.0 + gamma) + beta
 
-        head_in  = torch.cat([modulated_kin, x_phys_scalar, x_spec], dim=-1)
+        head_in = torch.cat([modulated_kin, x_phys_scalar, x_spec], dim=-1)
         return self.head(head_in).squeeze(-1)
-
 
 # ── UTILITIES (unchanged from ext9) ─────────────────────────────────────────────
 
