@@ -345,7 +345,7 @@ class KinTCN(nn.Module):
 
     def __init__(self, n_kin_feats: int, phys_scalar_d: int, spectral_dim: int):
         super().__init__()
-        # 1. Kinematic Branch
+        # 1. Kinematic Branch (Feature Extraction)
         self.kin_branch = nn.Sequential(
             ResBlock(n_kin_feats, self.KIN_D//2, 1),
             ResBlock(self.KIN_D//2, self.KIN_D, 2),
@@ -355,24 +355,35 @@ class KinTCN(nn.Module):
         )
         self.kin_attn = TemporalAttention(self.KIN_D)
 
-        # 2. FiLM Generator
+        # 2. FiLM Generator (Physiological Conditioning)
         self.film = nn.Sequential(
             nn.Linear(phys_scalar_d, 32),
             nn.ReLU(),
             nn.Linear(32, self.KIN_D * 2) 
         )
 
-        # --- DIMENSION FIX ---
-        # Since we use FiLM, physiology is embedded in the 64-D k_mod.
-        # We no longer concat raw phys here, so head_in must be KIN_D.
-        head_in = self.KIN_D 
-        # ---------------------
-
-        self.head = nn.Sequential(
-            nn.Linear(head_in, 64), 
-            nn.ReLU(), 
-            nn.Dropout(0.15), 
+        # 3. Gated Expert Heads (Implicit Personalization)
+        # Expert A: Logic for one 'type' of driver/state (e.g., High Arousal)
+        self.expert_a = nn.Sequential(
+            nn.Linear(self.KIN_D, 64),
+            nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(64, 1)
+        )
+        # Expert B: Logic for another 'type' of driver/state (e.g., Baseline/Low Arousal)
+        self.expert_b = nn.Sequential(
+            nn.Linear(self.KIN_D, 64),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(64, 1)
+        )
+        
+        # The Personalization Gater: Uses physiology to blend the experts
+        self.gater = nn.Sequential(
+            nn.Linear(phys_scalar_d, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
+            nn.Sigmoid()
         )
 
     def forward(self, x_kin, x_phys, x_spec):
@@ -386,18 +397,25 @@ class KinTCN(nn.Module):
         gamma, beta = torch.chunk(film_params, 2, dim=1)
         gamma = torch.tanh(gamma) 
 
-        # --- OPTION A: PATH DROPOUT (Stochastic Depth) ---
-        # 20% of the time during training, we zero out the kinematics.
-        # This forces the model to rely solely on the 'beta' shift from physiology.
+        # C. Path Dropout (Stochastic Depth)
+        # We keep this to ensure the experts learn to use 'beta' when kinematics are missing
         if self.training and torch.rand(1) < 0.20:
             k_pooled = torch.zeros_like(k_pooled)
-        # -------------------------------------------------
 
-        # C. Modulation
+        # D. Feature Modulation
         k_mod = k_pooled * (1.0 + gamma) + beta
         
-        # D. Output
-        return self.head(k_mod).squeeze(-1)
+        # E. Personalized Output (Mixture of Experts)
+        # 1. Get predictions from both behavioral models
+        out_a = self.expert_a(k_mod).squeeze(-1)
+        out_b = self.expert_b(k_mod).squeeze(-1)
+        
+        # 2. Use physiology to determine which 'personality' is driving
+        gate_weight = self.gater(x_phys).squeeze(-1)
+        
+        # 3. Dynamic blending (Personalization)
+        # If gate_weight is high, the model leans on Expert A's logic
+        return (gate_weight * out_a) + ((1.0 - gate_weight) * out_b)
 
 # ── UTILITIES (unchanged from ext9) ─────────────────────────────────────────────
 
