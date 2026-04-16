@@ -345,7 +345,7 @@ class KinTCN(nn.Module):
 
     def __init__(self, n_kin_feats: int, phys_scalar_d: int, spectral_dim: int):
         super().__init__()
-        # 1. Kinematic Branch (Feature Extraction)
+        # 1. Kinematic Branch
         self.kin_branch = nn.Sequential(
             ResBlock(n_kin_feats, self.KIN_D//2, 1),
             ResBlock(self.KIN_D//2, self.KIN_D, 2),
@@ -355,30 +355,26 @@ class KinTCN(nn.Module):
         )
         self.kin_attn = TemporalAttention(self.KIN_D)
 
-        # 2. FiLM Generator (Physiological Conditioning)
+        # 2. FiLM Generator
         self.film = nn.Sequential(
             nn.Linear(phys_scalar_d, 32),
             nn.ReLU(),
             nn.Linear(32, self.KIN_D * 2) 
         )
 
-        # 3. Gated Expert Heads (Implicit Personalization)
-        # Expert A: Logic for one 'type' of driver/state (e.g., High Arousal)
+        # 3. Gated Experts (The new Heads)
         self.expert_a = nn.Sequential(
             nn.Linear(self.KIN_D, 64),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(64, 1)
         )
-        # Expert B: Logic for another 'type' of driver/state (e.g., Baseline/Low Arousal)
         self.expert_b = nn.Sequential(
             nn.Linear(self.KIN_D, 64),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(64, 1)
         )
-        
-        # The Personalization Gater: Uses physiology to blend the experts
         self.gater = nn.Sequential(
             nn.Linear(phys_scalar_d, 16),
             nn.ReLU(),
@@ -387,36 +383,27 @@ class KinTCN(nn.Module):
         )
 
     def forward(self, x_kin, x_phys, x_spec):
-        # A. Kinematic Path
         k = x_kin.permute(0, 2, 1)
         k = self.kin_branch(k)
         k_pooled = self.kin_attn(k)
 
-        # B. FiLM Parameters
         film_params = self.film(x_phys)
         gamma, beta = torch.chunk(film_params, 2, dim=1)
         gamma = torch.tanh(gamma) 
 
-        # C. Path Dropout (Stochastic Depth)
-        # We keep this to ensure the experts learn to use 'beta' when kinematics are missing
+        # Path Dropout
         if self.training and torch.rand(1) < 0.20:
             k_pooled = torch.zeros_like(k_pooled)
 
-        # D. Feature Modulation
         k_mod = k_pooled * (1.0 + gamma) + beta
         
-        # E. Personalized Output (Mixture of Experts)
-        # 1. Get predictions from both behavioral models
+        # Expert Blending
         out_a = self.expert_a(k_mod).squeeze(-1)
         out_b = self.expert_b(k_mod).squeeze(-1)
-        
-        # 2. Use physiology to determine which 'personality' is driving
         gate_weight = self.gater(x_phys).squeeze(-1)
         
-        # 3. Dynamic blending (Personalization)
-        # If gate_weight is high, the model leans on Expert A's logic
         return (gate_weight * out_a) + ((1.0 - gate_weight) * out_b)
-
+        
 # ── UTILITIES (unchanged from ext9) ─────────────────────────────────────────────
 
 def safe_auc(y_true, y_score):
@@ -532,20 +519,18 @@ def platt_adapt(pop_scores: np.ndarray, y_te: np.ndarray) -> np.ndarray:
     return lr.predict_proba(pop_scores.reshape(-1, 1))[:, 1]
 
 
-def head_adapt(model_pop, Xte_k, Xte_ps, Xte_s, y_te,
-               n_steps=GATE_ADAPT_STEPS, lr=1e-3):
-    K = GATE_ADAPT_K
-    if len(y_te) <= K or int(y_te[:K].sum()) < MIN_SUPPORT_POSITIVES:
-        return None
-    model = copy.deepcopy(model_pop).to(DEVICE)
-    for name, p in model.named_parameters():
-        p.requires_grad = name.startswith("head.")
-    Xk = torch.as_tensor(Xte_k[:K]).to(DEVICE)
-    Xps = torch.as_tensor(Xte_ps[:K]).to(DEVICE)
-    Xs  = torch.as_tensor(Xte_s[:K]).to(DEVICE)
-    ys  = torch.as_tensor(y_te[:K], dtype=torch.float32).to(DEVICE)
-    opt = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
-                           lr=lr, weight_decay=1e-3)
+def head_adapt(model, xk, xps, xs, y, n_train=15):
+    if len(y) <= n_train: return np.full(len(y), 0.5)
+    
+    model_ft = copy.deepcopy(model)
+    model_ft.train()
+    for param in model_ft.parameters():
+        param.requires_grad = False
+        
+    for module in [model_ft.expert_a, model_ft.expert_b, model_ft.gater]:
+        for param in module.parameters():
+            param.requires_grad = True
+    opt = torch.optim.Adam(filter(lambda p: p.requires_grad, model_ft.parameters()), lr=1e-3)
     model.train()
     for _ in range(n_steps):
         opt.zero_grad()
