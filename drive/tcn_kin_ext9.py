@@ -159,7 +159,7 @@ MIN_EVAL_POSITIVES = 5
 # Drivers excluded from evaluation (but retained in training for all other folds).
 # These six drivers showed persistent below-chance or near-chance KinTCN performance
 # across ext5/ext7/ext8, indicating structurally atypical impairment profiles.
-EXCLUDE_EVAL_DRIVERS = {"0D10","0D04","0B07","0C03","0C06"}#{"0C06", "0A02", "0B05", "0B07", "0B08R", "0D10"}
+EXCLUDE_EVAL_DRIVERS = {}#{"0C06", "0A02", "0B05", "0B07", "0B08R", "0D10"}
 N_PERM_REPEATS     = 10
 
 # SMOTE
@@ -551,28 +551,39 @@ class KinTCN(nn.Module):
             ResBlock(self.KIN_D,      self.KIN_D,       16),
         )
         self.kin_attn = TemporalAttention(self.KIN_D)
-        head_in       = self.KIN_D + phys_scalar_d + spectral_dim
-        self.head     = nn.Sequential(
+        
+        # NEW: FiLM Generator (Physiology -> Gamma & Beta)
+        self.phys_film = nn.Sequential(
+            nn.Linear(phys_scalar_d, 32),
+            nn.ReLU(),
+            nn.Linear(32, self.KIN_D * 2) # Outputs both scale and shift
+        )
+
+        # UPDATED: Head now only takes KIN_D (64) since Phys is fused via FiLM
+        # and spectral is 0.
+        head_in = self.KIN_D + spectral_dim 
+        self.head = nn.Sequential(
             nn.Linear(head_in, 48), nn.ReLU(), nn.Dropout(0.2), nn.Linear(48, 1),
         )
 
     def forward(self, x_kin, x_phys_scalar, x_spec):
-        """
-        Parameters
-        ----------
-        x_kin        : (B, T, n_kin_feats)
-        x_phys_scalar: (B, phys_scalar_d)
-        x_spec       : (B, spectral_dim)
-
-        Returns
-        -------
-        logits : (B,)
-        """
+        # 1. Kinematics Branch
         kin_seq  = self.kin_branch(x_kin.permute(0, 2, 1))   # (B, KIN_D, T)
         kin_pool = self.kin_attn(kin_seq)                     # (B, KIN_D)
-        head_in  = torch.cat([kin_pool, x_phys_scalar, x_spec], dim=-1)
-        return self.head(head_in).squeeze(-1)                 # (B,)
 
+        # 2. NEW: FiLM Modulation
+        # Generate conditioning parameters from physiology
+        film_params = self.phys_film(x_phys_scalar)          # (B, 128)
+        gamma, beta = torch.chunk(film_params, 2, dim=-1)    # Two (B, 64) vectors
+
+        # Apply FiLM: Scale and Shift the kinematic features
+        # We use (1 + gamma) so that if weights are zero, identity is preserved
+        kin_modulated = kin_pool * (1 + gamma) + beta
+
+        # 3. Final Head
+        # If spectral_dim is 0, this is just kin_modulated
+        head_in = torch.cat([kin_modulated, x_spec], dim=-1) 
+        return self.head(head_in).squeeze(-1)
 # ── UTILITIES ────────────────────────────────────────────────────────────────────
 
 def safe_auc(y_true, y_score):
@@ -902,7 +913,6 @@ def main():
     print(f"  TCN blocks      : d=1,2,4,8,16  →  RF ≈ 63 timesteps")
     print(f"  Output channels : {KinTCN.KIN_D}")
     print(f"Phys scalars      : {PHYS_COLS}  →  [mean, std] each = {PHYS_SCALAR_D}-d")
-    print(f"Spectral features : dropped (permutation Δ≈0 in ext7)")
     print(f"Head input        : {KinTCN.KIN_D} + {PHYS_SCALAR_D} = {KinTCN.KIN_D + PHYS_SCALAR_D}-d")
     print(f"CLC excluded      : center_line_crossing removed from SEVERITY")
     print(f"Excluded entirely : {sorted(EXCLUDE_EVAL_DRIVERS)} (removed from training + evaluation)")
