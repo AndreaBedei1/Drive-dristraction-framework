@@ -513,17 +513,6 @@ class TemporalAttention(nn.Module):
 
 
 class KinTCN(nn.Module):
-    """
-    Kinematics TCN with physiological scalar and spectral feature injection at head.
-
-    KIN_D = 64 (output channels of kinematics TCN).
-    Head input = KIN_D(64) + PHYS_SCALAR_D(4) + KIN_SPECTRAL_DIM(12) = 80-d.
-
-    The physiological scalars [mean_aro, std_aro, mean_hr, std_hr] provide the
-    window-level physiological state to the head without requiring a temporal model,
-    which is appropriate given the slow time-constants of arousal and HR relative
-    to the 1 Hz sample rate.
-    """
     KIN_D = 64
 
     def __init__(self, n_kin_feats: int, phys_scalar_d: int, spectral_dim: int):
@@ -536,151 +525,32 @@ class KinTCN(nn.Module):
             ResBlock(self.KIN_D,      self.KIN_D,       16),
         )
         self.kin_attn = TemporalAttention(self.KIN_D)
-        head_in       = self.KIN_D + phys_scalar_d + spectral_dim
-        self.head     = nn.Sequential(
+        
+        # NEW: Gating layer that learns how physiology scales kinematics
+        self.gate_layer = nn.Sequential(
+            nn.Linear(phys_scalar_d, self.KIN_D),
+            nn.Sigmoid()
+        )
+
+        # Head input remains the same if you still want to concat the raw scalars
+        head_in = self.KIN_D + phys_scalar_d + spectral_dim
+        self.head = nn.Sequential(
             nn.Linear(head_in, 48), nn.ReLU(), nn.Dropout(0.2), nn.Linear(48, 1),
         )
 
     def forward(self, x_kin, x_phys_scalar, x_spec):
-        """
-        Parameters
-        ----------
-        x_kin        : (B, T, n_kin_feats)
-        x_phys_scalar: (B, phys_scalar_d)
-        x_spec       : (B, spectral_dim)
-
-        Returns
-        -------
-        logits : (B,)
-        """
-        kin_seq  = self.kin_branch(x_kin.permute(0, 2, 1))   # (B, KIN_D, T)
-        kin_pool = self.kin_attn(kin_seq)                     # (B, KIN_D)
-        head_in  = torch.cat([kin_pool, x_phys_scalar, x_spec], dim=-1)
-        return self.head(head_in).squeeze(-1)                 # (B,)
-
-# ── UTILITIES ────────────────────────────────────────────────────────────────────
-
-def safe_auc(y_true, y_score):
-    if len(np.unique(y_true)) < 2: return None
-    return roc_auc_score(y_true, y_score)
-
-
-def safe_auprc(y_true, y_score):
-    if len(np.unique(y_true)) < 2: return None
-    return average_precision_score(y_true, y_score)
-
-
-def _nan_or(x):
-    return float("nan") if x is None else x
-
-
-def focal_loss(logits, targets, gamma=2.0, pos_weight=None):
-    pw  = (torch.tensor(pos_weight, dtype=logits.dtype, device=logits.device)
-           if pos_weight is not None else None)
-    bce = F.binary_cross_entropy_with_logits(logits, targets, pos_weight=pw, reduction="none")
-    with torch.no_grad():
-        p  = torch.sigmoid(logits)
-        pt = p * targets + (1.0 - p) * (1.0 - targets)
-    return ((1.0 - pt) ** gamma * bce).mean()
-
-
-def compute_ece(y_true, y_prob, n_bins=10):
-    bins = np.linspace(0.0, 1.0, n_bins + 1)
-    ece  = 0.0; n = len(y_true)
-    for i in range(n_bins):
-        lo, hi = bins[i], bins[i + 1]
-        mask   = (y_prob >= lo) & (y_prob < hi) if i < n_bins - 1 else (y_prob >= lo)
-        if not mask.any(): continue
-        ece += mask.sum() / n * abs(y_true[mask].mean() - y_prob[mask].mean())
-    return float(ece)
-
-
-def _val_threshold(y_val, val_scores):
-    """Youden's J threshold on val data; falls back to 0.5 for single-class val."""
-    if len(np.unique(y_val)) < 2:
-        return 0.5
-    fpr, tpr, thrs = roc_curve(y_val, val_scores)
-    return float(thrs[int(np.argmax(tpr - fpr))])
-
-
-def bootstrap_auc_ci_drivers(driver_aucs, n_boot=N_BOOTSTRAP, seed=SEED):
-    aucs = np.array(driver_aucs); n = len(aucs)
-    if n < 2:
-        return float("nan"), float("nan")
-    rng  = np.random.default_rng(seed)
-    boot = [rng.choice(aucs, n, replace=True).mean() for _ in range(n_boot)]
-    return tuple(np.percentile(boot, [2.5, 97.5]))
-
-
-def _val_sample(arr, frac, rng):
-    n = min(max(1, int(frac * len(arr))), len(arr)) if len(arr) > 0 else 0
-    return rng.choice(arr, n, replace=False) if n > 0 else np.array([], dtype=arr.dtype)
-
-# ── TRAINING ─────────────────────────────────────────────────────────────────────
-
-def train_kin_tcn(model, Xtr_k, Xtr_ps, Xtr_s, y_tr,
-                  Xval_k, Xval_ps, Xval_s, y_val,
-                  pos_weight=None):
-    """
-    Train KinTCN with early stopping on validation AUROC.
-
-    Parameters
-    ----------
-    Xtr_k  : (N_tr, T, n_kin_feats) — kinematics engineered features, training
-    Xtr_ps : (N_tr, PHYS_SCALAR_D)  — phys scalars, training
-    Xtr_s  : (N_tr, KIN_SPECTRAL_DIM) — kin spectral features, training
-    Xval_* : corresponding validation arrays
-    pos_weight : neg/pos ratio for focal loss
-
-    Falls back to training-loss patience when val fold is single-class.
-    """
-    opt    = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    sched  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS, eta_min=LR * 0.01)
-    loader = get_kin_loader(Xtr_k, Xtr_ps, Xtr_s, y_tr, augment=True)
-    best_auc, best_w  = float("-inf"), None
-    best_loss         = float("inf")
-    no_improve        = 0
-
-    Xval_k_t  = torch.as_tensor(Xval_k).to(DEVICE)
-    Xval_ps_t = torch.as_tensor(Xval_ps).to(DEVICE)
-    Xval_s_t  = torch.as_tensor(Xval_s).to(DEVICE)
-
-    for _ in range(EPOCHS):
-        model.train()
-        ep_loss = 0.0; n_b = 0
-        for xk, xps, xs, yb in loader:
-            logits = model(xk.to(DEVICE), xps.to(DEVICE), xs.to(DEVICE))
-            loss   = focal_loss(logits, yb.to(DEVICE), pos_weight=pos_weight)
-            opt.zero_grad(); loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            ep_loss += loss.item(); n_b += 1
-        sched.step()
-
-        model.eval()
-        with torch.no_grad():
-            preds = torch.sigmoid(
-                model(Xval_k_t, Xval_ps_t, Xval_s_t)).cpu().numpy()
-        auc = safe_auc(y_val, preds)
-        if auc is not None:
-            if auc > best_auc:
-                best_auc = auc; best_w = copy.deepcopy(model.state_dict())
-                no_improve = 0
-            else:
-                no_improve += 1
-                if no_improve >= PATIENCE: break
-        else:
-            train_loss = ep_loss / max(n_b, 1)
-            if train_loss < best_loss - 1e-4:
-                best_loss = train_loss; best_w = copy.deepcopy(model.state_dict())
-                no_improve = 0
-            else:
-                no_improve += 1
-                if no_improve >= PATIENCE: break
-
-    if best_w is not None:
-        model.load_state_dict(best_w)
-    return model
+        kin_seq  = self.kin_branch(x_kin.permute(0, 2, 1))
+        kin_pool = self.kin_attn(kin_seq)
+        
+        # 1. Generate gate from physiology
+        phys_gate = self.gate_layer(x_phys_scalar)
+        
+        # 2. Apply gate to kinematics (Refinement)
+        refined_kin = kin_pool * phys_gate
+        
+        # 3. Concatenate and pass to head
+        head_in = torch.cat([refined_kin, x_phys_scalar, x_spec], dim=-1)
+        return self.head(head_in).squeeze(-1)
 
 # ── PERSONALISATION ──────────────────────────────────────────────────────────────
 

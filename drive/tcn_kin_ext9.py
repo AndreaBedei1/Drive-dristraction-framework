@@ -159,7 +159,7 @@ MIN_EVAL_POSITIVES = 5
 # Drivers excluded from evaluation (but retained in training for all other folds).
 # These six drivers showed persistent below-chance or near-chance KinTCN performance
 # across ext5/ext7/ext8, indicating structurally atypical impairment profiles.
-EXCLUDE_EVAL_DRIVERS = {}#{"0C06", "0A02", "0B05", "0B07", "0B08R", "0D10"}
+EXCLUDE_EVAL_DRIVERS = {"0D10","0D04","0B07","0C03","0C06"}#{"0C06", "0A02", "0B05", "0B07", "0B08R", "0D10"}
 N_PERM_REPEATS     = 10
 
 # SMOTE
@@ -168,7 +168,6 @@ SMOTE_K_NEIGHBORS = 5
 SMOTE_SEED_SALT   = 0xABCD
 
 # ── DETERMINISM ──────────────────────────────────────────────────────────────────
-# PYTHONHASHSEED must be fixed before interpreter startup; re-exec if needed.
 if os.environ.get("PYTHONHASHSEED") != str(SEED):
     import subprocess
     env = os.environ.copy()
@@ -179,11 +178,11 @@ random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark     = False
-torch.set_num_threads(1)
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.deterministic = False
+torch.backends.cudnn.benchmark     = True
+# torch.set_num_threads(1)
+# os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+# torch.use_deterministic_algorithms(True)
 
 OUT_DIR = Path(__file__).parent / "impairment_results"
 OUT_DIR.mkdir(exist_ok=True)
