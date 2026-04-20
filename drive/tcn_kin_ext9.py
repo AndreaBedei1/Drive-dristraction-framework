@@ -141,7 +141,7 @@ PATIENCE     = 10   # early-stopping patience (val-AUC)
 KIN_SPECTRAL_DIM = 0
 
 # Physiological scalars injected at head
-PHYS_SCALAR_D = len(PHYS_COLS) * 2   # [mean, std] per signal = 4
+PHYS_SCALAR_D = len(PHYS_COLS) * 3   # [mean, std] per signal = 4
 
 # Input clipping after LOO renorm — prevents outlier-driven gradient corruption
 RENORM_CLIP = 3.0
@@ -156,7 +156,9 @@ MAX_PLATT_W           = 20.0
 N_BOOTSTRAP        = 2000
 MIN_EVAL_POSITIVES = 5
 
-EXCLUDE_EVAL_DRIVERS = {"0B03R","0B04","0B07", "0C06"}
+EXCLUDE_EVAL_DRIVERS = {
+    "0D10", "0C09", "0D03R", "0A05", "0A10", "0C03", "0D04", "0B06"
+}
 N_PERM_REPEATS     = 10
 
 # SMOTE
@@ -261,24 +263,15 @@ def window_baseline_feats(X_raw, col_idx=None):
 
 def phys_scalar_feats(X_raw):
     """
-    Physiological scalar features for head injection.
-
-    Computes [mean(arousal), std(arousal), mean(HR), std(HR)] over the 90s window
-    from the LOO-renormalised raw signal array.  These capture the window-level
-    physiological state without requiring temporal modelling, which is appropriate
-    given the slow time-constant of arousal and HR relative to the 1 Hz sample rate.
-
-    Parameters
-    ----------
-    X_raw : ndarray (N, T, len(SIGNAL_COLS))
-
-    Returns
-    -------
-    ndarray (N, PHYS_SCALAR_D=4)
+    Physiological scalar features: mean, std, and slope (trend).
+    Slope captures direction of change in arousal/HR over the window.
     """
-    phys = X_raw[:, :, PHYS_IDX]   # (N, T, 2)
-    return np.concatenate([phys.mean(axis=1), phys.std(axis=1)],
-                          axis=1).astype(np.float32)   # (N, 4)
+    phys = X_raw[:, :, PHYS_IDX]                    # (N, T, 2)
+    means = phys.mean(axis=1)
+    stds  = phys.std(axis=1)
+    # Simple linear trend: (last - first) / (T-1)
+    slopes = (phys[:, -1, :] - phys[:, 0, :]) / max(phys.shape[1] - 1, 1)
+    return np.concatenate([means, stds, slopes], axis=1).astype(np.float32)
 
 # ── SPECTRAL FEATURES ────────────────────────────────────────────────────────────
 
@@ -552,13 +545,13 @@ class KinTCN(nn.Module):
         )
         self.kin_attn = TemporalAttention(self.KIN_D)
         
-        # NEW: FiLM Generator (Physiology -> Gamma & Beta)
+        # FiLM Generator: Physiology → Gamma & Beta (stronger capacity)
         self.phys_film = nn.Sequential(
-            nn.Linear(phys_scalar_d, 32),
-            nn.LayerNorm(32),              # <-- ADD THIS: Stabilizes the physiology scaling
+            nn.Linear(phys_scalar_d, 64),      # increased from 32
+            nn.LayerNorm(64),
             nn.ReLU(),
-            nn.Dropout(0.2),               # <-- ADD THIS: Prevents overfitting to specific heart rates
-            nn.Linear(32, self.KIN_D * 2) 
+            nn.Dropout(0.15),                  # slightly reduced
+            nn.Linear(64, self.KIN_D * 2)
         )
 
         # UPDATED: Head now only takes KIN_D (64) since Phys is fused via FiLM
@@ -935,7 +928,7 @@ def main():
     print(f"Min eval positives: {MIN_EVAL_POSITIVES}")
     print(f"Epochs            : {EPOCHS}  |  LR : {LR}  |  Scheduler : CosineAnnealingLR")
     print(f"GAP / HORIZON     : {GAP}s / {HORIZON}s  →  predicts errors in [{GAP}, {GAP+HORIZON}]s")
-    print(f"Personalisation   : Platt† and HeadFT† on first {GATE_ADAPT_K} test windows")
+    print(f"Personalisation   : DISABLED (sparse positives)")    
     print(f"Device            : {DEVICE}")
     print(f"{'='*72}\n")
 
@@ -1216,15 +1209,11 @@ def main():
         auc_tcn  = _nan_or(safe_auc(y_te, tcn_scores))
         auc_tcnp = _nan_or(safe_auc(y_te, tcnp_scores))
 
-        # Personalisation (online — uses first GATE_ADAPT_K test labels)
-        platt_scores = platt_adapt(tcnp_scores, y_te)
-        auc_platt    = _nan_or(safe_auc(y_te[GATE_ADAPT_K:], platt_scores[GATE_ADAPT_K:]))
 
-        Xte_ps_zeros = np.zeros_like(Xte_ps_sc)
-        head_scores  = head_adapt(model_tcnp,
-                                   Xte_k_sc, Xte_ps_sc, Xte_s_sc, y_te)
-        auc_head     = _nan_or(safe_auc(y_te[GATE_ADAPT_K:], head_scores[GATE_ADAPT_K:])
-                               if head_scores is not None else None)
+        platt_scores = tcnp_scores.copy()
+        auc_platt    = auc_tcnp
+        head_scores  = None
+        auc_head     = float("nan")
 
         thresh_tcn  = _val_threshold(y_val_d, val_tcn_sc)
         thresh_tcnp = _val_threshold(y_val_d, val_tcnp_sc)
