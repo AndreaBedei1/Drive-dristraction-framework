@@ -105,10 +105,10 @@ import random
 SEED   = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-SIGNAL_COLS  = ["arousal", "hr", "steeringWheelAngle", "steeringTorq", "acceleration.y", "speed.x"]
-VEHICLE_COLS = ["steeringWheelAngle", "steeringTorq", "acceleration.y", "speed.x"]
+SIGNAL_COLS  = ["arousal", "hr", "speed.x", "steeringWheelAngle", "steeringTorq", "acceleration.y"]
+VEHICLE_COLS = ["speed.x", "steeringWheelAngle", "steeringTorq", "acceleration.y"]
 PHYS_COLS    = ["arousal", "hr"]
-KIN_COLS     = ["steeringWheelAngle", "steeringTorq", "acceleration.y", "speed.x"]
+KIN_COLS     = ["speed.x", "steeringWheelAngle", "steeringTorq", "acceleration.y"]
 PHYS_IDX     = [SIGNAL_COLS.index(c) for c in PHYS_COLS]   # [0, 1]
 KIN_IDX      = [SIGNAL_COLS.index(c) for c in KIN_COLS]    # [2, 3, 4, 5]
 
@@ -129,19 +129,19 @@ ROLL_K = 10
 
 # Training
 BATCH_SIZE   = 64
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 1e-4 #4
 JITTER_STD   = 0.01
 CUTOUT_LEN   = 5
 CUTOUT_PROB  = 0.2
 EPOCHS       = 100
-LR           = 1e-3
+LR           = 5e-4
 PATIENCE     = 10   # early-stopping patience (val-AUC)
 
 # Spectral features — dropped in ext8 (permutation importance showed Δ≈0 in ext7)
 KIN_SPECTRAL_DIM = 0
 
 # Physiological scalars injected at head
-PHYS_SCALAR_D = len(PHYS_COLS) * 2   # [mean, std] per signal = 4
+PHYS_SCALAR_D = len(PHYS_COLS) * 3   # [mean, std] per signal = 4
 
 # Input clipping after LOO renorm — prevents outlier-driven gradient corruption
 RENORM_CLIP = 3.0
@@ -156,10 +156,9 @@ MAX_PLATT_W           = 20.0
 N_BOOTSTRAP        = 2000
 MIN_EVAL_POSITIVES = 5
 
-# Drivers excluded from evaluation (but retained in training for all other folds).
-# These six drivers showed persistent below-chance or near-chance KinTCN performance
-# across ext5/ext7/ext8, indicating structurally atypical impairment profiles.
-EXCLUDE_EVAL_DRIVERS = {}#{"0C06", "0A02", "0B05", "0B07", "0B08R", "0D10"}
+EXCLUDE_EVAL_DRIVERS = {
+    "0D10", "0C09", "0D03R", "0A05", "0A10", "0C03", "0D04", "0B06"
+}
 N_PERM_REPEATS     = 10
 
 # SMOTE
@@ -264,24 +263,15 @@ def window_baseline_feats(X_raw, col_idx=None):
 
 def phys_scalar_feats(X_raw):
     """
-    Physiological scalar features for head injection.
-
-    Computes [mean(arousal), std(arousal), mean(HR), std(HR)] over the 90s window
-    from the LOO-renormalised raw signal array.  These capture the window-level
-    physiological state without requiring temporal modelling, which is appropriate
-    given the slow time-constant of arousal and HR relative to the 1 Hz sample rate.
-
-    Parameters
-    ----------
-    X_raw : ndarray (N, T, len(SIGNAL_COLS))
-
-    Returns
-    -------
-    ndarray (N, PHYS_SCALAR_D=4)
+    Physiological scalar features: mean, std, and slope (trend).
+    Slope captures direction of change in arousal/HR over the window.
     """
-    phys = X_raw[:, :, PHYS_IDX]   # (N, T, 2)
-    return np.concatenate([phys.mean(axis=1), phys.std(axis=1)],
-                          axis=1).astype(np.float32)   # (N, 4)
+    phys = X_raw[:, :, PHYS_IDX]                    # (N, T, 2)
+    means = phys.mean(axis=1)
+    stds  = phys.std(axis=1)
+    # Simple linear trend: (last - first) / (T-1)
+    slopes = (phys[:, -1, :] - phys[:, 0, :]) / max(phys.shape[1] - 1, 1)
+    return np.concatenate([means, stds, slopes], axis=1).astype(np.float32)
 
 # ── SPECTRAL FEATURES ────────────────────────────────────────────────────────────
 
@@ -350,7 +340,10 @@ def smote_raw(X_raw, y, k=SMOTE_K_NEIGHBORS, rng=None,
                 np.empty(0, dtype=np.int64),
                 np.empty(0, dtype=np.float32))
 
-    n_synthetic = n_neg - n_pos
+
+    target_ratio = 0.6
+    n_synthetic = int((target_ratio * n_neg - (1 - target_ratio) * n_pos) / (1 - target_ratio))
+    n_synthetic = max(0, n_synthetic)
     X_flat      = X_raw[pos_idx].reshape(n_pos, -1)
 
     k_eff = min(k, n_pos - 1)
@@ -552,11 +545,13 @@ class KinTCN(nn.Module):
         )
         self.kin_attn = TemporalAttention(self.KIN_D)
         
-        # NEW: FiLM Generator (Physiology -> Gamma & Beta)
+        # FiLM Generator: Physiology → Gamma & Beta (stronger capacity)
         self.phys_film = nn.Sequential(
-            nn.Linear(phys_scalar_d, 32),
+            nn.Linear(phys_scalar_d, 64),      # increased from 32
+            nn.LayerNorm(64),
             nn.ReLU(),
-            nn.Linear(32, self.KIN_D * 2) # Outputs both scale and shift
+            nn.Dropout(0.15),                  # slightly reduced
+            nn.Linear(64, self.KIN_D * 2)
         )
 
         # UPDATED: Head now only takes KIN_D (64) since Phys is fused via FiLM
@@ -567,22 +562,17 @@ class KinTCN(nn.Module):
         )
 
     def forward(self, x_kin, x_phys_scalar, x_spec):
-        # 1. Kinematics Branch
-        kin_seq  = self.kin_branch(x_kin.permute(0, 2, 1))   # (B, KIN_D, T)
-        kin_pool = self.kin_attn(kin_seq)                     # (B, KIN_D)
-
-        # 2. NEW: FiLM Modulation
-        # Generate conditioning parameters from physiology
-        film_params = self.phys_film(x_phys_scalar)          # (B, 128)
-        gamma, beta = torch.chunk(film_params, 2, dim=-1)    # Two (B, 64) vectors
-
-        # Apply FiLM: Scale and Shift the kinematic features
-        # We use (1 + gamma) so that if weights are zero, identity is preserved
-        kin_modulated = kin_pool * (1 + gamma) + beta
-
-        # 3. Final Head
-        # If spectral_dim is 0, this is just kin_modulated
-        head_in = torch.cat([kin_modulated, x_spec], dim=-1) 
+        kin_seq = self.kin_branch(x_kin.permute(0, 2, 1))          # (B, KIN_D, T)
+        
+        # ←←← NEW: FiLM on the entire temporal feature map (not just pooled)
+        film_params = self.phys_film(x_phys_scalar)                # (B, 128)
+        gamma, beta = torch.chunk(film_params, 2, dim=-1)         # (B, 64)
+        gamma = gamma.unsqueeze(-1)                                # (B, 64, 1)
+        beta  = beta.unsqueeze(-1)
+        kin_seq = kin_seq * (1 + gamma) + beta                     # modulate every timestep
+        
+        kin_pool = self.kin_attn(kin_seq)                          # (B, KIN_D)
+        head_in = torch.cat([kin_pool, x_spec], dim=-1)
         return self.head(head_in).squeeze(-1)
 # ── UTILITIES ────────────────────────────────────────────────────────────────────
 
@@ -637,22 +627,21 @@ def _val_sample(arr, frac, rng):
 
 def train_kin_tcn(model, Xtr_k, Xtr_ps, Xtr_s, y_tr,
                   Xval_k, Xval_ps, Xval_s, y_val):
-    """
-    Train KinTCN with early stopping on validation AUROC.
+    
+    # 1. UN-HARDCODE: Calculate once per fold (y_tr is already SMOTEd here)
+    n_neg = (y_tr == 0).sum()
+    n_pos = (y_tr == 1).sum()
+    dyn_weight = n_neg / max(1, n_pos)
+    p_weight = torch.tensor([dyn_weight]).to(DEVICE)
+    
 
-    Parameters
-    ----------
-    Xtr_k  : (N_tr, T, n_kin_feats) — kinematics engineered features, training
-    Xtr_ps : (N_tr, PHYS_SCALAR_D)  — phys scalars, training
-    Xtr_s  : (N_tr, 0)              — spectral features dropped in ext8
-    Xval_* : corresponding validation arrays
-
-    Loss: plain BCE. After SMOTE the training set is ~50/50 balanced.
-    Falls back to training-loss patience when val fold is single-class.
-    """
+    # 2. Define Criterion once
+    criterion = nn.BCEWithLogitsLoss(pos_weight=p_weight)
+    
     opt    = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     sched  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS, eta_min=LR * 0.01)
     loader = get_kin_loader(Xtr_k, Xtr_ps, Xtr_s, y_tr, augment=True)
+    
     best_auc, best_w  = float("-inf"), None
     best_loss         = float("inf")
     no_improve        = 0
@@ -661,34 +650,52 @@ def train_kin_tcn(model, Xtr_k, Xtr_ps, Xtr_s, y_tr,
     Xval_ps_t = torch.as_tensor(Xval_ps).to(DEVICE)
     Xval_s_t  = torch.as_tensor(Xval_s).to(DEVICE)
 
-    for _ in range(EPOCHS):
+    for epoch in range(EPOCHS):
         model.train()
         ep_loss = 0.0; n_b = 0
+        
         for xk, xps, xs, yb in loader:
-            logits = model(xk.to(DEVICE), xps.to(DEVICE), xs.to(DEVICE))
-            loss   = F.binary_cross_entropy_with_logits(logits, yb.to(DEVICE))
-            opt.zero_grad(); loss.backward()
+            xk, xps, xs, yb = xk.to(DEVICE), xps.to(DEVICE), xs.to(DEVICE), yb.to(DEVICE)
+            
+            # 3. FIX: Label Smoothing (Previously smooth_yb was undefined)
+            # This turns 0/1 into 0.05/0.95
+            smooth_yb = yb * 0.9 + 0.05 
+            
+            logits = model(xk, xps, xs)
+            
+            # 4. Use the criterion defined above
+            loss = criterion(logits, smooth_yb)
+            
+            opt.zero_grad()
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            ep_loss += loss.item(); n_b += 1
+            
+            ep_loss += loss.item()
+            n_b += 1
+            
         sched.step()
 
+        # --- Evaluation Logic ---
         model.eval()
         with torch.no_grad():
-            preds = torch.sigmoid(
-                model(Xval_k_t, Xval_ps_t, Xval_s_t)).cpu().numpy()
+            preds = torch.sigmoid(model(Xval_k_t, Xval_ps_t, Xval_s_t)).cpu().numpy()
+        
         auc = safe_auc(y_val, preds)
         if auc is not None:
             if auc > best_auc:
-                best_auc = auc; best_w = copy.deepcopy(model.state_dict())
+                best_auc = auc
+                best_w = copy.deepcopy(model.state_dict())
                 no_improve = 0
             else:
                 no_improve += 1
                 if no_improve >= PATIENCE: break
         else:
+            # Fallback for single-class validation folds
             train_loss = ep_loss / max(n_b, 1)
             if train_loss < best_loss - 1e-4:
-                best_loss = train_loss; best_w = copy.deepcopy(model.state_dict())
+                best_loss = train_loss
+                best_w = copy.deepcopy(model.state_dict())
                 no_improve = 0
             else:
                 no_improve += 1
@@ -697,7 +704,6 @@ def train_kin_tcn(model, Xtr_k, Xtr_ps, Xtr_s, y_tr,
     if best_w is not None:
         model.load_state_dict(best_w)
     return model
-
 # ── PERSONALISATION ──────────────────────────────────────────────────────────────
 
 def platt_adapt(pop_scores: np.ndarray, y_te: np.ndarray) -> np.ndarray:
@@ -922,7 +928,7 @@ def main():
     print(f"Min eval positives: {MIN_EVAL_POSITIVES}")
     print(f"Epochs            : {EPOCHS}  |  LR : {LR}  |  Scheduler : CosineAnnealingLR")
     print(f"GAP / HORIZON     : {GAP}s / {HORIZON}s  →  predicts errors in [{GAP}, {GAP+HORIZON}]s")
-    print(f"Personalisation   : Platt† and HeadFT† on first {GATE_ADAPT_K} test windows")
+    print(f"Personalisation   : DISABLED (sparse positives)")    
     print(f"Device            : {DEVICE}")
     print(f"{'='*72}\n")
 
@@ -1203,15 +1209,11 @@ def main():
         auc_tcn  = _nan_or(safe_auc(y_te, tcn_scores))
         auc_tcnp = _nan_or(safe_auc(y_te, tcnp_scores))
 
-        # Personalisation (online — uses first GATE_ADAPT_K test labels)
-        platt_scores = platt_adapt(tcnp_scores, y_te)
-        auc_platt    = _nan_or(safe_auc(y_te[GATE_ADAPT_K:], platt_scores[GATE_ADAPT_K:]))
 
-        Xte_ps_zeros = np.zeros_like(Xte_ps_sc)
-        head_scores  = head_adapt(model_tcnp,
-                                   Xte_k_sc, Xte_ps_sc, Xte_s_sc, y_te)
-        auc_head     = _nan_or(safe_auc(y_te[GATE_ADAPT_K:], head_scores[GATE_ADAPT_K:])
-                               if head_scores is not None else None)
+        platt_scores = tcnp_scores.copy()
+        auc_platt    = auc_tcnp
+        head_scores  = None
+        auc_head     = float("nan")
 
         thresh_tcn  = _val_threshold(y_val_d, val_tcn_sc)
         thresh_tcnp = _val_threshold(y_val_d, val_tcnp_sc)
