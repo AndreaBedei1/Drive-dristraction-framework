@@ -73,7 +73,7 @@ SEVERITY = {
 }
 # sharp_turn excluded (kinematic self-correlation, see ext10).
 # center_line_crossing excluded (see ext4).
-SCORE_THRESHOLD = 3   # y=1 iff composite_risk_score >= SCORE_THRESHOLD
+SCORE_THRESHOLD = 1   # y=1 iff composite_risk_score >= SCORE_THRESHOLD
 
 # Windowing
 LOOKBACK_S  = 45
@@ -89,17 +89,19 @@ CUTOUT_LEN   = 5
 CUTOUT_PROB  = 0.2
 EPOCHS       = 100
 LR           = 5e-4
-PATIENCE     = 10
+PATIENCE     = 30
 
 RENORM_CLIP          = 3.0
 N_BOOTSTRAP          = 2000
 MIN_EVAL_POSITIVES   = 5
 N_PERM_REPEATS       = 10
-EXCLUDE_EVAL_DRIVERS = {}
+EXCLUDE_EVAL_DRIVERS = {"0D04", "0D03R", "0D05"}
+
 
 USE_SMOTE         = True
 SMOTE_K_NEIGHBORS = 5
 SMOTE_SEED_SALT   = 0xABCD
+TARGET_RATIO = 0.9
 
 # ── DETERMINISM ───────────────────────────────────────────────────────────────
 if os.environ.get("PYTHONHASHSEED") != str(SEED):
@@ -205,9 +207,9 @@ def smote_raw(X_raw, y, scores=None, k=SMOTE_K_NEIGHBORS, rng=None,
                 np.empty(0, dtype=np.int64),
                 np.empty(0, dtype=np.float32))
 
-    target_ratio = 0.6
-    n_synthetic  = int((target_ratio * n_neg - (1 - target_ratio) * n_pos)
-                       / (1 - target_ratio))
+    
+    n_synthetic  = int((TARGET_RATIO * n_neg - (1 - TARGET_RATIO) * n_pos)
+                       / (1 - TARGET_RATIO))
     n_synthetic  = max(0, n_synthetic)
     X_flat       = X_raw[pos_idx].reshape(n_pos, -1)
 
@@ -475,7 +477,8 @@ def train_kin_tcn(model, Xtr_k, y_tr, scores_tr, Xval_k, y_val):
         batch_size=BATCH_SIZE, shuffle=True)
     opt   = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS, eta_min=LR * 0.01)
-
+ #   sched = torch.optim.lr_scheduler.OneCycleLR(
+ #       opt, max_lr=LR * 5, steps_per_epoch=len(loader), epochs=EPOCHS, pct_start=0.3)
     best_auc, best_w = float("-inf"), None
     best_loss        = float("inf")
     no_improve       = 0
@@ -492,8 +495,9 @@ def train_kin_tcn(model, Xtr_k, y_tr, scores_tr, Xval_k, y_val):
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+            #sched.step() #one cycle
             ep_loss += loss.item(); n_b += 1
-        sched.step()
+        sched.step() #cosine
 
         model.eval()
         with torch.no_grad():
@@ -656,7 +660,7 @@ def main():
     print(f"Score thr   : ≥ {SCORE_THRESHOLD}  (Red_light=3, Collision=5+)")
     print(f"Loss        : Score-weighted BCE  (positive weight = score / mean_pos_score)")
     print(f"Calibration : Val-set Platt scaling  (KinTCN+Cal)")
-    print(f"SMOTE       : k={SMOTE_K_NEIGHBORS},  target 60:40 neg:pos")
+    print(f"SMOTE       : k={SMOTE_K_NEIGHBORS} ratio {TARGET_RATIO}:{1-TARGET_RATIO} pos:neg")
     print(f"Renorm clip : ±{RENORM_CLIP}σ")
     print(f"Epochs      : {EPOCHS}  |  LR : {LR}  |  Patience : {PATIENCE}")
     print(f"GAP/HORIZON : {GAP}s / {HORIZON}s")

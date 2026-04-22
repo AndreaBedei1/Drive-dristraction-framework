@@ -17,7 +17,7 @@ Inherited from ext11 (unchanged):
   - Pure kinematics, no physiology.
   - SCORE_THRESHOLD=1, score-weighted BCE loss.
   - OneCycleLR scheduler.
-  - SMOTE target_ratio=0.9.
+  - SMOTE TARGET_RATIO=0.9.
   - Val-set Platt calibration.
   - AUROC / AUPRC / Brier / ECE + Wilcoxon vs XGB.
 
@@ -85,14 +85,15 @@ CUTOUT_LEN   = 5
 CUTOUT_PROB  = 0.2
 EPOCHS       = 100
 LR           = 5e-4
-PATIENCE     = 10
+PATIENCE     = 20
 
 RENORM_CLIP          = 3.0
 N_BOOTSTRAP          = 2000
 MIN_EVAL_POSITIVES   = 5
 N_PERM_REPEATS       = 10
 ENSEMBLE_K           = 5    # independent training runs per fold; outputs averaged
-EXCLUDE_EVAL_DRIVERS = {}
+EXCLUDE_EVAL_DRIVERS = {"0D04", "0D03R", "0D05"}
+TARGET_RATIO = 0.9
 
 USE_SMOTE         = True
 SMOTE_K_NEIGHBORS = 5
@@ -202,9 +203,9 @@ def smote_raw(X_raw, y, scores=None, k=SMOTE_K_NEIGHBORS, rng=None,
                 np.empty(0, dtype=np.int64),
                 np.empty(0, dtype=np.float32))
 
-    target_ratio = 0.6
-    n_synthetic  = int((target_ratio * n_neg - (1 - target_ratio) * n_pos)
-                       / (1 - target_ratio))
+    
+    n_synthetic  = int((TARGET_RATIO * n_neg - (1 - TARGET_RATIO) * n_pos)
+                       / (1 - TARGET_RATIO))
     n_synthetic  = max(0, n_synthetic)
     X_flat       = X_raw[pos_idx].reshape(n_pos, -1)
 
@@ -471,6 +472,8 @@ def train_kin_tcn(model, Xtr_k, y_tr, scores_tr, Xval_k, y_val):
         KinDataset(Xtr_k, y_tr, scores_tr, augment=True),
         batch_size=BATCH_SIZE, shuffle=True)
     opt   = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+     #   sched = torch.optim.lr_scheduler.OneCycleLR(
+ #       opt, max_lr=LR * 5, steps_per_epoch=len(loader), epochs=EPOCHS, pct_start=0.3)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS, eta_min=LR * 0.01)
 
     best_auc, best_w = float("-inf"), None
@@ -489,8 +492,9 @@ def train_kin_tcn(model, Xtr_k, y_tr, scores_tr, Xval_k, y_val):
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+            #sched.step() #one cycle
             ep_loss += loss.item(); n_b += 1
-        sched.step()
+        sched.step() #cosine
 
         model.eval()
         with torch.no_grad():
@@ -520,7 +524,7 @@ def print_validity_report(X_raw, y, scores, pids):
     pos   = y == 1; total_pos = pos.sum(); total = len(y)
     unique, cnts = np.unique(scores[pos].astype(int), return_counts=True)
     print(f"\n{'='*72}")
-    print("LABEL VALIDITY REPORT — COMPOSITE RISK TARGET (score ≥ 3)")
+    print("LABEL VALIDITY REPORT")
     print(f"{'='*72}")
     print(f"Total windows    : {total}")
     print(f"Positive (risk≥{SCORE_THRESHOLD}): {total_pos} ({100*total_pos/total:.1f}%)")
