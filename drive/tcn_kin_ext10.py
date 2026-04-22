@@ -1246,7 +1246,7 @@ def main():
 
         pool_y.append(y_te); pool_tcn.append(tcn_scores); pool_tcnp.append(tcnp_scores)
         pool_lr.append(lr_scores); pool_xgb.append(xgb_scores)
-        pool_platt.append((y_te, platt_scores))<
+        pool_platt.append((y_te, platt_scores))
         if head_scores is not None:
             pool_head.append((y_te, head_scores))
         pool_models_tcnp.append(model_tcnp)
