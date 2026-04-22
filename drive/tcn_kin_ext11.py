@@ -51,7 +51,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from scipy.stats import mannwhitneyu
+from scipy.stats import mannwhitneyu, wilcoxon
 from scipy.spatial.distance import cdist
 import xgboost as xgb
 import random
@@ -936,6 +936,25 @@ def main():
         deltas = signal_deltas[col]
         if deltas:
             print(f"    {col:<30} Δ={np.mean(deltas):+.4f} ± {np.std(deltas):.4f}")
+
+    # Wilcoxon: KinTCN vs XGB
+    paired_tcn_xgb = [
+        (r["auc_xgb"], r["auc_cal"]) for r in per_driver_results
+        if not (math.isnan(r["auc_xgb"]) or math.isnan(r["auc_cal"]))
+    ]
+    if len(paired_tcn_xgb) >= 10:
+        a_xgb, a_tcn = zip(*paired_tcn_xgb)
+        diff_tx = np.array(a_tcn) - np.array(a_xgb)
+        n_tcn_wins = int((diff_tx > 0).sum())
+        if np.any(diff_tx != 0):
+            stat_tx, p_tx = wilcoxon(list(a_tcn), list(a_xgb), alternative="two-sided")
+            sig_tx = "***" if p_tx < 0.001 else ("**" if p_tx < 0.01 else ("*" if p_tx < 0.05 else "ns"))
+            print(f"\n{'='*72}")
+            print("WILCOXON SIGNED-RANK TEST — KinTCN+Cal vs XGB")
+            print(f"{'='*72}")
+            print(f"  W={stat_tx:.1f}  p={p_tx:.4f}  {sig_tx}")
+            print(f"  Mean per-driver gain (KinTCN+Cal − XGB): {diff_tx.mean():+.4f} ± {diff_tx.std():.4f}")
+            print(f"  KinTCN+Cal > XGB : {n_tcn_wins}/{len(diff_tx)} drivers  ({100*n_tcn_wins/len(diff_tx):.1f}%)")
 
     # Per-driver summary
     print(f"\n{'='*72}")
