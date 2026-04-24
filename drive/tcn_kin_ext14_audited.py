@@ -90,7 +90,7 @@ MIN_EVAL_POSITIVES   = 5
 N_PERM_REPEATS       = 10
 ENSEMBLE_K           = 10    # independent training runs per fold; outputs averaged
 EXCLUDE_EVAL_DRIVERS = {"0D04", "0D03R", "0D05"}
-TARGET_RATIO = 0.9
+TARGET_RATIO = 0.3
 
 USE_SMOTE         = True
 SMOTE_K_NEIGHBORS = 5
