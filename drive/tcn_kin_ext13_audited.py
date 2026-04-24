@@ -669,13 +669,11 @@ def main():
     drivers = [d for d in np.unique(pid_all)
                if y_all[pid_all == d].sum() >= MIN_EVAL_POSITIVES]
 
-    # Safe drivers: 0 positives, present in dataset but excluded from eval loop
+    # Audit drivers: < MIN_EVAL_POSITIVES, excluded from main eval loop
     safe_drivers = sorted([p for p in np.unique(pid_all)
-                           if y_all[pid_all == p].sum() == 0])
-    safe_driver_fold_preds = {s: [] for s in safe_drivers}  # raw ensemble avg per fold
-    safe_driver_fold_cal   = {s: [] for s in safe_drivers}  # Platt-calibrated per fold
+                           if y_all[pid_all == p].sum() < MIN_EVAL_POSITIVES])
     if safe_drivers:
-        print(f"  Safe drivers (0 positives, audit targets): {safe_drivers}\n")
+        print(f"  Audit drivers (<{MIN_EVAL_POSITIVES} positives, held-out FPR targets): {safe_drivers}\n")
 
     hdr = (f"{'Driver':<10} | {'N_win':>5} {'PosR%':>6} | "
            f"{'LR':>7} {'XGB':>7} {'KinTCN':>7} {'KinTCN+Cal':>11}")
@@ -892,35 +890,6 @@ def main():
         # Val-set Platt calibration on ensemble-averaged val scores
         cal_scores, platt_lr = val_platt_calibrate(val_scores, y_val_d, tcn_scores)
 
-        # ── SAFE DRIVER AUDIT — inference for zero-positive drivers ───────────
-        for s in safe_drivers:
-            mask_s   = pid_all == s
-            Xs_raw   = X_raw_all[mask_s].copy()
-            pids_s   = pid_all[mask_s]
-            routes_s = routes_all[mask_s]
-            if len(Xs_raw) == 0:
-                continue
-            Xs_renorm = _loo_renorm(Xs_raw, pids_s, routes_s, all_session_stats,
-                                    _route_sum_mus, _route_sum_sigs2, _route_counts,
-                                    ci_norm_map, f"safe_audit_{s}_fold_{d}")
-            Xs_renorm = np.clip(Xs_renorm, -RENORM_CLIP, RENORM_CLIP)
-            Xs_k_feat = apply_features_branch(Xs_renorm, KIN_IDX)
-            Xs_k_sc   = scaler_k.transform(
-                Xs_k_feat.reshape(-1, n_kin_feat)).reshape(-1, LOOKBACK_S, n_kin_feat)
-            Xs_t = torch.as_tensor(Xs_k_sc).to(DEVICE)
-            s_preds_list = []
-            for model_k in ensemble_models:
-                model_k.eval()
-                with torch.no_grad():
-                    s_preds_list.append(torch.sigmoid(model_k(Xs_t)).cpu().numpy().flatten())
-            raw_preds = np.mean(s_preds_list, axis=0)
-            safe_driver_fold_preds[s].append(raw_preds)
-            if platt_lr is not None:
-                cal_preds = platt_lr.predict_proba(raw_preds.reshape(-1, 1))[:, 1]
-            else:
-                cal_preds = raw_preds
-            safe_driver_fold_cal[s].append(cal_preds)
-
         auc_lr  = _nan_or(safe_auc(y_te, lr_scores))
         auc_xgb = _nan_or(safe_auc(y_te, xgb_scores))
         auc_tcn = _nan_or(safe_auc(y_te, tcn_scores))
@@ -1022,31 +991,187 @@ def main():
     if gains:
         print(f"  Cal gain vs raw    : {np.mean(gains):+.4f} ± {np.std(gains):.4f}")
 
-    # ── SAFE DRIVER AUDIT REPORT ──────────────────────────────────────────────
+    # ── DEDICATED SAFE DRIVER FOLDS — unbiased FPR ───────────────────────────
+    # Each safe driver is held out for one dedicated fold so the model never
+    # trains on their windows, giving a true out-of-sample false positive rate.
     audit_rows = []
     if safe_drivers:
         ALERT_THR = 0.5
         print(f"\n{'='*72}")
-        print("SAFE DRIVER AUDIT — False Positive Rate (drivers with 0 errors)")
+        print("AUDIT DRIVERS — False Positive Rate (dedicated held-out folds)")
         print(f"{'='*72}")
-        print(f"  Alert threshold : {ALERT_THR}  |  Calibrated Platt scores")
-        print(f"  {'Driver':<10} {'N_win':>6} {'MeanProb':>10} {'FPR@0.5':>10}")
-        print(f"  {'-'*42}")
+        print(f"  Alert threshold : {ALERT_THR}  |  Calibrated Platt scores  |  FPR on negative windows only")
+        print(f"  {'Driver':<10} {'N_win':>6} {'N_pos':>5} {'MeanProb(neg)':>13} {'FPR@0.5':>10}")
+        print(f"  {'-'*50}")
         all_fpr, all_prob = [], []
+
         for s in safe_drivers:
-            if not safe_driver_fold_cal[s]:
+            # ── fold setup: hold out s entirely ──────────────────────────────
+            mask_tr_s   = pid_all != s
+            X_tr_s      = X_raw_all[mask_tr_s];  y_tr_s  = y_all[mask_tr_s]
+            sc_tr_s     = scores_all[mask_tr_s]
+            pid_tr_s    = pid_all[mask_tr_s];     routes_tr_s = routes_all[mask_tr_s]
+            ts_tr_s     = ts_all[mask_tr_s]
+
+            mask_te_s   = pid_all == s
+            X_te_s      = X_raw_all[mask_te_s].copy()
+            y_te_s      = y_all[mask_te_s]
+            routes_te_s = routes_all[mask_te_s]
+            if len(X_te_s) == 0:
                 continue
-            # Average Platt-calibrated predictions across all LOPO folds
-            preds_avg = np.stack(safe_driver_fold_cal[s], axis=0).mean(axis=0)
-            n_win     = len(preds_avg)
-            mean_prob = float(preds_avg.mean())
-            fpr       = float((preds_avg >= ALERT_THR).mean())
-            all_fpr.append(fpr); all_prob.append(mean_prob)
-            print(f"  {s:<10} {n_win:>6} {mean_prob:>10.4f} {fpr:>10.4f}")
-            audit_rows.append({"driver": s, "n_windows": n_win,
-                                "mean_prob_cal": mean_prob, "fpr_at_0.5": fpr})
-        print(f"  {'-'*42}")
-        print(f"  {'Aggregate':<10} {'':>6} {np.mean(all_prob):>10.4f} {np.mean(all_fpr):>10.4f}")
+
+            seed_s     = int(hashlib.md5(str(s).encode()).hexdigest(), 16) & 0xFFFFFFFF
+            fold_rng_s = np.random.default_rng(SEED ^ seed_s)
+            torch.manual_seed(SEED ^ seed_s);  torch.cuda.manual_seed_all(SEED ^ seed_s)
+
+            # val split from training pool (excluding s)
+            td_s      = np.unique(pid_tr_s)
+            has_pos_s = np.array([y_tr_s[pid_tr_s == p].sum() > 0 for p in td_s])
+            val_ids_s = np.concatenate([
+                _val_sample(td_s[has_pos_s],  0.25, fold_rng_s),
+                _val_sample(td_s[~has_pos_s], 0.25, fold_rng_s),
+            ])
+            val_ids_set_s = set(val_ids_s.tolist())
+            vmask_s       = np.isin(pid_tr_s, val_ids_s)
+
+            # route reference pools (exclude s; val-aware for LOO train renorm)
+            _rs_sum_mus:   dict = {}
+            _rs_sum_sigs2: dict = {}
+            _rs_counts:    dict = {}
+            _rs_all_mus:   dict = {}
+            _rs_all_sigs:  dict = {}
+            for (p_k, r_k, c_k), (mu_k, sig_k) in all_session_stats.items():
+                if p_k == s or math.isnan(mu_k) or math.isnan(sig_k):
+                    continue
+                key = (r_k, c_k)
+                _rs_all_mus.setdefault(key, []).append(mu_k)
+                _rs_all_sigs.setdefault(key, []).append(sig_k)
+                if p_k not in val_ids_set_s:
+                    _rs_sum_mus[key]   = _rs_sum_mus.get(key,   0.0) + mu_k
+                    _rs_sum_sigs2[key] = _rs_sum_sigs2.get(key, 0.0) + sig_k ** 2
+                    _rs_counts[key]    = _rs_counts.get(key,    0)   + 1
+
+            _rs_pure_stats: dict = {
+                k: (_rs_sum_mus[k] / _rs_counts[k],
+                    math.sqrt(max(_rs_sum_sigs2[k] / _rs_counts[k], 0.0)))
+                for k in _rs_sum_mus if _rs_counts[k] >= 1
+            }
+            _rs_all_stats: dict = {
+                k: (float(np.mean(v)),
+                    math.sqrt(max(float(np.mean(np.array(_rs_all_sigs[k]) ** 2)), 0.0)))
+                for k, v in _rs_all_mus.items()
+            }
+
+            # renorm test (safe driver) windows — same test-driver path as main loop
+            for rv in np.unique(routes_te_s):
+                rm = routes_te_s == rv
+                for col_v, ci_v in ci_norm_map.items():
+                    k_own = (s, rv, col_v);  k_rte = (rv, col_v)
+                    if k_own not in all_session_stats or k_rte not in _rs_all_stats:
+                        continue
+                    t_mu, t_sig = all_session_stats[k_own]
+                    if math.isnan(t_mu) or math.isnan(t_sig):
+                        continue
+                    r_mu, r_sig = _rs_all_stats[k_rte]
+                    X_te_s[rm, :, ci_v] = (
+                        X_te_s[rm, :, ci_v] * (t_sig + 1e-6) + t_mu - r_mu
+                    ) / max(r_sig, 1e-6)
+            X_te_s = np.clip(X_te_s, -RENORM_CLIP, RENORM_CLIP)
+
+            # renorm train windows (LOO — s excluded so no leakage)
+            X_tr_s = _loo_renorm(X_tr_s, pid_tr_s, routes_tr_s, all_session_stats,
+                                  _rs_sum_mus, _rs_sum_sigs2, _rs_counts,
+                                  ci_norm_map, f"safe_fold_{s}_train")
+            X_tr_s = np.clip(X_tr_s, -RENORM_CLIP, RENORM_CLIP)
+
+            # val windows
+            df_val_s = df[df["id"].isin(val_ids_set_s)].copy()
+            X_val_s, y_val_s, _, _pv, _rv, _ = build_windows(df_val_s)
+            X_val_s = X_val_s.copy()
+            for _vp in np.unique(_pv):
+                for _vr in np.unique(_rv[_pv == _vp]):
+                    _vm = (_pv == _vp) & (_rv == _vr)
+                    for _vc, _vci in ci_norm_map.items():
+                        _ko = (_vp, _vr, _vc);  _kr = (_vr, _vc)
+                        if _ko not in all_session_stats or _kr not in _rs_pure_stats:
+                            continue
+                        _vmu, _vsig = all_session_stats[_ko]
+                        if math.isnan(_vmu) or math.isnan(_vsig):
+                            continue
+                        _trmu, _trsig = _rs_pure_stats[_kr]
+                        X_val_s[_vm, :, _vci] = (
+                            X_val_s[_vm, :, _vci] * (_vsig + 1e-6) + _vmu - _trmu
+                        ) / max(_trsig, 1e-6)
+            X_val_s = np.clip(X_val_s, -RENORM_CLIP, RENORM_CLIP)
+
+            # SMOTE on pure-train split
+            X_tr_s_tr  = X_tr_s[~vmask_s];  y_tr_s_tr  = y_tr_s[~vmask_s]
+            sc_s_tr    = sc_tr_s[~vmask_s];  pid_s_tr   = pid_tr_s[~vmask_s]
+            rt_s_tr    = routes_tr_s[~vmask_s]; ts_s_tr  = ts_tr_s[~vmask_s]
+            if USE_SMOTE:
+                smrng_s = np.random.default_rng(SEED ^ seed_s ^ SMOTE_SEED_SALT)
+                X_aug_s, y_aug_s, sc_aug_s, _an_s, _ne_s, _lm_s = smote_raw(
+                    X_tr_s_tr, y_tr_s_tr, scores=sc_s_tr, rng=smrng_s,
+                    pids=pid_s_tr, routes=rt_s_tr, t_starts=ts_s_tr)
+            else:
+                X_aug_s, y_aug_s, sc_aug_s = X_tr_s_tr, y_tr_s_tr, sc_s_tr
+                _an_s = _ne_s = _lm_s = np.empty(0, dtype=np.int64)
+            n_real_s = len(y_tr_s_tr);  n_syn_s = len(_an_s)
+
+            # feature engineering + scaler (fit on real train only)
+            Xtr_k_s  = apply_features_branch(X_aug_s[:n_real_s], KIN_IDX)
+            Xval_k_s = apply_features_branch(X_val_s,            KIN_IDX)
+            Xte_k_s  = apply_features_branch(X_te_s,             KIN_IDX)
+            sc_k_s   = StandardScaler()
+            sc_k_s.fit(Xtr_k_s.reshape(-1, n_kin_feat))
+            Xtr_k_s_sc  = sc_k_s.transform(
+                Xtr_k_s.reshape(-1, n_kin_feat)).reshape(-1, LOOKBACK_S, n_kin_feat)
+            Xval_k_s_sc = sc_k_s.transform(
+                Xval_k_s.reshape(-1, n_kin_feat)).reshape(-1, LOOKBACK_S, n_kin_feat)
+            Xte_k_s_sc  = sc_k_s.transform(
+                Xte_k_s.reshape(-1, n_kin_feat)).reshape(-1, LOOKBACK_S, n_kin_feat)
+            if n_syn_s > 0:
+                lbc_s      = _lm_s[:, None, None]
+                Xsyn_s     = ((1.0 - lbc_s) * Xtr_k_s_sc[_an_s]
+                              + lbc_s         * Xtr_k_s_sc[_ne_s])
+                Xtr_k_s_all = np.concatenate([Xtr_k_s_sc, Xsyn_s.astype(np.float32)])
+            else:
+                Xtr_k_s_all = Xtr_k_s_sc
+
+            # train ensemble
+            Xte_t_s  = torch.as_tensor(Xte_k_s_sc).to(DEVICE)
+            Xval_t_s = torch.as_tensor(Xval_k_s_sc).to(DEVICE)
+            preds_te_list: list = [];  preds_val_list: list = []
+            for k in range(ENSEMBLE_K):
+                kseed_s = SEED ^ seed_s ^ (k * 0x7F3A)
+                torch.manual_seed(kseed_s);  torch.cuda.manual_seed_all(kseed_s)
+                mk = KinTCN(n_kin_feat).to(DEVICE)
+                mk = train_kin_tcn(mk, Xtr_k_s_all, y_aug_s, sc_aug_s,
+                                   Xval_k_s_sc, y_val_s)
+                mk.eval()
+                with torch.no_grad():
+                    preds_te_list.append(torch.sigmoid(mk(Xte_t_s)).cpu().numpy())
+                    preds_val_list.append(torch.sigmoid(mk(Xval_t_s)).cpu().numpy())
+
+            tcn_te_s  = np.mean(preds_te_list,  axis=0)
+            tcn_val_s = np.mean(preds_val_list, axis=0)
+            cal_te_s, _ = val_platt_calibrate(tcn_val_s, y_val_s, tcn_te_s)
+
+            neg_mask  = y_te_s == 0
+            n_win     = len(cal_te_s)
+            n_pos_s   = int(y_te_s.sum())
+            mean_prob = float(cal_te_s[neg_mask].mean()) if neg_mask.any() else float("nan")
+            fpr       = float((cal_te_s[neg_mask] >= ALERT_THR).mean()) if neg_mask.any() else float("nan")
+            all_fpr.append(fpr);  all_prob.append(mean_prob)
+            print(f"  {s:<10} {n_win:>6} {n_pos_s:>5} {mean_prob:>10.4f} {fpr:>10.4f}")
+            audit_rows.append({"driver": s, "n_windows": n_win, "n_pos": n_pos_s,
+                               "mean_prob_neg_cal": mean_prob, "fpr_at_0.5": fpr})
+
+        print(f"  {'-'*50}")
+        if all_prob:
+            valid_prob = [v for v in all_prob if not math.isnan(v)]
+            valid_fpr  = [v for v in all_fpr  if not math.isnan(v)]
+            print(f"  {'Aggregate':<10} {'':>6} {'':>5} {np.mean(valid_prob):>13.4f} {np.mean(valid_fpr):>10.4f}")
         print(f"{'='*72}")
 
     # Save
