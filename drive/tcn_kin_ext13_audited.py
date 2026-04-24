@@ -86,6 +86,7 @@ CUTOUT_PROB  = 0.2
 EPOCHS       = 100
 LR           = 5e-4
 PATIENCE     = 20
+FOCAL_GAMMA  = 2.0   # focal loss exponent; 0 = plain BCE
 
 RENORM_CLIP          = 3.0
 N_BOOTSTRAP          = 2000
@@ -488,8 +489,9 @@ def train_kin_tcn(model, Xtr_k, y_tr, scores_tr, Xval_k, y_val):
         for xk, yb, wb in loader:
             xk, yb, wb = xk.to(DEVICE), yb.to(DEVICE), wb.to(DEVICE)
             logits    = model(xk)
-            loss_raw  = F.binary_cross_entropy_with_logits(logits, yb, reduction='none')
-            loss      = (loss_raw * wb).mean()
+            bce       = F.binary_cross_entropy_with_logits(logits, yb, reduction='none')
+            p_t       = torch.sigmoid(logits) * yb + (1.0 - torch.sigmoid(logits)) * (1.0 - yb)
+            loss      = ((1.0 - p_t) ** FOCAL_GAMMA * bce * wb).mean()
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -656,7 +658,7 @@ def main():
     print(f"Head        : Linear(64,48) → ReLU → Dropout(0.2) → Linear(48,1)")
     print(f"Physiology  : REMOVED (perm-importance ≤ 0 across ext4–ext10)")
     print(f"Score thr   : ≥ {SCORE_THRESHOLD}  (Red_light=3, Collision=5+)")
-    print(f"Loss        : Score-weighted BCE  (positive weight = score / mean_pos_score)")
+    print(f"Loss        : Focal (γ={FOCAL_GAMMA}) × score weight  (BCE when γ=0)")
     print(f"Calibration : Val-set Platt scaling  (KinTCN+Cal)")
     print(f"SMOTE       : k={SMOTE_K_NEIGHBORS} ratio {TARGET_RATIO}:{1-TARGET_RATIO} pos:neg")
     print(f"Renorm clip : ±{RENORM_CLIP}σ")
