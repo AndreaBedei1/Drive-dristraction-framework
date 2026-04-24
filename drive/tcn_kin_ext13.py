@@ -91,7 +91,7 @@ RENORM_CLIP          = 3.0
 N_BOOTSTRAP          = 2000
 MIN_EVAL_POSITIVES   = 5
 N_PERM_REPEATS       = 10
-ENSEMBLE_K           = 5    # independent training runs per fold; outputs averaged
+ENSEMBLE_K           = 10    # independent training runs per fold; outputs averaged
 EXCLUDE_EVAL_DRIVERS = {"0D04", "0D03R", "0D05"}
 TARGET_RATIO = 0.9
 
@@ -657,7 +657,7 @@ def main():
     print(f"Score thr   : ≥ {SCORE_THRESHOLD}  (Red_light=3, Collision=5+)")
     print(f"Loss        : Score-weighted BCE  (positive weight = score / mean_pos_score)")
     print(f"Calibration : Val-set Platt scaling  (KinTCN+Cal)")
-    print(f"SMOTE       : k={SMOTE_K_NEIGHBORS},  target 60:40 neg:pos")
+    print(f"SMOTE       : k={SMOTE_K_NEIGHBORS} ratio {TARGET_RATIO}:{1-TARGET_RATIO} pos:neg")
     print(f"Renorm clip : ±{RENORM_CLIP}σ")
     print(f"Epochs      : {EPOCHS}  |  LR : {LR}  |  Patience : {PATIENCE}")
     print(f"GAP/HORIZON : {GAP}s / {HORIZON}s")
