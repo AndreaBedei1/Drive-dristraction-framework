@@ -1,0 +1,361 @@
+{
+  "config": {
+    "LOOKBACK_S": 60,
+    "GAP": 5,
+    "HORIZON": 5,
+    "WINDOW_STEP": 5,
+    "SCORE_THRESHOLD": 1,
+    "RENORM_CLIP": 3.0,
+    "SMOTE": true,
+    "EPOCHS": 100,
+    "LR": 0.0005
+  },
+  "pooled": {
+    "lr": {
+      "auroc_mean": 0.6333282958727273,
+      "auroc_std": 0.11183552952694722,
+      "auroc_ci": [
+        0.56099800604557,
+        0.7068948653602362
+      ],
+      "auprc": 0.0924313583761063,
+      "brier": 0.32276376705035087,
+      "ece": 0.4657141158803094
+    },
+    "xgb": {
+      "auroc_mean": 0.7026009451267821,
+      "auroc_std": 0.12899871771233556,
+      "auroc_ci": [
+        0.6149470263528068,
+        0.7796131479412701
+      ],
+      "auprc": 0.16883637670807033,
+      "brier": 0.0996788576912849,
+      "ece": 0.1135335521240866
+    },
+    "kin_tcn": {
+      "auroc_mean": 0.7155310727886246,
+      "auroc_std": 0.1266850859465567,
+      "auroc_ci": [
+        0.6316766360164817,
+        0.7997172332835721
+      ],
+      "auprc": 0.14588184571826004,
+      "brier": 0.09324635275558792,
+      "ece": 0.1347188574761091
+    },
+    "kin_cal": {
+      "auroc_mean": 0.7155310727886246,
+      "auroc_std": 0.1266850859465567,
+      "auroc_ci": [
+        0.6316766360164817,
+        0.7997172332835721
+      ],
+      "auprc": 0.1305146830891023,
+      "brier": 0.06630569063090873,
+      "ece": 0.03822487753795971
+    }
+  },
+  "per_driver": [
+    {
+      "driver": "0A05",
+      "n_windows": 120,
+      "pos_rate": 0.09166666865348816,
+      "auc_lr": 0.5195996663886572,
+      "auc_xgb": 0.8081734778982486,
+      "auc_tcn": 0.7456213511259383,
+      "auc_cal": 0.7456213511259383
+    },
+    {
+      "driver": "0B03",
+      "n_windows": 109,
+      "pos_rate": 0.0458715595304966,
+      "auc_lr": 0.7807692307692307,
+      "auc_xgb": 0.7788461538461537,
+      "auc_tcn": 0.948076923076923,
+      "auc_cal": 0.948076923076923
+    },
+    {
+      "driver": "0B05",
+      "n_windows": 110,
+      "pos_rate": 0.04545454680919647,
+      "auc_lr": 0.5352380952380953,
+      "auc_xgb": 0.7390476190476191,
+      "auc_tcn": 0.7828571428571428,
+      "auc_cal": 0.7828571428571428
+    },
+    {
+      "driver": "0B06",
+      "n_windows": 87,
+      "pos_rate": 0.05747126415371895,
+      "auc_lr": 0.6024390243902439,
+      "auc_xgb": 0.7073170731707317,
+      "auc_tcn": 0.5073170731707317,
+      "auc_cal": 0.5073170731707317
+    },
+    {
+      "driver": "0B08R",
+      "n_windows": 101,
+      "pos_rate": 0.07920791953802109,
+      "auc_lr": 0.6774193548387096,
+      "auc_xgb": 0.7768817204301075,
+      "auc_tcn": 0.7782258064516129,
+      "auc_cal": 0.7782258064516129
+    },
+    {
+      "driver": "0C03",
+      "n_windows": 102,
+      "pos_rate": 0.0784313753247261,
+      "auc_lr": 0.7779255319148936,
+      "auc_xgb": 0.48138297872340424,
+      "auc_tcn": 0.6848404255319149,
+      "auc_cal": 0.6848404255319149
+    },
+    {
+      "driver": "0C04",
+      "n_windows": 87,
+      "pos_rate": 0.09195402264595032,
+      "auc_lr": 0.47310126582278483,
+      "auc_xgb": 0.865506329113924,
+      "auc_tcn": 0.5490506329113924,
+      "auc_cal": 0.5490506329113924
+    },
+    {
+      "driver": "0C09",
+      "n_windows": 128,
+      "pos_rate": 0.0390625,
+      "auc_lr": 0.7577235772357724,
+      "auc_xgb": 0.6878048780487804,
+      "auc_tcn": 0.7886178861788619,
+      "auc_cal": 0.7886178861788619
+    },
+    {
+      "driver": "0C11",
+      "n_windows": 130,
+      "pos_rate": 0.10769230872392654,
+      "auc_lr": 0.5757389162561576,
+      "auc_xgb": 0.47844827586206895,
+      "auc_tcn": 0.6551724137931035,
+      "auc_cal": 0.6551724137931035
+    }
+  ],
+  "safe_driver_audit": [
+    {
+      "driver": "0A01",
+      "n_windows": 112,
+      "n_pos": 3,
+      "mean_prob_neg_cal": 0.031146826282984867,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0A02",
+      "n_windows": 129,
+      "n_pos": 1,
+      "mean_prob_neg_cal": 0.02969635432842547,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0A03",
+      "n_windows": 121,
+      "n_pos": 4,
+      "mean_prob_neg_cal": 0.018695240969465003,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0A04",
+      "n_windows": 155,
+      "n_pos": 0,
+      "mean_prob_neg_cal": 0.02006672058662724,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0A06",
+      "n_windows": 118,
+      "n_pos": 3,
+      "mean_prob_neg_cal": 0.025746637283710804,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0A07R",
+      "n_windows": 152,
+      "n_pos": 0,
+      "mean_prob_neg_cal": 0.03002214933172258,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0A08",
+      "n_windows": 154,
+      "n_pos": 1,
+      "mean_prob_neg_cal": 0.028364823413959864,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0A09R",
+      "n_windows": 115,
+      "n_pos": 4,
+      "mean_prob_neg_cal": 0.021472614855533166,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0A10",
+      "n_windows": 128,
+      "n_pos": 1,
+      "mean_prob_neg_cal": 0.028668913790560854,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0A11",
+      "n_windows": 120,
+      "n_pos": 0,
+      "mean_prob_neg_cal": 0.026389773544093584,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0B02",
+      "n_windows": 122,
+      "n_pos": 4,
+      "mean_prob_neg_cal": 0.027661669874091247,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0B03R",
+      "n_windows": 132,
+      "n_pos": 4,
+      "mean_prob_neg_cal": 0.02644475306809089,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0B04",
+      "n_windows": 114,
+      "n_pos": 1,
+      "mean_prob_neg_cal": 0.01751872576346558,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0B07",
+      "n_windows": 76,
+      "n_pos": 4,
+      "mean_prob_neg_cal": 0.04148211018275543,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0B09",
+      "n_windows": 77,
+      "n_pos": 0,
+      "mean_prob_neg_cal": 0.022819455254348545,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0B10",
+      "n_windows": 122,
+      "n_pos": 2,
+      "mean_prob_neg_cal": 0.03397161900572113,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0B11",
+      "n_windows": 104,
+      "n_pos": 4,
+      "mean_prob_neg_cal": 0.02465867354218874,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0C01",
+      "n_windows": 135,
+      "n_pos": 2,
+      "mean_prob_neg_cal": 0.03474145326553109,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0C02",
+      "n_windows": 109,
+      "n_pos": 0,
+      "mean_prob_neg_cal": 0.04072647087603903,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0C05",
+      "n_windows": 114,
+      "n_pos": 2,
+      "mean_prob_neg_cal": 0.04324199480738642,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0C06",
+      "n_windows": 116,
+      "n_pos": 4,
+      "mean_prob_neg_cal": 0.033512596322953926,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0C07",
+      "n_windows": 117,
+      "n_pos": 2,
+      "mean_prob_neg_cal": 0.051037292934736765,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0C07R",
+      "n_windows": 100,
+      "n_pos": 2,
+      "mean_prob_neg_cal": 0.029320996160873088,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0C08",
+      "n_windows": 136,
+      "n_pos": 2,
+      "mean_prob_neg_cal": 0.026753748132118043,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0C10",
+      "n_windows": 78,
+      "n_pos": 0,
+      "mean_prob_neg_cal": 0.03241298856515167,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0D01",
+      "n_windows": 128,
+      "n_pos": 0,
+      "mean_prob_neg_cal": 0.022137417194453217,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0D02",
+      "n_windows": 160,
+      "n_pos": 4,
+      "mean_prob_neg_cal": 0.03957889164819406,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0D06",
+      "n_windows": 80,
+      "n_pos": 1,
+      "mean_prob_neg_cal": 0.024726982854535104,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0D08",
+      "n_windows": 115,
+      "n_pos": 3,
+      "mean_prob_neg_cal": 0.018066491306075756,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0D10",
+      "n_windows": 142,
+      "n_pos": 1,
+      "mean_prob_neg_cal": 0.01936326510776954,
+      "fpr_at_0.5": 0.0
+    },
+    {
+      "driver": "0D11",
+      "n_windows": 128,
+      "n_pos": 2,
+      "mean_prob_neg_cal": 0.03095900262759087,
+      "fpr_at_0.5": 0.0
+    }
+  ]
+}
