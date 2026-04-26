@@ -1,21 +1,21 @@
 """
-tcn_kin_ext12.py — Pure KinTCN driving risk score, extended lookback.
+tcnKin_30.py — KinTCN ablation: LOOKBACK=30s, TCN d=1,2,4,8 (RF≈31).
 
-Changes from ext11:
-  1. LOOKBACK_S raised 45 → 75.  The TCN receptive field (RF ≈ 63 timesteps)
-     already covered the full ext11 window.  Extending to 75s provides more
-     temporal context for slow behavioural drift patterns (lane wandering,
-     speed variation) that may precede safety-critical events.
-     Cost: ~20% fewer windows per session (shorter sessions truncated earlier).
-  2. TCN blocks extended: added d=32 block → RF ≈ 127 timesteps, covering the
-     full 75s window.  Output channels unchanged (KIN_D=64).
+Changes from ext13:
+  1. Multi-scale rolling features.  engineer_features now computes rolling
+     mean and std at three temporal scales (ROLL_SCALES = [5, 10, 25] seconds)
+     instead of a single 10s scale.  The 5s scale makes sudden kinematic
+     changes (panic braking precursors, 0C driver profile) explicit in the
+     feature vector; the 25s scale captures slow build-up (collision/red-light
+     precursors, 0B driver profile).  Feature count: 4 × (3 + 2×3) = 36.
+  2. Output filename updated to kin_tcn_ext14_L{LOOKBACK_S}_results.json.
 
-Inherited from ext11 (unchanged):
-  - Pure kinematics, no physiology.
-  - Score threshold ≥ 3 (Red_light_violation, Collision only).
-  - Score-weighted BCE loss.
+Inherited from ext13 (unchanged):
+  - Focal loss (γ=2.0) × score weight.
+  - K=10 ensemble per fold.
+  - Dedicated held-out LOPO folds for audit drivers.
   - Val-set Platt calibration.
-  - AUROC / AUPRC / Brier / ECE reporting only.
+  - AUROC / AUPRC / Brier / ECE + Wilcoxon vs XGB.
 
 Validity guarantees (inherited):
   - Strict LOPO-CV: each driver's windows held out entirely.
@@ -43,7 +43,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from scipy.stats import mannwhitneyu
+from scipy.stats import mannwhitneyu, wilcoxon
 from scipy.spatial.distance import cdist
 import xgboost as xgb
 import random
@@ -65,13 +65,13 @@ SEVERITY = {
 }
 # sharp_turn excluded (kinematic self-correlation, see ext10).
 # center_line_crossing excluded (see ext4).
-SCORE_THRESHOLD = 3   # y=1 iff composite_risk_score >= SCORE_THRESHOLD
+SCORE_THRESHOLD = 1   # y=1 iff composite_risk_score >= SCORE_THRESHOLD
 
 # Windowing
-LOOKBACK_S  = 75
+LOOKBACK_S  = 30
 WINDOW_STEP = 5
 GAP, HORIZON = 5, 10
-ROLL_K      = 10
+ROLL_SCALES = [5, 10, 25]   # seconds: short (sudden events) | medium | long (gradual build-up)
 
 # Training
 BATCH_SIZE   = 64
@@ -81,13 +81,16 @@ CUTOUT_LEN   = 5
 CUTOUT_PROB  = 0.2
 EPOCHS       = 100
 LR           = 5e-4
-PATIENCE     = 10
+PATIENCE     = 20
+FOCAL_GAMMA  = 2.0   # focal loss exponent; 0 = plain BCE
 
 RENORM_CLIP          = 3.0
 N_BOOTSTRAP          = 2000
 MIN_EVAL_POSITIVES   = 5
 N_PERM_REPEATS       = 10
-EXCLUDE_EVAL_DRIVERS = {}
+ENSEMBLE_K           = 5    # independent training runs per fold; outputs averaged
+EXCLUDE_EVAL_DRIVERS = {"0D04", "0D03R", "0D05"}
+TARGET_RATIO = 0.3
 
 USE_SMOTE         = True
 SMOTE_K_NEIGHBORS = 5
@@ -146,25 +149,27 @@ def normalize_signals(df):
 # ── FEATURE ENGINEERING ───────────────────────────────────────────────────────
 
 def engineer_features(window):
-    """(T, C) → (T, 5C): raw | diff1 | roll_mean | roll_std | z-score."""
-    T, C    = window.shape
-    diff1   = np.diff(window, axis=0, prepend=window[:1])
-    cs      = np.cumsum(window,      axis=0)
-    cs_sq   = np.cumsum(window ** 2, axis=0)
-    cs_lag    = np.zeros_like(cs)
-    cs_sq_lag = np.zeros_like(cs_sq)
-    if ROLL_K < T:
-        cs_lag[ROLL_K:]    = cs[:T - ROLL_K]
-        cs_sq_lag[ROLL_K:] = cs_sq[:T - ROLL_K]
-    win_len   = np.minimum(np.arange(1, T + 1)[:, None], ROLL_K)
-    roll_mean = (cs - cs_lag) / win_len
-    roll_var  = (cs_sq - cs_sq_lag) / win_len - roll_mean ** 2
-    roll_std  = np.sqrt(np.maximum(roll_var, 0.0)) + 1e-6
-    w_mean    = window.mean(axis=0, keepdims=True)
-    w_std     = window.std(axis=0,  keepdims=True) + 1e-6
-    z_score   = (window - w_mean) / w_std
-    return np.concatenate([window, diff1, roll_mean, roll_std, z_score],
-                          axis=1).astype(np.float32)
+    """(T, C) → (T, (3 + 2*S)*C): raw | diff1 | z-score | [roll_mean_k | roll_std_k for k in ROLL_SCALES]."""
+    T, C  = window.shape
+    diff1 = np.diff(window, axis=0, prepend=window[:1])
+    w_mean  = window.mean(axis=0, keepdims=True)
+    w_std   = window.std(axis=0,  keepdims=True) + 1e-6
+    z_score = (window - w_mean) / w_std
+    parts = [window, diff1, z_score]
+    cs    = np.cumsum(window,      axis=0)
+    cs_sq = np.cumsum(window ** 2, axis=0)
+    for k in ROLL_SCALES:
+        cs_lag    = np.zeros_like(cs)
+        cs_sq_lag = np.zeros_like(cs_sq)
+        if k < T:
+            cs_lag[k:]    = cs[:T - k]
+            cs_sq_lag[k:] = cs_sq[:T - k]
+        win_len  = np.minimum(np.arange(1, T + 1)[:, None], k)
+        roll_mean = (cs - cs_lag) / win_len
+        roll_var  = (cs_sq - cs_sq_lag) / win_len - roll_mean ** 2
+        roll_std  = np.sqrt(np.maximum(roll_var, 0.0)) + 1e-6
+        parts.extend([roll_mean, roll_std])
+    return np.concatenate(parts, axis=1).astype(np.float32)
 
 
 def apply_features_branch(X_raw, col_idx):
@@ -197,9 +202,9 @@ def smote_raw(X_raw, y, scores=None, k=SMOTE_K_NEIGHBORS, rng=None,
                 np.empty(0, dtype=np.int64),
                 np.empty(0, dtype=np.float32))
 
-    target_ratio = 0.6
-    n_synthetic  = int((target_ratio * n_neg - (1 - target_ratio) * n_pos)
-                       / (1 - target_ratio))
+    
+    n_synthetic  = int((TARGET_RATIO * n_neg - (1 - TARGET_RATIO) * n_pos)
+                       / (1 - TARGET_RATIO))
     n_synthetic  = max(0, n_synthetic)
     X_flat       = X_raw[pos_idx].reshape(n_pos, -1)
 
@@ -378,7 +383,7 @@ class KinTCN(nn.Module):
     """
     Pure kinematics TCN risk scorer.
     Input: (B, T, n_kin_feats).  Output: (B,) logit.
-    ResBlocks d=1,2,4,8,16 → RF ≈ 63 timesteps → TemporalAttention → head.
+    ResBlocks d=1,2,4,8 → RF ≈ 31 timesteps → TemporalAttention → head.
     No physiology, no FiLM, no spectral features.
     """
     KIN_D = 64
@@ -390,8 +395,6 @@ class KinTCN(nn.Module):
             ResBlock(self.KIN_D // 2, self.KIN_D,      2),
             ResBlock(self.KIN_D,      self.KIN_D,      4),
             ResBlock(self.KIN_D,      self.KIN_D,      8),
-            ResBlock(self.KIN_D,      self.KIN_D,     16),
-            ResBlock(self.KIN_D,      self.KIN_D,     32),   # RF ≈ 127 for 75s window
         )
         self.attn = TemporalAttention(self.KIN_D)
         self.head = nn.Sequential(
@@ -446,18 +449,19 @@ def val_platt_calibrate(val_scores, y_val, test_scores):
     Fit a logistic recalibrator on validation-fold scores/labels.
     Applied to test scores to fix Brier and ECE.
     Falls back to raw scores if val is single-class or calibrator inverts ordering.
+    Returns (calibrated_scores, fitted_lr_or_None).
     """
     if len(np.unique(y_val)) < 2:
-        return test_scores
+        return test_scores, None
     lr = LogisticRegression(max_iter=1000, random_state=SEED)
     try:
         lr.fit(val_scores.reshape(-1, 1), y_val.astype(int))
     except Exception:
-        return test_scores
+        return test_scores, None
     w = lr.coef_[0][0]
     if w <= 0 or w > 20.0:   # non-monotone or exploded
-        return test_scores
-    return lr.predict_proba(test_scores.reshape(-1, 1))[:, 1]
+        return test_scores, None
+    return lr.predict_proba(test_scores.reshape(-1, 1))[:, 1], lr
 
 # ── TRAINING ──────────────────────────────────────────────────────────────────
 
@@ -467,6 +471,8 @@ def train_kin_tcn(model, Xtr_k, y_tr, scores_tr, Xval_k, y_val):
         KinDataset(Xtr_k, y_tr, scores_tr, augment=True),
         batch_size=BATCH_SIZE, shuffle=True)
     opt   = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+     #   sched = torch.optim.lr_scheduler.OneCycleLR(
+ #       opt, max_lr=LR * 5, steps_per_epoch=len(loader), epochs=EPOCHS, pct_start=0.3)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS, eta_min=LR * 0.01)
 
     best_auc, best_w = float("-inf"), None
@@ -480,13 +486,15 @@ def train_kin_tcn(model, Xtr_k, y_tr, scores_tr, Xval_k, y_val):
         for xk, yb, wb in loader:
             xk, yb, wb = xk.to(DEVICE), yb.to(DEVICE), wb.to(DEVICE)
             logits    = model(xk)
-            loss_raw  = F.binary_cross_entropy_with_logits(logits, yb, reduction='none')
-            loss      = (loss_raw * wb).mean()
+            bce       = F.binary_cross_entropy_with_logits(logits, yb, reduction='none')
+            p_t       = torch.sigmoid(logits) * yb + (1.0 - torch.sigmoid(logits)) * (1.0 - yb)
+            loss      = ((1.0 - p_t) ** FOCAL_GAMMA * bce * wb).mean()
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+            #sched.step() #one cycle
             ep_loss += loss.item(); n_b += 1
-        sched.step()
+        sched.step() #cosine
 
         model.eval()
         with torch.no_grad():
@@ -516,7 +524,7 @@ def print_validity_report(X_raw, y, scores, pids):
     pos   = y == 1; total_pos = pos.sum(); total = len(y)
     unique, cnts = np.unique(scores[pos].astype(int), return_counts=True)
     print(f"\n{'='*72}")
-    print("LABEL VALIDITY REPORT — COMPOSITE RISK TARGET (score ≥ 3)")
+    print("LABEL VALIDITY REPORT")
     print(f"{'='*72}")
     print(f"Total windows    : {total}")
     print(f"Positive (risk≥{SCORE_THRESHOLD}): {total_pos} ({100*total_pos/total:.1f}%)")
@@ -635,7 +643,7 @@ def main():
     scores_all = scores_all[keep]; pid_all    = pid_all[keep]
     routes_all = routes_all[keep]; ts_all     = ts_all[keep]
 
-    n_kin_feat = len(KIN_COLS) * 5   # 20
+    n_kin_feat = len(KIN_COLS) * (3 + 2 * len(ROLL_SCALES))   # 4 × (3 + 6) = 36
 
     print_validity_report(X_raw_all, y_all, scores_all, pid_all)
 
@@ -643,13 +651,14 @@ def main():
     print("KIN-TCN — PIPELINE CONFIGURATION")
     print(f"{'='*72}")
     print(f"Kinematics  : {KIN_COLS}  ({n_kin_feat} engineered features)")
-    print(f"TCN blocks  : d=1,2,4,8,16,32  →  RF ≈ 127 timesteps  →  {KinTCN.KIN_D}-d pool")
+    print(f"Roll scales : {ROLL_SCALES} s  (short→sudden events | long→gradual build-up)")
+    print(f"TCN blocks  : d=1,2,4,8  →  RF ≈ 31 timesteps  →  {KinTCN.KIN_D}-d pool")
     print(f"Head        : Linear(64,48) → ReLU → Dropout(0.2) → Linear(48,1)")
     print(f"Physiology  : REMOVED (perm-importance ≤ 0 across ext4–ext10)")
     print(f"Score thr   : ≥ {SCORE_THRESHOLD}  (Red_light=3, Collision=5+)")
-    print(f"Loss        : Score-weighted BCE  (positive weight = score / mean_pos_score)")
+    print(f"Loss        : Focal (γ={FOCAL_GAMMA}) × score weight  (BCE when γ=0)")
     print(f"Calibration : Val-set Platt scaling  (KinTCN+Cal)")
-    print(f"SMOTE       : k={SMOTE_K_NEIGHBORS},  target 60:40 neg:pos")
+    print(f"SMOTE       : k={SMOTE_K_NEIGHBORS} ratio {TARGET_RATIO}:{1-TARGET_RATIO} pos:neg")
     print(f"Renorm clip : ±{RENORM_CLIP}σ")
     print(f"Epochs      : {EPOCHS}  |  LR : {LR}  |  Patience : {PATIENCE}")
     print(f"GAP/HORIZON : {GAP}s / {HORIZON}s")
@@ -659,6 +668,12 @@ def main():
     ci_norm_map = {col: SIGNAL_COLS.index(col) for col in COLS_TO_NORM if col in SIGNAL_COLS}
     drivers = [d for d in np.unique(pid_all)
                if y_all[pid_all == d].sum() >= MIN_EVAL_POSITIVES]
+
+    # Audit drivers: < MIN_EVAL_POSITIVES, excluded from main eval loop
+    safe_drivers = sorted([p for p in np.unique(pid_all)
+                           if y_all[pid_all == p].sum() < MIN_EVAL_POSITIVES])
+    if safe_drivers:
+        print(f"  Audit drivers (<{MIN_EVAL_POSITIVES} positives, held-out FPR targets): {safe_drivers}\n")
 
     hdr = (f"{'Driver':<10} | {'N_win':>5} {'PosR%':>6} | "
            f"{'LR':>7} {'XGB':>7} {'KinTCN':>7} {'KinTCN+Cal':>11}")
@@ -845,20 +860,35 @@ def main():
         else:
             Xtr_k_sc_all = Xtr_k_real_sc
 
-        torch.manual_seed(SEED ^ seed_d)
-        torch.cuda.manual_seed_all(SEED ^ seed_d)
-        model = KinTCN(n_kin_feat).to(DEVICE)
-        model = train_kin_tcn(model, Xtr_k_sc_all, y_tr_aug, sc_tr_aug,
-                              Xval_k_sc, y_val_d)
-        model.eval()
-        with torch.no_grad():
-            tcn_scores = torch.sigmoid(
-                model(torch.as_tensor(Xte_k_sc).to(DEVICE))).cpu().numpy()
-            val_scores = torch.sigmoid(
-                model(torch.as_tensor(Xval_k_sc).to(DEVICE))).cpu().numpy()
+        # K=5 ensemble: train independent models, average sigmoid outputs
+        Xte_t  = torch.as_tensor(Xte_k_sc).to(DEVICE)
+        Xval_t = torch.as_tensor(Xval_k_sc).to(DEVICE)
+        tcn_scores_list  = []
+        val_scores_list  = []
+        ensemble_models  = []
+        for k in range(ENSEMBLE_K):
+            kseed = SEED ^ seed_d ^ (k * 0x7F3A)
+            torch.manual_seed(kseed)
+            torch.cuda.manual_seed_all(kseed)
+            model_k = KinTCN(n_kin_feat).to(DEVICE)
+            model_k = train_kin_tcn(model_k, Xtr_k_sc_all, y_tr_aug, sc_tr_aug,
+                                    Xval_k_sc, y_val_d)
+            model_k.eval()
+            with torch.no_grad():
+                tcn_scores_list.append(
+                    torch.sigmoid(model_k(Xte_t)).cpu().numpy())
+                val_scores_list.append(
+                    torch.sigmoid(model_k(Xval_t)).cpu().numpy())
+            ensemble_models.append(model_k)
 
-        # Val-set Platt calibration
-        cal_scores = val_platt_calibrate(val_scores, y_val_d, tcn_scores)
+        # Average across ensemble members
+        tcn_scores = np.mean(tcn_scores_list, axis=0)
+        val_scores = np.mean(val_scores_list, axis=0)
+        # Keep last model for permutation importance (representative member)
+        model = ensemble_models[-1]
+
+        # Val-set Platt calibration on ensemble-averaged val scores
+        cal_scores, platt_lr = val_platt_calibrate(val_scores, y_val_d, tcn_scores)
 
         auc_lr  = _nan_or(safe_auc(y_te, lr_scores))
         auc_xgb = _nan_or(safe_auc(y_te, xgb_scores))
@@ -915,7 +945,7 @@ def main():
         rng_pi = np.random.default_rng(SEED ^ fi)
         for rep in range(N_PERM_REPEATS):
             for ki, col in enumerate(KIN_COLS):
-                feat_cols = [ki + j * n_kin for j in range(5)]
+                feat_cols = [ki + j * n_kin for j in range(3 + 2 * len(ROLL_SCALES))]
                 Xk_perm   = Xk_i.copy()
                 perm_idx  = rng_pi.permutation(len(Xk_perm))
                 Xk_perm[:, :, feat_cols] = Xk_perm[perm_idx, :, :][:, :, feat_cols]
@@ -930,6 +960,25 @@ def main():
         if deltas:
             print(f"    {col:<30} Δ={np.mean(deltas):+.4f} ± {np.std(deltas):.4f}")
 
+    # Wilcoxon: KinTCN vs XGB
+    paired_tcn_xgb = [
+        (r["auc_xgb"], r["auc_cal"]) for r in per_driver_results
+        if not (math.isnan(r["auc_xgb"]) or math.isnan(r["auc_cal"]))
+    ]
+    if len(paired_tcn_xgb) >= 10:
+        a_xgb, a_tcn = zip(*paired_tcn_xgb)
+        diff_tx = np.array(a_tcn) - np.array(a_xgb)
+        n_tcn_wins = int((diff_tx > 0).sum())
+        if np.any(diff_tx != 0):
+            stat_tx, p_tx = wilcoxon(list(a_tcn), list(a_xgb), alternative="two-sided")
+            sig_tx = "***" if p_tx < 0.001 else ("**" if p_tx < 0.01 else ("*" if p_tx < 0.05 else "ns"))
+            print(f"\n{'='*72}")
+            print("WILCOXON SIGNED-RANK TEST — KinTCN+Cal vs XGB")
+            print(f"{'='*72}")
+            print(f"  W={stat_tx:.1f}  p={p_tx:.4f}  {sig_tx}")
+            print(f"  Mean per-driver gain (KinTCN+Cal − XGB): {diff_tx.mean():+.4f} ± {diff_tx.std():.4f}")
+            print(f"  KinTCN+Cal > XGB : {n_tcn_wins}/{len(diff_tx)} drivers  ({100*n_tcn_wins/len(diff_tx):.1f}%)")
+
     # Per-driver summary
     print(f"\n{'='*72}")
     print("PER-DRIVER SUMMARY")
@@ -942,6 +991,189 @@ def main():
     if gains:
         print(f"  Cal gain vs raw    : {np.mean(gains):+.4f} ± {np.std(gains):.4f}")
 
+    # ── DEDICATED SAFE DRIVER FOLDS — unbiased FPR ───────────────────────────
+    # Each safe driver is held out for one dedicated fold so the model never
+    # trains on their windows, giving a true out-of-sample false positive rate.
+    audit_rows = []
+    if safe_drivers:
+        ALERT_THR = 0.5
+        print(f"\n{'='*72}")
+        print("AUDIT DRIVERS — False Positive Rate (dedicated held-out folds)")
+        print(f"{'='*72}")
+        print(f"  Alert threshold : {ALERT_THR}  |  Calibrated Platt scores  |  FPR on negative windows only")
+        print(f"  {'Driver':<10} {'N_win':>6} {'N_pos':>5} {'MeanProb(neg)':>13} {'FPR@0.5':>10}")
+        print(f"  {'-'*50}")
+        all_fpr, all_prob = [], []
+
+        for s in safe_drivers:
+            # ── fold setup: hold out s entirely ──────────────────────────────
+            mask_tr_s   = pid_all != s
+            X_tr_s      = X_raw_all[mask_tr_s];  y_tr_s  = y_all[mask_tr_s]
+            sc_tr_s     = scores_all[mask_tr_s]
+            pid_tr_s    = pid_all[mask_tr_s];     routes_tr_s = routes_all[mask_tr_s]
+            ts_tr_s     = ts_all[mask_tr_s]
+
+            mask_te_s   = pid_all == s
+            X_te_s      = X_raw_all[mask_te_s].copy()
+            y_te_s      = y_all[mask_te_s]
+            routes_te_s = routes_all[mask_te_s]
+            if len(X_te_s) == 0:
+                continue
+
+            seed_s     = int(hashlib.md5(str(s).encode()).hexdigest(), 16) & 0xFFFFFFFF
+            fold_rng_s = np.random.default_rng(SEED ^ seed_s)
+            torch.manual_seed(SEED ^ seed_s);  torch.cuda.manual_seed_all(SEED ^ seed_s)
+
+            # val split from training pool (excluding s)
+            td_s      = np.unique(pid_tr_s)
+            has_pos_s = np.array([y_tr_s[pid_tr_s == p].sum() > 0 for p in td_s])
+            val_ids_s = np.concatenate([
+                _val_sample(td_s[has_pos_s],  0.25, fold_rng_s),
+                _val_sample(td_s[~has_pos_s], 0.25, fold_rng_s),
+            ])
+            val_ids_set_s = set(val_ids_s.tolist())
+            vmask_s       = np.isin(pid_tr_s, val_ids_s)
+
+            # route reference pools (exclude s; val-aware for LOO train renorm)
+            _rs_sum_mus:   dict = {}
+            _rs_sum_sigs2: dict = {}
+            _rs_counts:    dict = {}
+            _rs_all_mus:   dict = {}
+            _rs_all_sigs:  dict = {}
+            for (p_k, r_k, c_k), (mu_k, sig_k) in all_session_stats.items():
+                if p_k == s or math.isnan(mu_k) or math.isnan(sig_k):
+                    continue
+                key = (r_k, c_k)
+                _rs_all_mus.setdefault(key, []).append(mu_k)
+                _rs_all_sigs.setdefault(key, []).append(sig_k)
+                if p_k not in val_ids_set_s:
+                    _rs_sum_mus[key]   = _rs_sum_mus.get(key,   0.0) + mu_k
+                    _rs_sum_sigs2[key] = _rs_sum_sigs2.get(key, 0.0) + sig_k ** 2
+                    _rs_counts[key]    = _rs_counts.get(key,    0)   + 1
+
+            _rs_pure_stats: dict = {
+                k: (_rs_sum_mus[k] / _rs_counts[k],
+                    math.sqrt(max(_rs_sum_sigs2[k] / _rs_counts[k], 0.0)))
+                for k in _rs_sum_mus if _rs_counts[k] >= 1
+            }
+            _rs_all_stats: dict = {
+                k: (float(np.mean(v)),
+                    math.sqrt(max(float(np.mean(np.array(_rs_all_sigs[k]) ** 2)), 0.0)))
+                for k, v in _rs_all_mus.items()
+            }
+
+            # renorm test (safe driver) windows — same test-driver path as main loop
+            for rv in np.unique(routes_te_s):
+                rm = routes_te_s == rv
+                for col_v, ci_v in ci_norm_map.items():
+                    k_own = (s, rv, col_v);  k_rte = (rv, col_v)
+                    if k_own not in all_session_stats or k_rte not in _rs_all_stats:
+                        continue
+                    t_mu, t_sig = all_session_stats[k_own]
+                    if math.isnan(t_mu) or math.isnan(t_sig):
+                        continue
+                    r_mu, r_sig = _rs_all_stats[k_rte]
+                    X_te_s[rm, :, ci_v] = (
+                        X_te_s[rm, :, ci_v] * (t_sig + 1e-6) + t_mu - r_mu
+                    ) / max(r_sig, 1e-6)
+            X_te_s = np.clip(X_te_s, -RENORM_CLIP, RENORM_CLIP)
+
+            # renorm train windows (LOO — s excluded so no leakage)
+            X_tr_s = _loo_renorm(X_tr_s, pid_tr_s, routes_tr_s, all_session_stats,
+                                  _rs_sum_mus, _rs_sum_sigs2, _rs_counts,
+                                  ci_norm_map, f"safe_fold_{s}_train")
+            X_tr_s = np.clip(X_tr_s, -RENORM_CLIP, RENORM_CLIP)
+
+            # val windows
+            df_val_s = df[df["id"].isin(val_ids_set_s)].copy()
+            X_val_s, y_val_s, _, _pv, _rv, _ = build_windows(df_val_s)
+            X_val_s = X_val_s.copy()
+            for _vp in np.unique(_pv):
+                for _vr in np.unique(_rv[_pv == _vp]):
+                    _vm = (_pv == _vp) & (_rv == _vr)
+                    for _vc, _vci in ci_norm_map.items():
+                        _ko = (_vp, _vr, _vc);  _kr = (_vr, _vc)
+                        if _ko not in all_session_stats or _kr not in _rs_pure_stats:
+                            continue
+                        _vmu, _vsig = all_session_stats[_ko]
+                        if math.isnan(_vmu) or math.isnan(_vsig):
+                            continue
+                        _trmu, _trsig = _rs_pure_stats[_kr]
+                        X_val_s[_vm, :, _vci] = (
+                            X_val_s[_vm, :, _vci] * (_vsig + 1e-6) + _vmu - _trmu
+                        ) / max(_trsig, 1e-6)
+            X_val_s = np.clip(X_val_s, -RENORM_CLIP, RENORM_CLIP)
+
+            # SMOTE on pure-train split
+            X_tr_s_tr  = X_tr_s[~vmask_s];  y_tr_s_tr  = y_tr_s[~vmask_s]
+            sc_s_tr    = sc_tr_s[~vmask_s];  pid_s_tr   = pid_tr_s[~vmask_s]
+            rt_s_tr    = routes_tr_s[~vmask_s]; ts_s_tr  = ts_tr_s[~vmask_s]
+            if USE_SMOTE:
+                smrng_s = np.random.default_rng(SEED ^ seed_s ^ SMOTE_SEED_SALT)
+                X_aug_s, y_aug_s, sc_aug_s, _an_s, _ne_s, _lm_s = smote_raw(
+                    X_tr_s_tr, y_tr_s_tr, scores=sc_s_tr, rng=smrng_s,
+                    pids=pid_s_tr, routes=rt_s_tr, t_starts=ts_s_tr)
+            else:
+                X_aug_s, y_aug_s, sc_aug_s = X_tr_s_tr, y_tr_s_tr, sc_s_tr
+                _an_s = _ne_s = _lm_s = np.empty(0, dtype=np.int64)
+            n_real_s = len(y_tr_s_tr);  n_syn_s = len(_an_s)
+
+            # feature engineering + scaler (fit on real train only)
+            Xtr_k_s  = apply_features_branch(X_aug_s[:n_real_s], KIN_IDX)
+            Xval_k_s = apply_features_branch(X_val_s,            KIN_IDX)
+            Xte_k_s  = apply_features_branch(X_te_s,             KIN_IDX)
+            sc_k_s   = StandardScaler()
+            sc_k_s.fit(Xtr_k_s.reshape(-1, n_kin_feat))
+            Xtr_k_s_sc  = sc_k_s.transform(
+                Xtr_k_s.reshape(-1, n_kin_feat)).reshape(-1, LOOKBACK_S, n_kin_feat)
+            Xval_k_s_sc = sc_k_s.transform(
+                Xval_k_s.reshape(-1, n_kin_feat)).reshape(-1, LOOKBACK_S, n_kin_feat)
+            Xte_k_s_sc  = sc_k_s.transform(
+                Xte_k_s.reshape(-1, n_kin_feat)).reshape(-1, LOOKBACK_S, n_kin_feat)
+            if n_syn_s > 0:
+                lbc_s      = _lm_s[:, None, None]
+                Xsyn_s     = ((1.0 - lbc_s) * Xtr_k_s_sc[_an_s]
+                              + lbc_s         * Xtr_k_s_sc[_ne_s])
+                Xtr_k_s_all = np.concatenate([Xtr_k_s_sc, Xsyn_s.astype(np.float32)])
+            else:
+                Xtr_k_s_all = Xtr_k_s_sc
+
+            # train ensemble
+            Xte_t_s  = torch.as_tensor(Xte_k_s_sc).to(DEVICE)
+            Xval_t_s = torch.as_tensor(Xval_k_s_sc).to(DEVICE)
+            preds_te_list: list = [];  preds_val_list: list = []
+            for k in range(ENSEMBLE_K):
+                kseed_s = SEED ^ seed_s ^ (k * 0x7F3A)
+                torch.manual_seed(kseed_s);  torch.cuda.manual_seed_all(kseed_s)
+                mk = KinTCN(n_kin_feat).to(DEVICE)
+                mk = train_kin_tcn(mk, Xtr_k_s_all, y_aug_s, sc_aug_s,
+                                   Xval_k_s_sc, y_val_s)
+                mk.eval()
+                with torch.no_grad():
+                    preds_te_list.append(torch.sigmoid(mk(Xte_t_s)).cpu().numpy())
+                    preds_val_list.append(torch.sigmoid(mk(Xval_t_s)).cpu().numpy())
+
+            tcn_te_s  = np.mean(preds_te_list,  axis=0)
+            tcn_val_s = np.mean(preds_val_list, axis=0)
+            cal_te_s, _ = val_platt_calibrate(tcn_val_s, y_val_s, tcn_te_s)
+
+            neg_mask  = y_te_s == 0
+            n_win     = len(cal_te_s)
+            n_pos_s   = int(y_te_s.sum())
+            mean_prob = float(cal_te_s[neg_mask].mean()) if neg_mask.any() else float("nan")
+            fpr       = float((cal_te_s[neg_mask] >= ALERT_THR).mean()) if neg_mask.any() else float("nan")
+            all_fpr.append(fpr);  all_prob.append(mean_prob)
+            print(f"  {s:<10} {n_win:>6} {n_pos_s:>5} {mean_prob:>10.4f} {fpr:>10.4f}")
+            audit_rows.append({"driver": s, "n_windows": n_win, "n_pos": n_pos_s,
+                               "mean_prob_neg_cal": mean_prob, "fpr_at_0.5": fpr})
+
+        print(f"  {'-'*50}")
+        if all_prob:
+            valid_prob = [v for v in all_prob if not math.isnan(v)]
+            valid_fpr  = [v for v in all_fpr  if not math.isnan(v)]
+            print(f"  {'Aggregate':<10} {'':>6} {'':>5} {np.mean(valid_prob):>13.4f} {np.mean(valid_fpr):>10.4f}")
+        print(f"{'='*72}")
+
     # Save
     results = {
         "config": {
@@ -952,8 +1184,9 @@ def main():
         },
         "pooled": metrics,
         "per_driver": per_driver_results,
+        "safe_driver_audit": audit_rows,
     }
-    out_path = OUT_DIR / "kin_tcn_ext12_results.json"
+    out_path = OUT_DIR / f"kin_tcn_L{LOOKBACK_S}_H{HORIZON}_results.json"
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\n  Results saved → {out_path}")
