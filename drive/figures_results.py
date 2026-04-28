@@ -50,8 +50,6 @@ C_XGB = "#56B4E9"   # sky blue — XGBoost baseline
 C_TCN = "#009E73"   # green   — KinTCN raw
 C_CAL = "#0072B2"   # blue    — KinTCN+Cal
 
-BEST_L, BEST_H = 45, 10     # best config (highest AUROC from ablation)
-
 # ── Load all result files ──────────────────────────────────────────────────────
 def load_all():
     results = {}
@@ -64,7 +62,15 @@ def load_all():
     return results
 
 all_results = load_all()
-best        = all_results[(BEST_L, BEST_H)]
+
+# Best config: highest KinTCN+Cal AUROC across the ablation grid
+BEST_L, BEST_H = max(
+    all_results,
+    key=lambda k: all_results[k]["pooled"]["kin_cal"]["auroc_mean"]
+)
+best = all_results[(BEST_L, BEST_H)]
+print(f"Auto-selected best config: L={BEST_L} s, H={BEST_H} s  "
+      f"(AUROC={best['pooled']['kin_cal']['auroc_mean']:.4f})")
 
 # ── Wilcoxon: KinTCN+Cal vs XGBoost ───────────────────────────────────────────
 xgb_aucs = [r["auc_xgb"] for r in best["per_driver"]
@@ -259,42 +265,82 @@ def fig_perm_importance():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FIGURE 5 — Ablation line plots: L × H → AUROC and ECE
+# FIGURE 5 — Ablation: L × H → AUROC (KinTCN+Cal vs XGBoost) + ECE + ΔAUROC
 # ══════════════════════════════════════════════════════════════════════════════
 def fig_ablation():
-    Ls     = sorted({k[0] for k in all_results})
-    Hs     = sorted({k[1] for k in all_results})
-    colors_H = ["#0072B2", "#E69F00", "#009E73"]   # one colour per H value
+    Ls       = sorted({k[0] for k in all_results})
+    Hs       = sorted({k[1] for k in all_results})
+    colors_H = ["#0072B2", "#E69F00", "#009E73"]
+    ls_xgb   = "--"
 
-    fig, axes = plt.subplots(1, 2, figsize=(9, 3.8), sharey=False)
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.0), sharey=False)
 
-    for ax, metric, ylabel, title in [
-        (axes[0], "auroc_mean", "AUROC",                 "(a) Discrimination"),
-        (axes[1], "ece",        "ECE  (lower is better)", "(b) Calibration — ECE"),
-    ]:
-        for H, col in zip(Hs, colors_H):
-            vals = [all_results[(L, H)]["pooled"]["kin_cal"][metric]
-                    for L in Ls if (L, H) in all_results]
-            Ls_avail = [L for L in Ls if (L, H) in all_results]
-            ax.plot(Ls_avail, vals, marker="o", color=col, lw=2, ms=6,
-                    label=f"$H$ = {H} s")
-            # Mark best config
-            if BEST_H == H and BEST_L in Ls_avail:
-                idx = Ls_avail.index(BEST_L)
-                ax.plot(BEST_L, vals[idx], marker="*", color="#D55E00",
-                        ms=12, zorder=5)
+    # ── Panel (a): AUROC — KinTCN+Cal and XGBoost, with std error bars ─────────
+    ax = axes[0]
+    for H, col in zip(Hs, colors_H):
+        Ls_av  = [L for L in Ls if (L, H) in all_results]
+        cal_m  = [all_results[(L,H)]["pooled"]["kin_cal"]["auroc_mean"] for L in Ls_av]
+        cal_s  = [all_results[(L,H)]["pooled"]["kin_cal"]["auroc_std"]  for L in Ls_av]
+        xgb_m  = [all_results[(L,H)]["pooled"]["xgb"]["auroc_mean"]     for L in Ls_av]
+        xgb_s  = [all_results[(L,H)]["pooled"]["xgb"]["auroc_std"]      for L in Ls_av]
+        ax.errorbar(Ls_av, cal_m, yerr=cal_s, marker="o", color=col, lw=2, ms=6,
+                    capsize=3, label=f"KinTCN+Cal  $H$={H} s")
+        ax.errorbar(Ls_av, xgb_m, yerr=xgb_s, marker="s", color=col, lw=1.5,
+                    ms=5, capsize=3, ls=ls_xgb, alpha=0.6,
+                    label=f"XGBoost  $H$={H} s")
+        if BEST_H == H and BEST_L in Ls_av:
+            idx = Ls_av.index(BEST_L)
+            ax.plot(BEST_L, cal_m[idx], marker="*", color="#D55E00", ms=14, zorder=5)
 
-        ax.set_xticks(Ls); ax.set_xticklabels([f"{l} s" for l in Ls])
-        ax.set_xlabel("Lookback duration  $L$")
-        ax.set_ylabel(ylabel)
-        ax.set_title(title, pad=6)
-        ax.legend(fontsize=9)
+    ax.set_xticks(Ls); ax.set_xticklabels([f"{l} s" for l in Ls])
+    ax.set_xlabel("Lookback duration  $L$")
+    ax.set_ylabel("AUROC  (mean ± std)")
+    ax.set_title("(a) Discrimination", pad=6)
 
-    star = mpatches.Patch(color="#D55E00", label="Selected config")
-    fig.legend(handles=[star], fontsize=9, loc="upper right",
-               bbox_to_anchor=(1.0, 1.0))
-    fig.suptitle("Ablation: effect of lookback duration and labelling horizon",
-                 fontsize=11, y=1.02)
+    # ── Panel (b): ΔAUROC (KinTCN+Cal − XGBoost) ───────────────────────────────
+    ax = axes[1]
+    for H, col in zip(Hs, colors_H):
+        Ls_av = [L for L in Ls if (L, H) in all_results]
+        delta = [all_results[(L,H)]["pooled"]["kin_cal"]["auroc_mean"] -
+                 all_results[(L,H)]["pooled"]["xgb"]["auroc_mean"]
+                 for L in Ls_av]
+        ax.plot(Ls_av, delta, marker="o", color=col, lw=2, ms=6,
+                label=f"$H$ = {H} s")
+        if BEST_H == H and BEST_L in Ls_av:
+            idx = Ls_av.index(BEST_L)
+            ax.plot(BEST_L, delta[idx], marker="*", color="#D55E00", ms=14, zorder=5)
+
+    ax.axhline(0, color="grey", lw=0.8)
+    ax.set_xticks(Ls); ax.set_xticklabels([f"{l} s" for l in Ls])
+    ax.set_xlabel("Lookback duration  $L$")
+    ax.set_ylabel("$\\Delta$AUROC  (KinTCN+Cal $-$ XGBoost)")
+    ax.set_title("(b) Gain over XGBoost", pad=6)
+
+    # ── Panel (c): ECE — KinTCN+Cal only ───────────────────────────────────────
+    ax = axes[2]
+    for H, col in zip(Hs, colors_H):
+        Ls_av = [L for L in Ls if (L, H) in all_results]
+        ece   = [all_results[(L,H)]["pooled"]["kin_cal"]["ece"] for L in Ls_av]
+        ax.plot(Ls_av, ece, marker="o", color=col, lw=2, ms=6, label=f"$H$ = {H} s")
+        if BEST_H == H and BEST_L in Ls_av:
+            idx = Ls_av.index(BEST_L)
+            ax.plot(BEST_L, ece[idx], marker="*", color="#D55E00", ms=14, zorder=5)
+
+    ax.set_xticks(Ls); ax.set_xticklabels([f"{l} s" for l in Ls])
+    ax.set_xlabel("Lookback duration  $L$")
+    ax.set_ylabel("ECE  (lower is better)")
+    ax.set_title("(c) Calibration", pad=6)
+    ax.legend(fontsize=8.5, loc="upper right")
+
+    # shared legend for panels (a) and (b)
+    cal_line = plt.Line2D([0],[0], color="grey", lw=2,  marker="o", ms=5, label="KinTCN+Cal (solid)")
+    xgb_line = plt.Line2D([0],[0], color="grey", lw=1.5, marker="s", ms=4, ls="--", alpha=0.6, label="XGBoost (dashed)")
+    star_p   = plt.Line2D([0],[0], color="#D55E00", marker="*", ms=10, lw=0, label="Selected config")
+    axes[0].legend(fontsize=7.5, ncol=2, loc="lower right")
+    axes[1].legend(handles=[cal_line, xgb_line, star_p], fontsize=8.5)
+
+    fig.suptitle("Ablation: lookback duration $L$ and labelling horizon $H$",
+                 fontsize=11, y=1.01)
     fig.tight_layout()
     out = FIG_DIR / "fig_ablation.pdf"
     fig.savefig(out, bbox_inches="tight")

@@ -87,6 +87,7 @@ FOCAL_GAMMA  = 2.0   # focal loss exponent; 0 = plain BCE
 RENORM_CLIP          = 3.0
 N_BOOTSTRAP          = 2000
 MIN_EVAL_POSITIVES   = 5
+MIN_POS_RATE         = 0.05
 N_PERM_REPEATS       = 10
 ENSEMBLE_K           = 5    # independent training runs per fold; outputs averaged
 EXCLUDE_EVAL_DRIVERS = {"0D04", "0D03R", "0D05"}
@@ -541,12 +542,16 @@ def print_validity_report(X_raw, y, scores, pids):
         sig   = "***" if pv < 0.001 else ("**" if pv < 0.01 else ("*" if pv < 0.05 else "ns"))
         print(f"  {col:<24}  {neg_v.mean():>10.4f}  {pos_v.mean():>10.4f}  {pv:>12.2e}  {sig}")
     print(f"\nPer-driver positive rate:")
-    print(f"  {'Driver':<12}  {'N':>6}  {'Pos':>5}  {'Rate%':>6}  Tier")
+    print(f"  {'Driver':<12}  {'N':>6}  {'Pos':>5}  {'Rate%':>6}  Tier  Eligible")
+    n_eligible = 0
     for d in np.unique(pids):
         mask_d = pids == d; nd = mask_d.sum(); np_ = y[mask_d].sum()
-        rate   = 100.0 * np_ / nd if nd > 0 else 0.0
-        tier   = "HIGH" if rate >= 10 else ("MED" if rate >= 5 else "LOW")
-        print(f"  {d:<12}  {nd:>6}  {np_:>5}  {rate:>6.1f}%  {tier}")
+        rate     = 100.0 * np_ / nd if nd > 0 else 0.0
+        tier     = "HIGH" if rate >= 10 else ("MED" if rate >= 5 else "LOW")
+        eligible = np_ >= MIN_EVAL_POSITIVES and (np_ / nd if nd > 0 else 0.0) >= MIN_POS_RATE
+        if eligible: n_eligible += 1
+        print(f"  {d:<12}  {nd:>6}  {np_:>5}  {rate:>6.1f}%  {tier:<4}  {'YES' if eligible else 'no'}")
+    print(f"\n  Eligible drivers: {n_eligible} / {len(np.unique(pids))}")
     print(f"{'='*72}")
 
 # ── SAMPLING RATE CHECK ───────────────────────────────────────────────────────
@@ -667,13 +672,15 @@ def main():
 
     ci_norm_map = {col: SIGNAL_COLS.index(col) for col in COLS_TO_NORM if col in SIGNAL_COLS}
     drivers = [d for d in np.unique(pid_all)
-               if y_all[pid_all == d].sum() >= MIN_EVAL_POSITIVES]
+               if y_all[pid_all == d].sum()  >= MIN_EVAL_POSITIVES
+               and y_all[pid_all == d].mean() >= MIN_POS_RATE]
 
-    # Audit drivers: < MIN_EVAL_POSITIVES, excluded from main eval loop
+    # Audit drivers: fail count or rate threshold, excluded from main eval loop
     safe_drivers = sorted([p for p in np.unique(pid_all)
-                           if y_all[pid_all == p].sum() < MIN_EVAL_POSITIVES])
+                           if y_all[pid_all == p].sum()  < MIN_EVAL_POSITIVES
+                           or y_all[pid_all == p].mean() < MIN_POS_RATE])
     if safe_drivers:
-        print(f"  Audit drivers (<{MIN_EVAL_POSITIVES} positives, held-out FPR targets): {safe_drivers}\n")
+        print(f"  Audit drivers (<{MIN_EVAL_POSITIVES} pos or <{MIN_POS_RATE:.0%} rate, held-out FPR targets): {safe_drivers}\n")
 
     hdr = (f"{'Driver':<10} | {'N_win':>5} {'PosR%':>6} | "
            f"{'LR':>7} {'XGB':>7} {'KinTCN':>7} {'KinTCN+Cal':>11}")
