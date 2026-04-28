@@ -1174,6 +1174,29 @@ def main():
             print(f"  {'Aggregate':<10} {'':>6} {'':>5} {np.mean(valid_prob):>13.4f} {np.mean(valid_fpr):>10.4f}")
         print(f"{'='*72}")
 
+    # Permutation importance: mean ± std AUROC drop per signal
+    perm_importance = {
+        col: {
+            "mean_delta_auroc": float(np.mean(deltas)) if deltas else float("nan"),
+            "std_delta_auroc":  float(np.std(deltas))  if deltas else float("nan"),
+        }
+        for col, deltas in signal_deltas.items()
+    }
+
+    # Per-driver raw predictions for ROC curves
+    pred_rows = [
+        {
+            "driver":  rec["driver"],
+            "y_true":  y.tolist(),
+            "lr":      lr.tolist(),
+            "xgb":     xgb.tolist(),
+            "kin_tcn": tcn.tolist(),
+            "kin_cal": cal.tolist(),
+        }
+        for rec, y, lr, xgb, tcn, cal in zip(
+            per_driver_results, pool_y, pool_lr, pool_xgb, pool_tcn, pool_cal)
+    ]
+
     # Save
     results = {
         "config": {
@@ -1182,9 +1205,11 @@ def main():
             "RENORM_CLIP": RENORM_CLIP, "SMOTE": USE_SMOTE,
             "EPOCHS": EPOCHS, "LR": LR,
         },
-        "pooled": metrics,
-        "per_driver": per_driver_results,
+        "pooled":          metrics,
+        "per_driver":      per_driver_results,
         "safe_driver_audit": audit_rows,
+        "perm_importance": perm_importance,
+        "predictions":     pred_rows,
     }
     out_path = OUT_DIR / f"kin_tcn_L{LOOKBACK_S}_H{HORIZON}_results.json"
     with open(out_path, "w") as f:
