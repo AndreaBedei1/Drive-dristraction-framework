@@ -70,7 +70,7 @@ SCORE_THRESHOLD = 1   # y=1 iff composite_risk_score >= SCORE_THRESHOLD
 # Windowing
 LOOKBACK_S  = 45
 WINDOW_STEP = 5
-GAP, HORIZON = 5, 10
+GAP, HORIZON = 5, 20
 ROLL_SCALES = [5, 10, 25]   # seconds: short (sudden events) | medium | long (gradual build-up)
 
 # Training
