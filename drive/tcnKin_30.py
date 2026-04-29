@@ -70,7 +70,7 @@ SCORE_THRESHOLD = 1   # y=1 iff composite_risk_score >= SCORE_THRESHOLD
 # Windowing
 LOOKBACK_S  = 30
 WINDOW_STEP = 5
-GAP, HORIZON = 5, 15
+GAP, HORIZON = 5, 20
 ROLL_SCALES = [5, 10, 25]   # seconds: short (sudden events) | medium | long (gradual build-up)
 
 # Training
@@ -89,7 +89,7 @@ N_BOOTSTRAP          = 2000
 MIN_EVAL_POSITIVES   = 5
 MIN_POS_RATE         = 0.05
 N_PERM_REPEATS       = 10
-ENSEMBLE_K           = 5    # independent training runs per fold; outputs averaged
+ENSEMBLE_K           = 10    # independent training runs per fold; outputs averaged
 EXCLUDE_EVAL_DRIVERS = {"0D04", "0D03R", "0D05"}
 TARGET_RATIO = 0.3
 
