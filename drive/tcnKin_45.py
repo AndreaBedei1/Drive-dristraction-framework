@@ -78,7 +78,7 @@ BATCH_SIZE   = 64
 WEIGHT_DECAY = 1e-4
 JITTER_STD   = 0.01
 CUTOUT_LEN   = 5
-CUTOUT_PROB  = 0.2
+CUTOUT_PROB  = 0.0
 EPOCHS       = 100
 LR           = 5e-4
 PATIENCE     = 20
@@ -413,29 +413,20 @@ class KinTCN(nn.Module):
 
 
 class KinLSTM(nn.Module):
-    """Unidirectional LSTM risk scorer — deep sequence baseline."""
-    HIDDEN = 64
-    LAYERS = 2
-
-    def __init__(self, n_kin_feats: int):
+    def __init__(self, n_kin_feats):
         super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=n_kin_feats,
-            hidden_size=self.HIDDEN,
-            num_layers=self.LAYERS,
-            batch_first=True,
-            dropout=0.2,
-        )
+        self.lstm = nn.LSTM(n_kin_feats, 64, 2, batch_first=True, dropout=0.2)
+        self.attn = TemporalAttention(64)   # si aspetta (B,64,T)
         self.head = nn.Sequential(
-            nn.Linear(self.HIDDEN, 48),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(48, 1),
+            nn.Linear(64, 48), nn.ReLU(),
+            nn.Dropout(0.2), nn.Linear(48, 1)
         )
-
     def forward(self, x_kin):
-        _, (h_n, _) = self.lstm(x_kin)
-        return self.head(h_n[-1]).squeeze(-1)   # (B,)
+        # x_kin: (B, T, F)
+        out, _ = self.lstm(x_kin)          # (B, T, 64)
+        out = out.permute(0, 2, 1)         # (B, 64, T) ← ora attenzione funziona
+        pooled = self.attn(out)            # (B, 64)
+        return self.head(pooled).squeeze(-1)
 
 # ── UTILITIES ─────────────────────────────────────────────────────────────────
 
