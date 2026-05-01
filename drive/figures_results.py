@@ -236,26 +236,26 @@ def fig_pr():
 # FIGURE 4 — Per-driver AUROC scatter with Wilcoxon annotation
 # ══════════════════════════════════════════════════════════════════════════════
 def fig_per_driver():
-    drivers  = best["per_driver"]
-    xgb_aucs = np.array([d["auc_xgb"] for d in drivers])
-    cal_aucs  = np.array([d["auc_cal"] for d in drivers])
+    drivers   = best["per_driver"]
+    lstm_aucs = np.array([d["auc_lstm"] for d in drivers])
+    cal_aucs  = np.array([d["auc_cal"]  for d in drivers])
     pos_rates = np.array([d["pos_rate"] for d in drivers])
 
     # Wilcoxon
-    diffs = cal_aucs - xgb_aucs
+    diffs = cal_aucs - lstm_aucs
     if np.any(diffs != 0):
-        stat, pval = wilcoxon(cal_aucs.tolist(), xgb_aucs.tolist(), alternative="two-sided")
+        stat, pval = wilcoxon(cal_aucs.tolist(), lstm_aucs.tolist(), alternative="two-sided")
         sig = "***" if pval < 0.001 else ("**" if pval < 0.01 else ("*" if pval < 0.05 else "n.s."))
     else:
         stat, pval, sig = 0.0, 1.0, "n.s."
 
-    n_wins = int((cal_aucs > xgb_aucs).sum())
+    n_wins = int((cal_aucs > lstm_aucs).sum())
 
     fig, ax = plt.subplots(figsize=(5, 5))
     lims = (0.3, 1.02)
     ax.plot(lims, lims, color="grey", lw=1, ls="--", zorder=1)
 
-    sc = ax.scatter(xgb_aucs, cal_aucs, c=pos_rates, cmap="YlOrRd",
+    sc = ax.scatter(lstm_aucs, cal_aucs, c=pos_rates, cmap="YlOrRd",
                     s=60, zorder=3, edgecolors="white", linewidths=0.5,
                     vmin=0, vmax=0.25)
     cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
@@ -263,13 +263,13 @@ def fig_per_driver():
 
     # Wilcoxon annotation
     ax.text(0.04, 0.97,
-            f"KinTCN+Cal $>$ XGBoost: {n_wins}/{len(cal_aucs)} drivers\n"
+            f"KinTCN+Cal $>$ LSTM: {n_wins}/{len(cal_aucs)} drivers\n"
             f"Wilcoxon  $W={stat:.0f}$,  $p={pval:.3f}$  ({sig})",
             transform=ax.transAxes, fontsize=9, va="top",
             bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="lightgrey", alpha=0.9))
 
     ax.set_xlim(lims); ax.set_ylim(lims)
-    ax.set_xlabel("XGBoost  AUROC")
+    ax.set_xlabel("LSTM  AUROC")
     ax.set_ylabel("KinTCN+Cal  AUROC")
     ax.set_title(f"Per-driver AUROC  ($L={BEST_L}$~s, $H={BEST_H}$~s)", pad=6)
 

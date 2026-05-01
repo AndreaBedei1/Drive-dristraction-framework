@@ -389,8 +389,9 @@ class KinTCN(nn.Module):
     """
     KIN_D = 64
 
-    def __init__(self, n_kin_feats: int):
+    def __init__(self, n_kin_feats: int, use_attention: bool = True):
         super().__init__()
+        self.use_attention = use_attention
         self.kin_branch = nn.Sequential(
             ResBlock(n_kin_feats,     self.KIN_D // 2, 1),
             ResBlock(self.KIN_D // 2, self.KIN_D,      2),
@@ -407,9 +408,9 @@ class KinTCN(nn.Module):
         )
 
     def forward(self, x_kin):
-        feat = self.kin_branch(x_kin.permute(0, 2, 1))   # (B, KIN_D, T)
-        pool = self.attn(feat)                             # (B, KIN_D)
-        return self.head(pool).squeeze(-1)                 # (B,)
+        feat = self.kin_branch(x_kin.permute(0, 2, 1))          # (B, KIN_D, T)
+        pool = self.attn(feat) if self.use_attention else feat.mean(dim=-1)
+        return self.head(pool).squeeze(-1)                        # (B,)
 
 
 class KinLSTM(nn.Module):
@@ -701,12 +702,12 @@ def main():
         print(f"  Audit drivers (<{MIN_EVAL_POSITIVES} pos or <{MIN_POS_RATE:.0%} rate, held-out FPR targets): {safe_drivers}\n")
 
     hdr = (f"{'Driver':<10} | {'N_win':>5} {'PosR%':>6} | "
-           f"{'LSTM':>7} {'XGB':>7} {'KinTCN':>7} {'KinTCN+Cal':>11}")
+           f"{'LSTM':>7} {'XGB':>7} {'KinTCN':>7} {'KinTCN-NA':>9} {'KinTCN+Cal':>11}")
     print(hdr); print("-" * len(hdr))
 
     per_driver_results = []
     pool_y, pool_tcn, pool_cal = [], [], []
-    pool_lstm, pool_xgb = [], []
+    pool_lstm, pool_xgb, pool_noatt = [], [], []
     pool_models, pool_Xte_k = [], []
 
     for d in drivers:
@@ -907,6 +908,19 @@ def main():
         # Keep last model for permutation importance (representative member)
         model = ensemble_models[-1]
 
+        # ── KinTCN no-attention ablation ──────────────────────────────────────
+        noatt_scores_list = []
+        for k in range(ENSEMBLE_K):
+            kseed_na = SEED ^ seed_d ^ (k * 0x1A2B)
+            torch.manual_seed(kseed_na); torch.cuda.manual_seed_all(kseed_na)
+            noatt_k = KinTCN(n_kin_feat, use_attention=False).to(DEVICE)
+            noatt_k = train_kin_tcn(noatt_k, Xtr_k_sc_all, y_tr_aug, sc_tr_aug,
+                                    Xval_k_sc, y_val_d)
+            noatt_k.eval()
+            with torch.no_grad():
+                noatt_scores_list.append(torch.sigmoid(noatt_k(Xte_t)).cpu().numpy())
+        noatt_scores = np.mean(noatt_scores_list, axis=0)
+
         # ── LSTM baseline ─────────────────────────────────────────────────────
         lstm_scores_list = []; lstm_val_list = []
         for k in range(ENSEMBLE_K):
@@ -924,46 +938,51 @@ def main():
         # Val-set Platt calibration on ensemble-averaged val scores
         cal_scores, platt_lr = val_platt_calibrate(val_scores, y_val_d, tcn_scores)
 
-        auc_lstm = _nan_or(safe_auc(y_te, lstm_scores))
-        auc_xgb = _nan_or(safe_auc(y_te, xgb_scores))
-        auc_tcn = _nan_or(safe_auc(y_te, tcn_scores))
-        auc_cal = _nan_or(safe_auc(y_te, cal_scores))
+        auc_lstm  = _nan_or(safe_auc(y_te, lstm_scores))
+        auc_xgb   = _nan_or(safe_auc(y_te, xgb_scores))
+        auc_tcn   = _nan_or(safe_auc(y_te, tcn_scores))
+        auc_noatt = _nan_or(safe_auc(y_te, noatt_scores))
+        auc_cal   = _nan_or(safe_auc(y_te, cal_scores))
 
         print(f"{d:<10} | {len(y_te):>5} {100*y_te.mean():>6.1f}% | "
-              f"{auc_lstm:>7.4f} {auc_xgb:>7.4f} {auc_tcn:>7.4f} {auc_cal:>11.4f}")
+              f"{auc_lstm:>7.4f} {auc_xgb:>7.4f} {auc_tcn:>7.4f} {auc_noatt:>9.4f} {auc_cal:>11.4f}")
 
         pool_y.append(y_te); pool_tcn.append(tcn_scores); pool_cal.append(cal_scores)
         pool_lstm.append(lstm_scores); pool_xgb.append(xgb_scores)
+        pool_noatt.append(noatt_scores)
         pool_models.append(model); pool_Xte_k.append(Xte_k_sc)
 
         per_driver_results.append({
             "driver": d, "n_windows": int(len(y_te)), "pos_rate": float(y_te.mean()),
             "auc_lstm": auc_lstm, "auc_xgb": auc_xgb,
-            "auc_tcn": auc_tcn, "auc_cal": auc_cal,
+            "auc_tcn": auc_tcn, "auc_noatt": auc_noatt, "auc_cal": auc_cal,
         })
 
     if not pool_y:
         print("[ERROR] No folds evaluated."); return
 
-    all_y    = np.concatenate(pool_y)
-    all_tcn  = np.concatenate(pool_tcn)
-    all_cal  = np.concatenate(pool_cal)
-    all_lstm = np.concatenate(pool_lstm)
-    all_xgb  = np.concatenate(pool_xgb)
+    all_y     = np.concatenate(pool_y)
+    all_tcn   = np.concatenate(pool_tcn)
+    all_cal   = np.concatenate(pool_cal)
+    all_lstm  = np.concatenate(pool_lstm)
+    all_xgb   = np.concatenate(pool_xgb)
+    all_noatt = np.concatenate(pool_noatt)
 
-    drv_aucs_lstm = [v for v in (safe_auc(y, s) for y, s in zip(pool_y, pool_lstm)) if v is not None]
-    drv_aucs_xgb  = [v for v in (safe_auc(y, s) for y, s in zip(pool_y, pool_xgb))  if v is not None]
-    drv_aucs_tcn = [v for v in (safe_auc(y, s) for y, s in zip(pool_y, pool_tcn)) if v is not None]
-    drv_aucs_cal = [v for v in (safe_auc(y, s) for y, s in zip(pool_y, pool_cal)) if v is not None]
+    drv_aucs_lstm  = [v for v in (safe_auc(y, s) for y, s in zip(pool_y, pool_lstm))  if v is not None]
+    drv_aucs_xgb   = [v for v in (safe_auc(y, s) for y, s in zip(pool_y, pool_xgb))   if v is not None]
+    drv_aucs_tcn   = [v for v in (safe_auc(y, s) for y, s in zip(pool_y, pool_tcn))   if v is not None]
+    drv_aucs_noatt = [v for v in (safe_auc(y, s) for y, s in zip(pool_y, pool_noatt)) if v is not None]
+    drv_aucs_cal   = [v for v in (safe_auc(y, s) for y, s in zip(pool_y, pool_cal))   if v is not None]
 
     print(f"\n{'='*72}")
     print("RESULTS — POPULATION RISK SCORE")
     print(f"{'='*72}")
     metrics = {}
-    metrics["lstm"]    = _print_model("LSTM baseline",         all_lstm, all_y, drv_aucs_lstm)
-    metrics["xgb"]     = _print_model("XGB baseline",         all_xgb,  all_y, drv_aucs_xgb)
-    metrics["kin_tcn"] = _print_model("KinTCN (raw)",         all_tcn, all_y, drv_aucs_tcn)
-    metrics["kin_cal"] = _print_model("KinTCN+Cal (Platt)",   all_cal, all_y, drv_aucs_cal)
+    metrics["lstm"]     = _print_model("LSTM baseline",         all_lstm,  all_y, drv_aucs_lstm)
+    metrics["xgb"]      = _print_model("XGB baseline",          all_xgb,   all_y, drv_aucs_xgb)
+    metrics["kin_tcn"]  = _print_model("KinTCN (raw)",          all_tcn,   all_y, drv_aucs_tcn)
+    metrics["kin_noatt"]= _print_model("KinTCN (no attention)", all_noatt, all_y, drv_aucs_noatt)
+    metrics["kin_cal"]  = _print_model("KinTCN+Cal (Platt)",    all_cal,   all_y, drv_aucs_cal)
 
     # Permutation importance
     print(f"\n{'='*72}")
@@ -1220,15 +1239,16 @@ def main():
     # Per-driver raw predictions for ROC curves
     pred_rows = [
         {
-            "driver":  rec["driver"],
-            "y_true":  y.tolist(),
-            "lstm":    lstm.tolist(),
-            "xgb":     xgb.tolist(),
-            "kin_tcn": tcn.tolist(),
-            "kin_cal": cal.tolist(),
+            "driver":    rec["driver"],
+            "y_true":    y.tolist(),
+            "lstm":      lstm.tolist(),
+            "xgb":       xgb.tolist(),
+            "kin_tcn":   tcn.tolist(),
+            "kin_noatt": noatt.tolist(),
+            "kin_cal":   cal.tolist(),
         }
-        for rec, y, lstm, xgb, tcn, cal in zip(
-            per_driver_results, pool_y, pool_lstm, pool_xgb, pool_tcn, pool_cal)
+        for rec, y, lstm, xgb, tcn, noatt, cal in zip(
+            per_driver_results, pool_y, pool_lstm, pool_xgb, pool_tcn, pool_noatt, pool_cal)
     ]
 
     # Save
