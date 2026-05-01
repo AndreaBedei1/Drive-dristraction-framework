@@ -42,10 +42,12 @@ plt.rcParams.update({
 })
 
 # Colorblind-friendly palette (Wong 2011)
-C_LR  = "#E69F00"   # orange     — LSTM baseline
-C_XGB = "#56B4E9"   # sky blue   — XGBoost baseline
-C_TCN = "#009E73"   # green      — KinTCN raw
-C_CAL = "#0072B2"   # blue       — KinTCN+Cal
+C_LR       = "#E69F00"   # orange          — LSTM baseline
+C_XGB      = "#56B4E9"   # sky blue        — XGBoost baseline
+C_TCN      = "#009E73"   # green           — KinTCN raw
+C_NOATT    = "#D55E00"   # vermillion      — KinTCN no-attention raw
+C_NOATT_CAL= "#CC79A7"   # reddish purple  — KinTCN no-attention + Cal
+C_CAL      = "#0072B2"   # blue            — KinTCN+Cal
 
 SIGNAL_LABELS = {
     "speed.x":            "Speed",
@@ -75,9 +77,9 @@ print(f"  Audit drivers    : {len(best['safe_driver_audit'])}")
 # ══════════════════════════════════════════════════════════════════════════════
 def fig_main_results():
     p      = best["pooled"]
-    models = ["LSTM", "XGBoost", "KinTCN", "KinTCN+Cal"]
-    keys   = ["lstm", "xgb", "kin_tcn", "kin_cal"]
-    colors = [C_LR, C_XGB, C_TCN, C_CAL]
+    models = ["LSTM", "XGBoost", "KinTCN", "KinTCN\n(no attn)", "KinTCN\n(no attn)+Cal", "KinTCN+Cal"]
+    keys   = ["lstm", "xgb", "kin_tcn", "kin_noatt", "kin_noatt_cal", "kin_cal"]
+    colors = [C_LR, C_XGB, C_TCN, C_NOATT, C_NOATT_CAL, C_CAL]
     x      = np.arange(len(models))
     width  = 0.55
 
@@ -86,7 +88,7 @@ def fig_main_results():
     auroc_hi    = [p[k]["auroc_ci"][1] - p[k]["auroc_mean"] for k in keys]
     ece_vals    = [p[k]["ece"]                 for k in keys]
 
-    fig, axes = plt.subplots(1, 2, figsize=(8, 3.8))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2))
 
     # AUROC
     ax = axes[0]
@@ -167,11 +169,32 @@ def fig_roc():
         return
 
     preds   = best["predictions"]
-    keys    = {"LSTM": "lstm", "XGBoost": "xgb", "KinTCN": "kin_tcn", "KinTCN+Cal": "kin_cal"}
-    colors  = {"LSTM": C_LR, "XGBoost": C_XGB, "KinTCN": C_TCN, "KinTCN+Cal": C_CAL}
-    ls_map  = {"LSTM": ":", "XGBoost": "--", "KinTCN": "-.", "KinTCN+Cal": "-"}
+    keys    = {
+        "LSTM":              "lstm",
+        "XGBoost":           "xgb",
+        "KinTCN":            "kin_tcn",
+        "KinTCN (no attn)":  "kin_noatt",
+        "KinTCN (no attn)+Cal": "kin_noatt_cal",
+        "KinTCN+Cal":        "kin_cal",
+    }
+    colors  = {
+        "LSTM":                 C_LR,
+        "XGBoost":              C_XGB,
+        "KinTCN":               C_TCN,
+        "KinTCN (no attn)":     C_NOATT,
+        "KinTCN (no attn)+Cal": C_NOATT_CAL,
+        "KinTCN+Cal":           C_CAL,
+    }
+    ls_map  = {
+        "LSTM":                 ":",
+        "XGBoost":              "--",
+        "KinTCN":               "-.",
+        "KinTCN (no attn)":     (0, (3, 1, 1, 1)),
+        "KinTCN (no attn)+Cal": (0, (5, 2)),
+        "KinTCN+Cal":           "-",
+    }
 
-    fig, ax = plt.subplots(figsize=(5, 5))
+    fig, ax = plt.subplots(figsize=(6, 5.5))
     ax.plot([0, 1], [0, 1], color="lightgrey", lw=1, ls="--", zorder=1)
 
     for name, key in keys.items():
