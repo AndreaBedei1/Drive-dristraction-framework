@@ -2,12 +2,14 @@
 figures_results.py — Main results figures for the paper.
 
 Figures produced (saved to impairment_results/figures/):
-  fig_main_results.pdf   — AUROC + ECE bar chart vs baselines
-  fig_roc.pdf            — pooled ROC curves for all models
-  fig_per_driver.pdf     — per-driver AUROC scatter (KinTCN+Cal vs XGBoost)
-                           with Wilcoxon annotation
+  fig_main_results.pdf    — AUROC + ECE bar chart (6 models: LSTM, XGB, KinTCN,
+                            KinTCN-NoAttn, KinTCN-NoAttn+Cal, KinTCN+Cal)
+  fig_roc.pdf             — mean per-driver ROC curves for all models
+  fig_pr.pdf              — mean per-driver PR curves for all models
+  fig_per_driver.pdf      — per-driver AUROC scatter (KinTCN+Cal vs LSTM)
+                            with Wilcoxon annotation
   fig_perm_importance.pdf — permutation feature importance (mean ΔAUROC)
-  fig_audit.pdf          — audit driver FPR at threshold 0.5
+  fig_audit.pdf           — audit driver FPR at threshold 0.5
 """
 
 import json
@@ -225,14 +227,35 @@ def fig_pr():
         return
 
     preds   = best["predictions"]
-    keys    = {"LSTM": "lstm", "XGBoost": "xgb", "KinTCN": "kin_tcn", "KinTCN+Cal": "kin_cal"}
-    colors  = {"LSTM": C_LR, "XGBoost": C_XGB, "KinTCN": C_TCN, "KinTCN+Cal": C_CAL}
-    ls_map  = {"LSTM": ":", "XGBoost": "--", "KinTCN": "-.", "KinTCN+Cal": "-"}
+    keys    = {
+        "LSTM":                 "lstm",
+        "XGBoost":              "xgb",
+        "KinTCN":               "kin_tcn",
+        "KinTCN (no attn)":     "kin_noatt",
+        "KinTCN (no attn)+Cal": "kin_noatt_cal",
+        "KinTCN+Cal":           "kin_cal",
+    }
+    colors  = {
+        "LSTM":                 C_LR,
+        "XGBoost":              C_XGB,
+        "KinTCN":               C_TCN,
+        "KinTCN (no attn)":     C_NOATT,
+        "KinTCN (no attn)+Cal": C_NOATT_CAL,
+        "KinTCN+Cal":           C_CAL,
+    }
+    ls_map  = {
+        "LSTM":                 ":",
+        "XGBoost":              "--",
+        "KinTCN":               "-.",
+        "KinTCN (no attn)":     (0, (3, 1, 1, 1)),
+        "KinTCN (no attn)+Cal": (0, (5, 2)),
+        "KinTCN+Cal":           "-",
+    }
 
     # compute baseline from first model (same for all)
     _, _, _, baseline = _mean_pr(preds, "kin_cal")
 
-    fig, ax = plt.subplots(figsize=(5, 5))
+    fig, ax = plt.subplots(figsize=(6, 5.5))
     ax.axhline(baseline, color="lightgrey", lw=1, ls="--", zorder=1,
                label=f"Random  (AP = {baseline:.3f})")
 
@@ -244,7 +267,7 @@ def fig_pr():
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
     ax.set_title(f"Mean Precision-Recall curves  ($L={BEST_L}$~s, $H={BEST_H}$~s)", pad=6)
-    ax.legend(fontsize=9, loc="upper right")
+    ax.legend(fontsize=9, loc="upper right", framealpha=0.9)
     ax.set_xlim(0, 1); ax.set_ylim(0, 1.02)
 
     fig.tight_layout()
