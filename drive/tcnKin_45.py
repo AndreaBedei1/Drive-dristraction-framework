@@ -1,30 +1,3 @@
-"""
-tcn_kin_ext14_audited.py — KinTCN with multi-scale rolling features.
-
-Changes from ext13:
-  1. Multi-scale rolling features.  engineer_features now computes rolling
-     mean and std at three temporal scales (ROLL_SCALES = [5, 10, 25] seconds)
-     instead of a single 10s scale.  The 5s scale makes sudden kinematic
-     changes (panic braking precursors, 0C driver profile) explicit in the
-     feature vector; the 25s scale captures slow build-up (collision/red-light
-     precursors, 0B driver profile).  Feature count: 4 × (3 + 2×3) = 36.
-  2. Output filename updated to kin_tcn_ext14_L{LOOKBACK_S}_results.json.
-
-Inherited from ext13 (unchanged):
-  - Focal loss (γ=2.0) × score weight.
-  - K=10 ensemble per fold.
-  - Dedicated held-out LOPO folds for audit drivers.
-  - Val-set Platt calibration.
-  - AUROC / AUPRC / Brier / ECE + Wilcoxon vs XGB.
-
-Validity guarantees (inherited):
-  - Strict LOPO-CV: each driver's windows held out entirely.
-  - Anti-leakage LOO route renormalisation.
-  - SMOTE in raw signal space, fit on training fold only.
-  - StandardScaler fit on training windows only.
-  - PYTHONHASHSEED enforced for reproducibility.
-"""
-
 import copy
 import hashlib
 import json
@@ -48,14 +21,13 @@ from scipy.spatial.distance import cdist
 import xgboost as xgb
 import random
 
-# ── CONFIG ────────────────────────────────────────────────────────────────────
 SEED   = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 SIGNAL_COLS  = ["speed.x", "steeringWheelAngle", "steeringTorq", "acceleration.y"]
 KIN_COLS     = SIGNAL_COLS
 VEHICLE_COLS = SIGNAL_COLS
-KIN_IDX      = list(range(len(KIN_COLS)))   # [0, 1, 2, 3]
+KIN_IDX      = list(range(len(KIN_COLS)))
 
 SEVERITY = {
     "Collision":               5,
@@ -63,41 +35,36 @@ SEVERITY = {
     "panic_braking_with_stop": 2,
     "panic_braking":           1,
 }
-# sharp_turn excluded (kinematic self-correlation, see ext10).
-# center_line_crossing excluded (see ext4).
-SCORE_THRESHOLD = 1   # y=1 iff composite_risk_score >= SCORE_THRESHOLD
 
-# Windowing
+SCORE_THRESHOLD = 1
+
 LOOKBACK_S  = 45
 WINDOW_STEP = 5
 GAP, HORIZON = 5, 10
-ROLL_SCALES = [5, 10, 25]   # seconds: short (sudden events) | medium | long (gradual build-up)
+ROLL_SCALES = [5, 10, 25]
 
-# Training
 BATCH_SIZE   = 64
 WEIGHT_DECAY = 1e-4
 JITTER_STD   = 0.01
 CUTOUT_LEN   = 5
-CUTOUT_PROB  = 0.0
+CUTOUT_PROB  = 0.2
 EPOCHS       = 100
 LR           = 5e-4
 PATIENCE     = 20
-FOCAL_GAMMA  = 2.0   # focal loss exponent; 0 = plain BCE
+FOCAL_GAMMA  = 2.0
 
 RENORM_CLIP          = 3.0
 N_BOOTSTRAP          = 2000
 MIN_EVAL_POSITIVES   = 5
 MIN_POS_RATE         = 0.05
 N_PERM_REPEATS       = 10
-ENSEMBLE_K           = 10    # independent training runs per fold; outputs averaged
-EXCLUDE_EVAL_DRIVERS = {"0D04", "0D03R", "0D05"}
+ENSEMBLE_K           = 10
 TARGET_RATIO = 0.3
 
 USE_SMOTE         = True
 SMOTE_K_NEIGHBORS = 5
 SMOTE_SEED_SALT   = 0xABCD
 
-# ── DETERMINISM ───────────────────────────────────────────────────────────────
 if os.environ.get("PYTHONHASHSEED") != str(SEED):
     import subprocess
     env = os.environ.copy()
@@ -114,10 +81,7 @@ torch.backends.cudnn.benchmark     = True
 OUT_DIR = Path(__file__).parent / "impairment_results"
 OUT_DIR.mkdir(exist_ok=True)
 
-# ── PREPROCESSING ─────────────────────────────────────────────────────────────
-
 def mark_event_onsets(df):
-    """Replace sustained event flags with onset pulses (first row of each run)."""
     df = df.copy()
     for _, grp in df.groupby(["id", "route"]):
         idx = grp.index
@@ -132,9 +96,7 @@ def mark_event_onsets(df):
             df.loc[idx, col] = onset
     return df
 
-
 def normalize_signals(df):
-    """Per-session z-score for kinematic signals (first LOOKBACK_S+GAP rows as reference)."""
     df = df.copy()
     prefix = LOOKBACK_S + GAP
     for _, grp in df.groupby(["id", "route"]):
@@ -147,10 +109,7 @@ def normalize_signals(df):
             df.loc[idx, col] = (grp[col] - mu) / sig
     return df
 
-# ── FEATURE ENGINEERING ───────────────────────────────────────────────────────
-
 def engineer_features(window):
-    """(T, C) → (T, (3 + 2*S)*C): raw | diff1 | z-score | [roll_mean_k | roll_std_k for k in ROLL_SCALES]."""
     T, C  = window.shape
     diff1 = np.diff(window, axis=0, prepend=window[:1])
     w_mean  = window.mean(axis=0, keepdims=True)
@@ -172,24 +131,14 @@ def engineer_features(window):
         parts.extend([roll_mean, roll_std])
     return np.concatenate(parts, axis=1).astype(np.float32)
 
-
 def apply_features_branch(X_raw, col_idx):
     return np.stack([engineer_features(w[:, col_idx]) for w in X_raw])
 
-
 def window_baseline_feats(X_raw):
-    """Mean | std | max per signal — for XGB baseline."""
     return np.concatenate([X_raw.mean(1), X_raw.std(1), X_raw.max(1)], axis=1).astype(np.float32)
-
-# ── SMOTE ─────────────────────────────────────────────────────────────────────
 
 def smote_raw(X_raw, y, scores=None, k=SMOTE_K_NEIGHBORS, rng=None,
               pids=None, routes=None, t_starts=None):
-    """
-    SMOTE in raw signal space with PCA nearest-neighbour search.
-    Returns augmented X_raw, y, scores, and interpolation indices/lambdas.
-    Synthetic scores are linearly interpolated from anchor/neighbour scores.
-    """
     if rng is None:
         rng = np.random.default_rng(SEED)
 
@@ -203,7 +152,6 @@ def smote_raw(X_raw, y, scores=None, k=SMOTE_K_NEIGHBORS, rng=None,
                 np.empty(0, dtype=np.int64),
                 np.empty(0, dtype=np.float32))
 
-    
     n_synthetic  = int((TARGET_RATIO * n_neg - (1 - TARGET_RATIO) * n_pos)
                        / (1 - TARGET_RATIO))
     n_synthetic  = max(0, n_synthetic)
@@ -262,15 +210,11 @@ def smote_raw(X_raw, y, scores=None, k=SMOTE_K_NEIGHBORS, rng=None,
             aug_scores,
             syn_anchor_idx, syn_neighbor_idx, syn_lambdas)
 
-# ── WINDOWING ─────────────────────────────────────────────────────────────────
-
 def composite_risk_score(future_df):
     return sum(SEVERITY[col] * int((future_df[col] > 0).any())
                for col in SEVERITY if col in future_df.columns)
 
-
 def build_windows(df):
-    """Uniform-stride windows; label y=1 iff risk score >= SCORE_THRESHOLD."""
     windows, labels, scores, pids, routes, t_starts = [], [], [], [], [], []
     min_len  = LOOKBACK_S + GAP + HORIZON
     nan_skip: dict = {}
@@ -313,12 +257,7 @@ def build_windows(df):
             np.array(routes),
             np.array(t_starts))
 
-# ── DATASET ───────────────────────────────────────────────────────────────────
-
 class KinDataset(Dataset):
-    """Yields (x_kin, y, sample_weight) tuples.
-    Positive windows are weighted by risk_score / mean_pos_score; negatives = 1.
-    """
     def __init__(self, X_kin, y, scores=None, augment=False):
         self.Xk  = torch.as_tensor(X_kin).float()
         self.y   = torch.as_tensor(y).float()
@@ -343,14 +282,11 @@ class KinDataset(Dataset):
                 xk[t0: t0 + CUTOUT_LEN] = 0.0
         return xk, self.y[idx], self.w[idx]
 
-# ── MODEL ─────────────────────────────────────────────────────────────────────
-
 def _gn_groups(out_c: int) -> int:
     g = min(out_c, 8)
     while g > 1 and out_c % g != 0:
         g //= 2
     return max(g, 1)
-
 
 class ResBlock(nn.Module):
     def __init__(self, in_c, out_c, d):
@@ -365,9 +301,7 @@ class ResBlock(nn.Module):
 
     def forward(self, x): return self.conv(x) + self.res(x)
 
-
 class TemporalAttention(nn.Module):
-    """Additive attention pooling: (B, C, T) → (B, C)."""
     def __init__(self, channels):
         super().__init__()
         self.query = nn.Linear(channels, channels // 2)
@@ -379,14 +313,7 @@ class TemporalAttention(nn.Module):
         weights = torch.softmax(self.score(h), dim=1)
         return (xt * weights).sum(dim=1)
 
-
 class KinTCN(nn.Module):
-    """
-    Pure kinematics TCN risk scorer.
-    Input: (B, T, n_kin_feats).  Output: (B,) logit.
-    ResBlocks d=1,2,4,8,16 → RF ≈ 63 timesteps → TemporalAttention → head.
-    No physiology, no FiLM, no spectral features.
-    """
     KIN_D = 64
 
     def __init__(self, n_kin_feats: int, use_attention: bool = True):
@@ -408,28 +335,25 @@ class KinTCN(nn.Module):
         )
 
     def forward(self, x_kin):
-        feat = self.kin_branch(x_kin.permute(0, 2, 1))          # (B, KIN_D, T)
+        feat = self.kin_branch(x_kin.permute(0, 2, 1))
         pool = self.attn(feat) if self.use_attention else feat.mean(dim=-1)
-        return self.head(pool).squeeze(-1)                        # (B,)
-
+        return self.head(pool).squeeze(-1)
 
 class KinLSTM(nn.Module):
     def __init__(self, n_kin_feats):
         super().__init__()
         self.lstm = nn.LSTM(n_kin_feats, 64, 2, batch_first=True, dropout=0.2)
-        self.attn = TemporalAttention(64)   # si aspetta (B,64,T)
+        self.attn = TemporalAttention(64)
         self.head = nn.Sequential(
             nn.Linear(64, 48), nn.ReLU(),
             nn.Dropout(0.2), nn.Linear(48, 1)
         )
     def forward(self, x_kin):
-        # x_kin: (B, T, F)
-        out, _ = self.lstm(x_kin)          # (B, T, 64)
-        out = out.permute(0, 2, 1)         # (B, 64, T) ← ora attenzione funziona
-        pooled = self.attn(out)            # (B, 64)
-        return self.head(pooled).squeeze(-1)
 
-# ── UTILITIES ─────────────────────────────────────────────────────────────────
+        out, _ = self.lstm(x_kin)
+        out = out.permute(0, 2, 1)
+        pooled = self.attn(out)
+        return self.head(pooled).squeeze(-1)
 
 def safe_auc(y_true, y_score):
     if len(np.unique(y_true)) < 2: return None
@@ -462,15 +386,7 @@ def _val_sample(arr, frac, rng):
     n = min(max(1, int(frac * len(arr))), len(arr)) if len(arr) > 0 else 0
     return rng.choice(arr, n, replace=False) if n > 0 else np.array([], dtype=arr.dtype)
 
-# ── VAL-SET PLATT CALIBRATION ─────────────────────────────────────────────────
-
 def val_platt_calibrate(val_scores, y_val, test_scores):
-    """
-    Fit a logistic recalibrator on validation-fold scores/labels.
-    Applied to test scores to fix Brier and ECE.
-    Falls back to raw scores if val is single-class or calibrator inverts ordering.
-    Returns (calibrated_scores, fitted_lr_or_None).
-    """
     if len(np.unique(y_val)) < 2:
         return test_scores, None
     lr = LogisticRegression(max_iter=1000, random_state=SEED)
@@ -479,20 +395,16 @@ def val_platt_calibrate(val_scores, y_val, test_scores):
     except Exception:
         return test_scores, None
     w = lr.coef_[0][0]
-    if w <= 0 or w > 20.0:   # non-monotone or exploded
+    if w <= 0 or w > 20.0:
         return test_scores, None
     return lr.predict_proba(test_scores.reshape(-1, 1))[:, 1], lr
 
-# ── TRAINING ──────────────────────────────────────────────────────────────────
-
 def train_kin_tcn(model, Xtr_k, y_tr, scores_tr, Xval_k, y_val):
-    """Score-weighted BCE, no label smoothing, early stopping on val AUROC."""
     loader = DataLoader(
         KinDataset(Xtr_k, y_tr, scores_tr, augment=True),
         batch_size=BATCH_SIZE, shuffle=True)
     opt   = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-     #   sched = torch.optim.lr_scheduler.OneCycleLR(
- #       opt, max_lr=LR * 5, steps_per_epoch=len(loader), epochs=EPOCHS, pct_start=0.3)
+
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS, eta_min=LR * 0.01)
 
     best_auc, best_w = float("-inf"), None
@@ -512,9 +424,9 @@ def train_kin_tcn(model, Xtr_k, y_tr, scores_tr, Xval_k, y_val):
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            #sched.step() #one cycle
+
             ep_loss += loss.item(); n_b += 1
-        sched.step() #cosine
+        sched.step()
 
         model.eval()
         with torch.no_grad():
@@ -537,8 +449,6 @@ def train_kin_tcn(model, Xtr_k, y_tr, scores_tr, Xval_k, y_val):
     if best_w is not None:
         model.load_state_dict(best_w)
     return model
-
-# ── VALIDITY REPORT ───────────────────────────────────────────────────────────
 
 def print_validity_report(X_raw, y, scores, pids):
     pos   = y == 1; total_pos = pos.sum(); total = len(y)
@@ -573,8 +483,6 @@ def print_validity_report(X_raw, y, scores, pids):
     print(f"\n  Eligible drivers: {n_eligible} / {len(np.unique(pids))}")
     print(f"{'='*72}")
 
-# ── SAMPLING RATE CHECK ───────────────────────────────────────────────────────
-
 def _check_sampling_rate(df):
     if "Timestamp" not in df.columns:
         return 1.0
@@ -593,8 +501,6 @@ def _check_sampling_rate(df):
     print(f"  Sampling rate check: {len(all_dts)} sessions, "
           f"median Δt = {global_dt:.3f} s  (all within [0.8, 1.2] s — OK)")
     return global_dt
-
-# ── LOO RENORMALISATION ───────────────────────────────────────────────────────
 
 def _loo_renorm(X_arr, pid_arr, routes_arr,
                 all_session_stats, route_sum_mus, route_sum_sigs2, route_counts,
@@ -625,8 +531,6 @@ def _loo_renorm(X_arr, pid_arr, routes_arr,
         print(f"  [WARN] _loo_renorm ({label}): {n_singleton} singleton-route triplets skipped.")
     return X_out
 
-# ── MAIN ──────────────────────────────────────────────────────────────────────
-
 def _print_model(name, all_s, all_y, drv_aucs):
     mean_d = np.mean(drv_aucs) if drv_aucs else float("nan")
     std_d  = np.std(drv_aucs)  if drv_aucs else float("nan")
@@ -641,7 +545,6 @@ def _print_model(name, all_s, all_y, drv_aucs):
     print(f"    ECE    : {ece:.4f}")
     return {"auroc_mean": mean_d, "auroc_std": std_d,
             "auroc_ci": list(ci_d), "auprc": auprc, "brier": brier, "ece": ece}
-
 
 def main():
     df = pd.read_csv(Path(__file__).parent / "relab+unibo_dataset.csv")
@@ -662,12 +565,7 @@ def main():
     df = normalize_signals(df)
     X_raw_all, y_all, scores_all, pid_all, routes_all, ts_all = build_windows(df)
 
-    keep = ~np.isin(pid_all, list(EXCLUDE_EVAL_DRIVERS))
-    X_raw_all  = X_raw_all[keep];  y_all      = y_all[keep]
-    scores_all = scores_all[keep]; pid_all    = pid_all[keep]
-    routes_all = routes_all[keep]; ts_all     = ts_all[keep]
-
-    n_kin_feat = len(KIN_COLS) * (3 + 2 * len(ROLL_SCALES))   # 4 × (3 + 6) = 36
+    n_kin_feat = len(KIN_COLS) * (3 + 2 * len(ROLL_SCALES))
 
     print_validity_report(X_raw_all, y_all, scores_all, pid_all)
 
@@ -678,7 +576,6 @@ def main():
     print(f"Roll scales : {ROLL_SCALES} s  (short→sudden events | long→gradual build-up)")
     print(f"TCN blocks  : d=1,2,4,8,16  →  RF ≈ 63 timesteps  →  {KinTCN.KIN_D}-d pool")
     print(f"Head        : Linear(64,48) → ReLU → Dropout(0.2) → Linear(48,1)")
-    print(f"Physiology  : REMOVED (perm-importance ≤ 0 across ext4–ext10)")
     print(f"Score thr   : ≥ {SCORE_THRESHOLD}  (Red_light=3, Collision=5+)")
     print(f"Loss        : Focal (γ={FOCAL_GAMMA}) × score weight  (BCE when γ=0)")
     print(f"Calibration : Val-set Platt scaling  (KinTCN+Cal)")
@@ -694,7 +591,6 @@ def main():
                if y_all[pid_all == d].sum()  >= MIN_EVAL_POSITIVES
                and y_all[pid_all == d].mean() >= MIN_POS_RATE]
 
-    # Audit drivers: fail count or rate threshold, excluded from main eval loop
     safe_drivers = sorted([p for p in np.unique(pid_all)
                            if y_all[pid_all == p].sum()  < MIN_EVAL_POSITIVES
                            or y_all[pid_all == p].mean() < MIN_POS_RATE])
@@ -739,7 +635,6 @@ def main():
         val_ids_set = set(val_ids.tolist())
         vmask       = np.isin(pid_tr, val_ids)
 
-        # Build route reference pools
         _route_mus_d:     dict = {}
         _route_sigs_d:    dict = {}
         _route_sum_mus:   dict = {}
@@ -768,7 +663,6 @@ def main():
             for k, v in _route_mus_d.items()
         }
 
-        # Renorm test windows
         X_te = X_te.copy()
         for route_v in np.unique(routes_te):
             r_mask = routes_te == route_v
@@ -791,7 +685,6 @@ def main():
                            ci_norm_map, f"train (test={d})")
         X_tr = np.clip(X_tr, -RENORM_CLIP, RENORM_CLIP)
 
-        # Val windows
         df_val_fold = df[df["id"].isin(val_ids_set)].copy()
         X_val_raw, y_val_d, _, _pids_val, _routes_val, _ = build_windows(df_val_fold)
         X_val_raw = X_val_raw.copy()
@@ -812,7 +705,6 @@ def main():
                     ) / max(_tr_sig, 1e-6)
         X_val_raw = np.clip(X_val_raw, -RENORM_CLIP, RENORM_CLIP)
 
-        # ── LR / XGB baselines ────────────────────────────────────────────────
         X_bl   = X_tr[~vmask]; y_bl = y_tr[~vmask]
         pw_bl  = float((y_bl == 0).sum() / max((y_bl == 1).sum(), 1))
 
@@ -835,7 +727,6 @@ def main():
                       verbose=False)
         xgb_scores = xgb_model.predict_proba(Xte_bl_feat_sc)[:, 1]
 
-        # ── KinTCN ────────────────────────────────────────────────────────────
         X_tr_train   = X_tr[~vmask]
         y_tr_train   = y_tr[~vmask]
         sc_tr_train  = sc_tr[~vmask]
@@ -857,7 +748,6 @@ def main():
         n_real      = len(y_tr_train)
         n_synthetic = len(_anch)
 
-        # Feature engineering
         Xtr_k_real  = apply_features_branch(X_tr_aug[:n_real], KIN_IDX)
         Xval_k_feat = apply_features_branch(X_val_raw,         KIN_IDX)
         Xte_k_feat  = apply_features_branch(X_te,              KIN_IDX)
@@ -871,7 +761,6 @@ def main():
         Xte_k_sc  = scaler_k.transform(
             Xte_k_feat.reshape(-1, n_kin_feat)).reshape(-1, LOOKBACK_S, n_kin_feat)
 
-        # Synthetic kin features
         if n_synthetic > 0:
             lams_bc      = _lams[:, None, None]
             Xtr_k_syn_sc = ((1.0 - lams_bc) * Xtr_k_real_sc[_anch]
@@ -881,7 +770,6 @@ def main():
         else:
             Xtr_k_sc_all = Xtr_k_real_sc
 
-        # K=5 ensemble: train independent models, average sigmoid outputs
         Xte_t  = torch.as_tensor(Xte_k_sc).to(DEVICE)
         Xval_t = torch.as_tensor(Xval_k_sc).to(DEVICE)
         tcn_scores_list  = []
@@ -902,13 +790,11 @@ def main():
                     torch.sigmoid(model_k(Xval_t)).cpu().numpy())
             ensemble_models.append(model_k)
 
-        # Average across ensemble members
         tcn_scores = np.mean(tcn_scores_list, axis=0)
         val_scores = np.mean(val_scores_list, axis=0)
-        # Keep last model for permutation importance (representative member)
+
         model = ensemble_models[-1]
 
-        # ── KinTCN no-attention ablation ──────────────────────────────────────
         noatt_scores_list = []; noatt_val_list = []
         for k in range(ENSEMBLE_K):
             kseed_na = SEED ^ seed_d ^ (k * 0x1A2B)
@@ -923,7 +809,6 @@ def main():
         noatt_scores     = np.mean(noatt_scores_list, axis=0)
         noatt_val_scores = np.mean(noatt_val_list,    axis=0)
 
-        # ── LSTM baseline ─────────────────────────────────────────────────────
         lstm_scores_list = []; lstm_val_list = []
         for k in range(ENSEMBLE_K):
             kseed_l = SEED ^ seed_d ^ (k * 0x3B7F)
@@ -937,7 +822,6 @@ def main():
                 lstm_val_list.append(torch.sigmoid(lstm_k(Xval_t)).cpu().numpy())
         lstm_scores = np.mean(lstm_scores_list, axis=0)
 
-        # Val-set Platt calibration
         cal_scores,      platt_lr = val_platt_calibrate(val_scores,      y_val_d, tcn_scores)
         noatt_cal_scores, _       = val_platt_calibrate(noatt_val_scores, y_val_d, noatt_scores)
 
@@ -993,7 +877,6 @@ def main():
     metrics["kin_noatt_cal"]= _print_model("KinTCN (no attn)+Cal",       all_noatt_cal, all_y, drv_aucs_noatt_cal)
     metrics["kin_cal"]      = _print_model("KinTCN+Cal (Platt)",         all_cal,       all_y, drv_aucs_cal)
 
-    # Permutation importance
     print(f"\n{'='*72}")
     print("PERMUTATION FEATURE IMPORTANCE — KinTCN+Cal")
     print(f"{'='*72}")
@@ -1022,7 +905,6 @@ def main():
         if deltas:
             print(f"    {col:<30} Δ={np.mean(deltas):+.4f} ± {np.std(deltas):.4f}")
 
-    # Wilcoxon: KinTCN vs XGB
     paired_tcn_xgb = [
         (r["auc_xgb"], r["auc_cal"]) for r in per_driver_results
         if not (math.isnan(r["auc_xgb"]) or math.isnan(r["auc_cal"]))
@@ -1041,7 +923,6 @@ def main():
             print(f"  Mean per-driver gain (KinTCN+Cal − XGB): {diff_tx.mean():+.4f} ± {diff_tx.std():.4f}")
             print(f"  KinTCN+Cal > XGB : {n_tcn_wins}/{len(diff_tx)} drivers  ({100*n_tcn_wins/len(diff_tx):.1f}%)")
 
-    # Per-driver summary
     print(f"\n{'='*72}")
     print("PER-DRIVER SUMMARY")
     print(f"{'='*72}")
@@ -1053,9 +934,6 @@ def main():
     if gains:
         print(f"  Cal gain vs raw    : {np.mean(gains):+.4f} ± {np.std(gains):.4f}")
 
-    # ── DEDICATED SAFE DRIVER FOLDS — unbiased FPR ───────────────────────────
-    # Each safe driver is held out for one dedicated fold so the model never
-    # trains on their windows, giving a true out-of-sample false positive rate.
     audit_rows = []
     if safe_drivers:
         ALERT_THR = 0.5
@@ -1068,7 +946,7 @@ def main():
         all_fpr, all_prob = [], []
 
         for s in safe_drivers:
-            # ── fold setup: hold out s entirely ──────────────────────────────
+
             mask_tr_s   = pid_all != s
             X_tr_s      = X_raw_all[mask_tr_s];  y_tr_s  = y_all[mask_tr_s]
             sc_tr_s     = scores_all[mask_tr_s]
@@ -1086,7 +964,6 @@ def main():
             fold_rng_s = np.random.default_rng(SEED ^ seed_s)
             torch.manual_seed(SEED ^ seed_s);  torch.cuda.manual_seed_all(SEED ^ seed_s)
 
-            # val split from training pool (excluding s)
             td_s      = np.unique(pid_tr_s)
             has_pos_s = np.array([y_tr_s[pid_tr_s == p].sum() > 0 for p in td_s])
             val_ids_s = np.concatenate([
@@ -1096,7 +973,6 @@ def main():
             val_ids_set_s = set(val_ids_s.tolist())
             vmask_s       = np.isin(pid_tr_s, val_ids_s)
 
-            # route reference pools (exclude s; val-aware for LOO train renorm)
             _rs_sum_mus:   dict = {}
             _rs_sum_sigs2: dict = {}
             _rs_counts:    dict = {}
@@ -1124,7 +1000,6 @@ def main():
                 for k, v in _rs_all_mus.items()
             }
 
-            # renorm test (safe driver) windows — same test-driver path as main loop
             for rv in np.unique(routes_te_s):
                 rm = routes_te_s == rv
                 for col_v, ci_v in ci_norm_map.items():
@@ -1140,13 +1015,11 @@ def main():
                     ) / max(r_sig, 1e-6)
             X_te_s = np.clip(X_te_s, -RENORM_CLIP, RENORM_CLIP)
 
-            # renorm train windows (LOO — s excluded so no leakage)
             X_tr_s = _loo_renorm(X_tr_s, pid_tr_s, routes_tr_s, all_session_stats,
                                   _rs_sum_mus, _rs_sum_sigs2, _rs_counts,
                                   ci_norm_map, f"safe_fold_{s}_train")
             X_tr_s = np.clip(X_tr_s, -RENORM_CLIP, RENORM_CLIP)
 
-            # val windows
             df_val_s = df[df["id"].isin(val_ids_set_s)].copy()
             X_val_s, y_val_s, _, _pv, _rv, _ = build_windows(df_val_s)
             X_val_s = X_val_s.copy()
@@ -1166,7 +1039,6 @@ def main():
                         ) / max(_trsig, 1e-6)
             X_val_s = np.clip(X_val_s, -RENORM_CLIP, RENORM_CLIP)
 
-            # SMOTE on pure-train split
             X_tr_s_tr  = X_tr_s[~vmask_s];  y_tr_s_tr  = y_tr_s[~vmask_s]
             sc_s_tr    = sc_tr_s[~vmask_s];  pid_s_tr   = pid_tr_s[~vmask_s]
             rt_s_tr    = routes_tr_s[~vmask_s]; ts_s_tr  = ts_tr_s[~vmask_s]
@@ -1180,7 +1052,6 @@ def main():
                 _an_s = _ne_s = _lm_s = np.empty(0, dtype=np.int64)
             n_real_s = len(y_tr_s_tr);  n_syn_s = len(_an_s)
 
-            # feature engineering + scaler (fit on real train only)
             Xtr_k_s  = apply_features_branch(X_aug_s[:n_real_s], KIN_IDX)
             Xval_k_s = apply_features_branch(X_val_s,            KIN_IDX)
             Xte_k_s  = apply_features_branch(X_te_s,             KIN_IDX)
@@ -1200,7 +1071,6 @@ def main():
             else:
                 Xtr_k_s_all = Xtr_k_s_sc
 
-            # train ensemble
             Xte_t_s  = torch.as_tensor(Xte_k_s_sc).to(DEVICE)
             Xval_t_s = torch.as_tensor(Xval_k_s_sc).to(DEVICE)
             preds_te_list: list = [];  preds_val_list: list = []
@@ -1236,7 +1106,6 @@ def main():
             print(f"  {'Aggregate':<10} {'':>6} {'':>5} {np.mean(valid_prob):>13.4f} {np.mean(valid_fpr):>10.4f}")
         print(f"{'='*72}")
 
-    # Permutation importance: mean ± std AUROC drop per signal
     perm_importance = {
         col: {
             "mean_delta_auroc": float(np.mean(deltas)) if deltas else float("nan"),
@@ -1245,7 +1114,6 @@ def main():
         for col, deltas in signal_deltas.items()
     }
 
-    # Per-driver raw predictions for ROC curves
     pred_rows = [
         {
             "driver":        rec["driver"],
@@ -1262,7 +1130,6 @@ def main():
             pool_tcn, pool_noatt, pool_noatt_cal, pool_cal)
     ]
 
-    # Save
     results = {
         "config": {
             "LOOKBACK_S": LOOKBACK_S, "GAP": GAP, "HORIZON": HORIZON,
@@ -1281,7 +1148,6 @@ def main():
         json.dump(results, f, indent=2)
     print(f"\n  Results saved → {out_path}")
     print(f"{'='*72}")
-
 
 if __name__ == "__main__":
     main()

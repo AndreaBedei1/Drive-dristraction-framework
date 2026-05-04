@@ -283,50 +283,57 @@ def fig_pr():
 # ══════════════════════════════════════════════════════════════════════════════
 def fig_per_driver():
     drivers   = best["per_driver"]
-    lstm_aucs = np.array([d["auc_lstm"] for d in drivers])
-    cal_aucs  = np.array([d["auc_cal"]  for d in drivers])
+    lr_aucs   = np.array([d["auc_lstm"] for d in drivers])
+    xgb_aucs  = np.array([d["auc_xgb"] for d in drivers])
+    cal_aucs  = np.array([d["auc_cal"] for d in drivers])
     pos_rates = np.array([d["pos_rate"] for d in drivers])
 
-    # Wilcoxon
-    diffs = cal_aucs - lstm_aucs
-    if np.any(diffs != 0):
-        stat, pval = wilcoxon(cal_aucs.tolist(), lstm_aucs.tolist(), alternative="two-sided")
-        sig = "***" if pval < 0.001 else ("**" if pval < 0.01 else ("*" if pval < 0.05 else "n.s."))
-    else:
-        stat, pval, sig = 0.0, 1.0, "n.s."
+    def _wilcoxon(a, b):
+        diffs = a - b
+        if np.any(diffs != 0):
+            stat, pval = wilcoxon(a.tolist(), b.tolist(), alternative="two-sided")
+            sig = "***" if pval < 0.001 else ("**" if pval < 0.01 else ("*" if pval < 0.05 else "n.s."))
+        else:
+            stat, pval, sig = 0.0, 1.0, "n.s."
+        return stat, pval, sig, diffs
 
-    n_wins = int((cal_aucs > lstm_aucs).sum())
+    stat_lr,  pval_lr,  sig_lr,  diffs_lr  = _wilcoxon(cal_aucs, lr_aucs)
+    stat_xgb, pval_xgb, sig_xgb, diffs_xgb = _wilcoxon(cal_aucs, xgb_aucs)
 
-    fig, ax = plt.subplots(figsize=(5, 5))
     lims = (0.3, 1.02)
-    ax.plot(lims, lims, color="grey", lw=1, ls="--", zorder=1)
+    panels = [
+        (lr_aucs,  "LSTM",    C_LR,  stat_lr,  pval_lr,  sig_lr,  diffs_lr),
+        (xgb_aucs, "XGBoost", C_XGB, stat_xgb, pval_xgb, sig_xgb, diffs_xgb),
+    ]
 
-    sc = ax.scatter(lstm_aucs, cal_aucs, c=pos_rates, cmap="YlOrRd",
-                    s=60, zorder=3, edgecolors="white", linewidths=0.5,
-                    vmin=0, vmax=0.25)
-    cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5), sharey=True, constrained_layout=True)
+    fig.suptitle(f"Per-driver AUROC  ($L={BEST_L}$~s, $H={BEST_H}$~s)", fontsize=11)
+
+    for ax, (base_aucs, base_label, base_color, stat, pval, sig, diffs) in zip(axes, panels):
+        n_wins = int((cal_aucs > base_aucs).sum())
+        ax.plot(lims, lims, color="grey", lw=1, ls="--", zorder=1)
+        sc = ax.scatter(base_aucs, cal_aucs, c=pos_rates, cmap="YlOrRd",
+                        s=60, zorder=3, edgecolors="white", linewidths=0.5,
+                        vmin=0, vmax=0.25)
+        ax.text(0.04, 0.97,
+                f"KinTCN+Cal $>$ {base_label}: {n_wins}/{len(cal_aucs)} drivers\n"
+                f"Wilcoxon  $W={stat:.0f}$,  $p={pval:.3f}$  ({sig})",
+                transform=ax.transAxes, fontsize=9, va="top",
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="lightgrey", alpha=0.9))
+        ax.set_xlim(lims); ax.set_ylim(lims)
+        ax.set_xlabel(f"{base_label}  AUROC")
+        print(f"  vs {base_label}: W={stat:.1f}  p={pval:.4f}  {sig}  "
+              f"(mean gain {diffs.mean():+.4f} ± {diffs.std():.4f})")
+
+    axes[0].set_ylabel("KinTCN+Cal  AUROC")
+    cbar = fig.colorbar(sc, ax=axes, fraction=0.03, pad=0.02)
     cbar.set_label("Positive rate", fontsize=10)
 
-    # Wilcoxon annotation
-    ax.text(0.04, 0.97,
-            f"KinTCN+Cal $>$ LSTM: {n_wins}/{len(cal_aucs)} drivers\n"
-            f"Wilcoxon  $W={stat:.0f}$,  $p={pval:.3f}$  ({sig})",
-            transform=ax.transAxes, fontsize=9, va="top",
-            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="lightgrey", alpha=0.9))
-
-    ax.set_xlim(lims); ax.set_ylim(lims)
-    ax.set_xlabel("LSTM  AUROC")
-    ax.set_ylabel("KinTCN+Cal  AUROC")
-    ax.set_title(f"Per-driver AUROC  ($L={BEST_L}$~s, $H={BEST_H}$~s)", pad=6)
-
-    fig.tight_layout()
     out = FIG_DIR / "fig_per_driver.pdf"
     fig.savefig(out, bbox_inches="tight")
     fig.savefig(out.with_suffix(".png"), bbox_inches="tight", dpi=300)
     plt.close(fig)
     print(f"Saved {out}")
-    print(f"  Wilcoxon: W={stat:.1f}  p={pval:.4f}  {sig}  "
-          f"(mean gain {diffs.mean():+.4f} ± {diffs.std():.4f})")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
