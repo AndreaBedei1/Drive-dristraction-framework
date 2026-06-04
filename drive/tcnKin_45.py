@@ -59,7 +59,7 @@ MIN_EVAL_POSITIVES   = 5
 MIN_POS_RATE         = 0.05
 N_PERM_REPEATS       = 10
 ENSEMBLE_K           = 10
-TARGET_RATIO = 0.3
+TARGET_RATIO = 0.25
 
 USE_SMOTE         = True
 SMOTE_K_NEIGHBORS = 5
@@ -1143,7 +1143,7 @@ def main():
         "perm_importance": perm_importance,
         "predictions":     pred_rows,
     }
-    out_path = OUT_DIR / f"kin_tcn_L{LOOKBACK_S}_H{HORIZON}_results.json"
+    out_path = OUT_DIR / f"kin_tcn_L{LOOKBACK_S}_H{HORIZON}_TR{TARGET_RATIO*100}_results.json"
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\n  Results saved → {out_path}")
