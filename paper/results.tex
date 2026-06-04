@@ -1,0 +1,109 @@
+\section{Results}
+\label{sec:results}
+
+All results are reported under Leave-One-Participant-Out Cross-Validation
+(LOPO-CV): in each fold, one participant is held out entirely as the test set,
+and all preprocessing, SMOTE generation, and model training are performed
+exclusively on the remaining participants.
+This is the strictest available cross-participant evaluation protocol and
+directly simulates deployment on a driver the system has never encountered.
+The primary performance metric is the area under the ROC curve (AUROC), which
+measures the model's ability to rank impaired windows above safe ones
+independently of any operating threshold; calibration quality is additionally
+assessed through Expected Calibration Error (ECE)~\cite{Guo2017} and Brier
+score.
+All aggregate metrics are accompanied by 95\% confidence intervals obtained
+via non-parametric bootstrap ($N = 2\,000$ resamples).
+
+Not all participants contribute equally to this evaluation.
+Those with fewer than five positive windows in their held-out fold provide
+insufficient signal for reliable AUROC estimation and are designated as
+\emph{audit drivers}.
+For this group, the relevant safety question shifts from discrimination to false
+alarm control: rather than AUROC, we report the false positive rate (FPR) at a
+fixed operating threshold, quantifying how often the model raises an impairment
+alert for a driver who committed no safety-critical error.
+
+Before reporting main results, we additionally present a systematic ablation
+over the two key windowing hyperparameters: the lookback duration $L$ and the
+labelling horizon $H$.
+The configuration selected from this ablation is used for all results that
+follow.
+
+\subsection{Main Results}
+
+Table~\ref{tab:main_results} reports AUROC, ECE, and Brier score for KinTCN
+and the two baselines: logistic regression (LR) and gradient-boosted trees
+(XGBoost~\cite{Chen2016}), both trained on the same window-level summary
+statistics (mean, standard deviation, and maximum per signal).
+KinTCN with Platt calibration achieves an AUROC of
+$\mathbf{XX} \pm XX$ $[XX, XX]$, compared to $XX \pm XX$ for XGBoost and
+$XX \pm XX$ for the LR baseline.
+The gap between KinTCN and the tree-based baseline is consistent
+across participants, with KinTCN achieving higher per-participant AUROC in
+$XX$ out of $XX$ evaluable drivers (Figure~\ref{fig:per_driver_auroc}).
+Calibration follows the same pattern: KinTCN achieves an ECE of $XX$
+and a Brier score of $XX$, against $XX$ and $XX$ for XGBoost,
+confirming that the Platt recalibration step yields reliable probability
+estimates rather than merely well-ranked scores.
+
+\subsection{Statistical Significance}
+
+Statistical significance of the improvement over XGBoost is assessed using the
+Wilcoxon signed-rank test on per-participant AUROC values, with a two-sided
+alternative and $\alpha = 0.05$.
+The test yields $W = XX$, $p = XX$, indicating that KinTCN's advantage over
+the gradient-boosted baseline is [significant / not significant] at the chosen
+level.
+The mean per-participant gain is $\Delta\mathrm{AUROC} = +XX \pm XX$,
+with KinTCN exceeding XGBoost in $XX$ of $XX$ evaluable drivers.
+
+\subsection{Permutation Feature Importance}
+
+To understand which kinematic signals drive the model's decisions, we compute
+permutation feature importance: for each signal in turn, its values across the
+test windows are randomly shuffled and the resulting drop in per-participant
+AUROC is recorded.
+A larger drop indicates a signal the model relies on more heavily.
+Figure~\ref{fig:perm_importance} reports the mean drop and its standard
+deviation across drivers and permutation repeats.
+[DESCRIBE FINDINGS: e.g., steering torque and lateral acceleration account for
+the largest drops, consistent with the literature on early collision signatures;
+speed contributes moderately; steering wheel angle is least informative.]
+This ranking is stable across participants, suggesting that the model has
+learned a consistent kinematic profile of impairment rather than overfitting
+to participant-specific driving styles.
+
+\subsection{Safe Driver Audit}
+\label{sec:audit}
+
+Audit drivers are participants whose held-out fold contains fewer than five
+positive windows, meaning they made very few or no safety-critical errors
+during the study session.
+For this group, AUROC is uninformative; the relevant safety question is instead
+whether the model raises false alarms at an unacceptable rate for an attentive
+driver.
+For each audit driver, a dedicated LOPO fold is run---holding that driver out
+entirely and training on all others---and the false positive rate (FPR) at a
+fixed operating threshold of $0.5$ is measured on their negative windows.
+Across the $XX$ audit drivers, the mean FPR is $XX \pm XX$
+(Table~\ref{tab:audit}), and the mean calibrated impairment probability
+assigned to their safe windows is $XX$, well below the alert threshold.
+These figures indicate that drivers who drive safely throughout the session are
+unlikely to trigger false alarms, a key requirement for any deployable
+monitoring system.
+
+\subsection{Ablation: Lookback Duration and Predictive Horizon}
+
+The predictive window is governed by two hyperparameters: the lookback
+duration $L$, which controls how much kinematic history the network can
+attend to, and the labelling horizon $H$, which determines how far into the
+future errors are aggregated.
+Figure~\ref{fig:ablation_grid} reports AUROC on a grid of $L \times H$ values,
+with the gap $G$ held fixed.
+[DESCRIBE FINDINGS: e.g., performance increases with $L$ up to $XX$\,s and
+then plateaus, suggesting that kinematic precursors beyond that horizon carry
+little additional information; horizon $H = XX$\,s offers the best
+trade-off between coverage and temporal precision.]
+The chosen configuration ($L = XX$\,s, $H = XX$\,s, $G = XX$\,s) sits at
+the performance peak and is used for all results reported above.

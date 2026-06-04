@@ -1,0 +1,222 @@
+\section{KinTCN}
+\label{sec:method}
+
+Computing a fitness-to-drive index requires a model that can extract
+temporal patterns from multivariate driver time series in real time,
+generalise across drivers with different baseline styles, and produce a
+well-calibrated continuous score rather than a hard binary decision.
+Temporal Convolutional Networks (TCNs)~\cite{Bai2018} satisfy all three
+requirements: they enforce causality by construction, i.e., the output at time $t$
+depends only on inputs at times $\leq t$, use dilated convolutions~\cite{vandenOord2016}
+to capture dependencies spanning hundreds of timesteps without recurrence,
+and are trained discriminatively end-to-end.
+
+We propose \textbf{KinTCN}, a TCN trained on four standard in-vehicle kinematic
+signals, i.e., speed ($v$), steering wheel angle ($\delta$), steering torque ($\tau$),
+and lateral acceleration ($a_y$).
+Internally, the network outputs a calibrated impairment probability
+$\hat{p} \in [0,1]$; the fitness-to-drive index is its complement,
+$f = 1 - \hat{p}$, so that $f$ close to 1 indicates a driver in full control
+and $f$ close to 0 indicates elevated impairment risk.
+The true network target, i.e., the driver's impairment state, is a latent variable that
+cannot be observed directly. What can be observed are safety-critical error events, e.g., collisions, red-light
+violations, recorded during the study.
+KinTCN uses these events as \emph{weak supervision}: a kinematic window is
+labelled as elevated-risk if an error is recorded in the near future, and as
+safe otherwise. Such a supervision is weak as the label is a noisy proxy, i.e., an impaired driver may not
+make an error in a given window, and an attentive driver may make one due to
+road conditions, however it is the only supervision signal available without
+intrusive physiological measurement.
+The model therefore learns to score the driver's control state, not to predict
+specific error events.
+In our implementation, we paid careful attention to three sources of fragility that are common in
+driver monitoring research: data leakage across participants during preprocessing,
+class imbalance between rare error-preceding windows and abundant safe windows,
+and overoptimistic evaluation on participants seen during training.
+Each of these is addressed explicitly, and the design choices are detailed in
+the subsections that follow.
+
+\subsection{Label Derivation and Predictive Window}
+
+The model operates on fixed-length kinematic windows and must assign each one
+a scalar impairment probability before the next window arrives.
+Because the driver's true impairment state is latent, each window is labelled
+through the safety-critical events that follow it: a window ending at time $t$
+is paired with the future interval
+$[t + G,\; t + G + H]$,
+and the events occurring within that interval constitute its weak supervision signal.
+
+The gap $G$ enforces temporal separation between the kinematic observation
+and the labelled period, preventing the model from exploiting signatures that
+are contemporaneous with an error rather than preceding it.
+The horizon $H$ defines the width of the future period over which evidence is
+aggregated; a wider horizon increases label coverage at the cost of temporal
+precision.
+Both values are chosen empirically and their effect on performance is examined
+in Section~\ref{sec:results}.
+
+To reflect the differential safety relevance of each event, the dataset records
+four types of safety-critical incident, each assigned a severity weight:
+Collision ($w = 5$), Red-light violation ($w = 3$),
+Panic braking with stop ($w = 2$), and Panic braking ($w = 1$).
+The composite risk score for a window is then the sum of severity weights of
+the distinct event types that occur at least once in the associated future interval.
+A window is labelled positive ($y = 1$) if its score is $\geq 1$, i.e., if any
+safety-critical event occurs in the future interval, and negative ($y = 0$) otherwise.
+Higher-severity events increase the score without excluding lower-severity ones
+from the positive class; the score is later used to up-weight high-severity
+windows in the loss function (Section~\ref{sec:training}).
+
+Since safety-critical incidents are rare relative to normal driving, the
+labelling procedure inevitably produces a heavily skewed class distribution:
+positive windows---those preceding an error---constitute a small minority of
+the full window set.
+This imbalance is structural rather than an artefact of the threshold choice:
+even at the minimum score threshold of $1$, which maximises positive coverage by
+counting any incident as sufficient, error-preceding windows remain far
+outnumbered by safe ones.
+A model trained on the raw distribution has little incentive to attend to the
+minority class; it can minimise loss by assigning uniformly low impairment
+scores, achieving high accuracy while being useless as a risk detector.
+Correcting for this at both the data level and the loss level is therefore a
+prerequisite for meaningful training, and the strategies adopted are described
+in Section~\ref{sec:training}.
+
+\subsection{Preprocessing and Feature Engineering}
+
+Each driver exhibits a characteristic baseline style---habitual cruising speed,
+typical steering amplitude, preferred torque range---that would dominate any
+learned cross-participant representation if left uncontrolled.
+Each kinematic signal is therefore z-scored per driving session (i.e.,
+standardised to zero mean and unit variance) using the first $L + G$ seconds
+of the session as the personal reference baseline, where $L$ denotes the
+lookback duration (i.e., the length of the kinematic history fed to the
+network at each prediction step).
+This initial segment precedes the distraction induction and thus provides a
+distraction-free snapshot of the driver's individual operating point.
+Extreme values are clipped to a fixed number of standard deviations to suppress
+artefacts from rare transient manoeuvres.
+Because the model is evaluated under Leave-One-Participant-Out Cross-Validation (LOPO-CV),
+these normalisation statistics must be recomputed in each fold using only the
+training participants: allowing any statistic derived from the held-out driver
+to influence preprocessing would introduce leakage and produce overoptimistic
+generalisation estimates.
+
+From each normalised recording, fixed-length windows of $L$ seconds are then
+extracted with a uniform stride of 5\,s (i.e., consecutive windows overlap by
+$L - 5$ seconds, so a new window starts every 5 seconds), converting the
+continuous time series into a sequence of $(L \times 4)$ signal matrices.
+Any window that extends beyond the end of the recording, or whose associated
+future labelling interval $[t + G,\; t + G + H]$ is not fully contained within
+the session, is discarded.
+Notice that, the lookback duration $L$ controls how much temporal context the network can
+attend to and, together with $G$ and $H$, is treated as a hyperparameter whose
+effect on performance is examined in Section~\ref{sec:results}.
+
+The raw four-channel window, however, provides the network with only
+instantaneous signal values, giving it no direct access to how the signals are
+evolving or how they deviate from local norms.
+Each window is therefore transformed into a richer representation: for each of
+the four kinematic signals, at every timestep, we compute the raw normalised
+value, the first-order temporal difference, a within-window z-score, and
+rolling mean and standard deviation at three temporal scales (short, medium,
+long).
+The multi-scale rolling statistics are motivated by the heterogeneous temporal
+structure of the target events: the short scale responds to abrupt kinematic
+changes characteristic of panic braking precursors, whereas the long scale
+captures the gradual degradation of vehicle control that tends to precede
+collisions and red-light violations.
+The resulting feature tensor has shape $(L \times 36)$ per window
+($4~\text{signals} \times 9~\text{features per signal}$).
+
+\subsection{KinTCN: Model Design and Training}
+\label{sec:training}
+
+A central design requirement for KinTCN is that it must remain strictly causal:
+at any moment $t$, the impairment score may only depend on signals observed up
+to and including $t$, never on future measurements.
+This rules out architectures that process the full sequence bidirectionally, such
+as standard LSTMs or Transformers without causal masking.
+KinTCN is instead built on Temporal Convolutional Networks
+(TCNs)~\cite{Bai2018}, which enforce causality by construction through
+one-sided, dilated convolutions that look only backwards in time.
+Crucially, by stacking layers with exponentially increasing dilation (each
+layer doubling the temporal spacing between the values it connects) the network
+achieves a receptive field that covers the entire lookback window $L$ without
+recurrence and without the vanishing-gradient problems that limit deep RNNs on
+long sequences.
+
+Not all moments within a window are equally informative: a brief episode of
+erratic steering may be far more diagnostic than the surrounding normal driving,
+yet a simple global average would dilute it.
+After the convolutional stack, KinTCN therefore applies a lightweight temporal
+attention mechanism that learns to weight each timestep according to its
+relevance, producing a single summary vector that disproportionately reflects
+the most diagnostically significant segments of the window.
+This vector is then passed through a small fully connected network that produces
+a single scalar: the raw impairment probability $\hat{p}$.
+
+The class imbalance between error-preceding and safe windows requires
+intervention before training can proceed meaningfully.
+At the data level, we apply SMOTE~\cite{Chawla2002} (Synthetic Minority
+Over-sampling Technique), which generates synthetic positive-class examples by
+interpolating between existing real ones, moving the training distribution
+closer to balance without discarding any safe-driving data.
+To respect the sequential nature of the recordings, synthetic windows are only
+constructed from real windows belonging to the same driving session and
+sufficiently separated in time, ensuring that interpolated examples remain
+temporally coherent.
+At the loss level, we adopt focal loss~\cite{Lin2017}, which automatically
+down-weights examples the model already handles confidently and concentrates the
+training signal on ambiguous cases near the decision boundary, i.e., precisely
+those windows where the kinematic evidence of impairment is subtle.
+Each training sample is additionally weighted by its composite risk score, so
+that windows preceding high-severity events such as collisions exert a stronger
+pull on the model than those preceding minor incidents.
+
+To reduce sensitivity to any single training run, $K$ independent models are
+trained per fold with different random initialisations and their outputs averaged
+into an ensemble score~\cite{Lakshminarayanan2017}.
+Standard regularisation techniques (weight decay, additive noise on the input
+signals, and random masking of short temporal segments) limit overfitting to
+session-specific patterns, and training is halted early when performance on the
+held-out validation fold ceases to improve.
+Because raw neural network outputs are typically poorly calibrated, the ensemble
+score is finally recalibrated using Platt scaling~\cite{Guo2017}, fitting a
+logistic transform on the same validation fold.
+The fitness-to-drive index delivered to the end user is the complement
+$f = 1 - \hat{p}$, so that a score close to 1 reflects a driver in full
+control and a score close to 0 signals elevated impairment risk.
+
+\subsection{Evaluation Protocol}
+
+\paragraph{Leave-One-Participant-Out Cross-Validation.}
+All results are reported under Leave-One-Participant-Out Cross-Validation
+(LOPO-CV): in each fold, one participant is held out entirely as the test set,
+and all preprocessing statistics, scaler fitting, SMOTE generation, and model
+training are performed exclusively on the remaining participants.
+This is the strictest available cross-participant protocol and directly
+simulates deployment on a driver never seen during development.
+
+\paragraph{Evaluable and audit participants.}
+Participants with fewer than five positive windows in their held-out fold
+provide insufficient signal for reliable AUROC estimation and are designated
+as \emph{audit drivers}.
+For each audit driver, a dedicated LOPO fold is run---holding that driver
+out entirely and training on all others---and the false positive rate (FPR)
+at a fixed operating threshold is measured on their windows.
+This separates performance estimation (evaluable drivers) from safety
+auditing (audit drivers), providing a complete picture of model behaviour
+across all participants.
+
+\paragraph{Metrics.}
+The primary metric is the area under the ROC curve (AUROC), which measures
+the model's ability to rank impaired windows above safe ones independently
+of any operating threshold.
+Calibration is assessed by ECE~\cite{Guo2017} and Brier score.
+Statistical significance relative to a gradient-boosted tree baseline
+(XGBoost~\cite{Chen2016}) is assessed using the Wilcoxon signed-rank test
+on per-participant AUROC values, with a two-sided alternative and
+$\alpha = 0.05$.
+Confidence intervals on aggregate metrics are obtained by
+non-parametric bootstrap ($N = 2000$ resamples).

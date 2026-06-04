@@ -1,0 +1,105 @@
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Kinematic signatures of driver impairment.}
+The link between vehicle kinematics and driver cognitive state has a firm theoretical and empirical basis.
+Steering entropy theory, introduced by Nakayama et al.~\cite{Nakayama1999} and formalised by Boer~\cite{Boer2000},
+establishes that degraded closed-loop vehicle control under cognitive load manifests as increased irregularity
+in steering corrections.
+Empirical support is extensive: Strayer and Johnston showed that even hands-free phone conversation
+impairs driving relative to an undistracted baseline~\cite{Strayer2001};
+Strayer et al.\ further demonstrated that cell-phone use produces speed and following-distance
+degradation comparable to legal alcohol impairment~\cite{Strayer2003,Strayer2006};
+Recarte and Nunes confirmed that mental workload reduces the attentional bandwidth available for
+vehicle control independently of visual distraction~\cite{Recarte2003};
+and Patten et al.\ showed that even hands-free mobile phone use imposes measurable cognitive
+costs on primary driving performance~\cite{Patten2004}.
+Engstr\"{o}m et al.\ showed that visual and cognitive distraction produce distinct, identifiable
+signatures across speed regulation, lane-keeping precision, and lateral acceleration~\cite{Engstrom2005};
+Kountouriotis et al.\ confirmed that steering wheel reversal rates are selectively sensitive
+to cognitive secondary task load even when gaze remains on the road~\cite{Kountouriotis2016};
+and Klauer et al.\ demonstrated, in the landmark 100-Car Naturalistic Driving Study, that
+inattention is the primary contributing factor in near-crash events~\cite{Klauer2006}.
+A comprehensive theoretical account is provided by Engstr\"{o}m et al.~\cite{Engstrom2017},
+who establish that cognitive load systematically reduces the bandwidth of the driver's
+closed-loop vehicle control, producing observable kinematic consequences before overt errors occur.
+More recently, Zheng et al.\ showed that increases in steering entropy predict the onset of performance
+degradation in a driving simulator~\cite{Zheng2022}.
+The same kinematic sensitivity extends to driver fatigue: Li et al.\ demonstrated online drowsiness
+detection from steering wheel angles under real driving conditions~\cite{LiFatigue2017},
+and Arefnezhad et al.\ achieved accurate drowsiness classification using adaptive neuro-fuzzy
+feature selection applied exclusively to steering data~\cite{Arefnezhad2019}.
+Taken together, this body of evidence motivates the use of kinematic signals as a proxy
+for impairment state---encompassing both cognitive distraction and fatigue---rather than
+as predictors of discrete error events.
+
+\paragraph{Signal-based driver distraction detection.}
+Leveraging these kinematic signatures for automatic detection has attracted sustained interest.
+Li et al.\ demonstrated that driving performance indicators derived from steering, speed, and
+lateral position in a large-scale naturalistic dataset can discriminate distracted from
+attentive driving with meaningful accuracy, and highlighted steering entropy as the most
+informative single feature~\cite{Li2018}.
+Kaplan et al.\ provide a comprehensive survey of signal-based driver behaviour analysis,
+noting that threshold-based and handcrafted-feature approaches achieve reasonable within-subject
+performance but fail to generalise across drivers due to large inter-individual variability
+in baseline kinematics~\cite{Kaplan2015}.
+Dingus et al.\ analysed the SHRP2 naturalistic driving study and confirmed that
+driver-related factors are implicated in approximately 88\% of crashes,
+reinforcing the value of continuous driver state monitoring---while also demonstrating
+the rarity and context-dependence of discrete crash events, which limits the
+viability of event-prediction framing~\cite{Dingus2016}.
+
+\paragraph{Machine learning for driver state monitoring.}
+Classical machine learning approaches---Support Vector Machines, Random Forests,
+and Gradient Boosted Trees---have been widely applied to driver state classification
+from vehicle signals, typically operating on hand-engineered time-domain and
+frequency-domain features~\cite{Kaplan2015, Kumar2023, Xue2023}.
+Xue et al.\ directly compared SVM and Random Forest on vehicle control signals
+for cognitive distraction detection, finding that both achieve competitive
+accuracy within-subject but neither was evaluated across
+participants~\cite{Xue2023}.
+Deep learning methods, particularly Long Short-Term Memory
+networks~\cite{Hochreiter1997} and CNN-LSTM hybrids~\cite{Kwon2021}, have
+emerged as the dominant paradigm for end-to-end learning from raw or lightly
+preprocessed driving time series.
+Wang et al.\ demonstrated that a Bi-LSTM with attention trained on vehicle
+dynamics alone achieves strong distraction detection performance on naturalistic
+driving data~\cite{Wang2022}, reinforcing the viability of kinematic-only deep
+learning approaches while again relying on within-subject evaluation.
+Temporal Convolutional Networks (TCNs), introduced as a competitive
+sequence modelling alternative to recurrent architectures by Bai et al.~\cite{Bai2018},
+combine causal dilated convolutions~\cite{vandenOord2016} with residual
+connections~\cite{He2016} to achieve receptive fields that scale exponentially
+with depth, enabling efficient capture of long-range temporal dependencies.
+Despite their demonstrated advantages in generic sequence modelling
+tasks~\cite{Bai2018}, TCNs remain underexplored in the driver monitoring
+literature relative to LSTM-based approaches~\cite{Kaplan2015, Wang2022}.
+Zhao et al.\ applied a soft-thresholding TCN to abnormal driving behaviour
+recognition from vehicle dynamics, reporting improved efficiency and
+generalisation over recurrent baselines~\cite{Zhao2022},
+but the evaluation was conducted within-subject.
+To our knowledge, no prior work has applied a TCN to driver impairment scoring
+from vehicle kinematic signals alone under a fully cross-participant evaluation protocol.
+
+\paragraph{Evaluation rigour and the cross-participant generalisation gap.}
+A persistent methodological concern in the driver monitoring literature is the
+reliance on within-subject evaluation protocols, in which training and test windows
+are drawn from the same participants~\cite{Kaplan2015}.
+This practice systematically inflates reported performance, because models can
+exploit individual-specific driving style rather than learning generalisable
+impairment signatures.
+Kaplan et al.\ note this limitation explicitly, observing that kinematic-based
+systems that appear effective in within-subject settings do not transfer reliably
+to new drivers~\cite{Kaplan2015}.
+The problem is compounded when studies also perform data augmentation or
+normalisation using information from the test participant---a form of leakage
+that further overstates generalisation.
+Leave-One-Participant-Out Cross-Validation (LOPO-CV) is the strictest available
+protocol for addressing this gap: each participant's data is held out entirely,
+and all preprocessing and model fitting is performed exclusively on the remaining
+participants~\cite{Engstrom2017}.
+Our work adopts LOPO-CV as the sole evaluation protocol, applies anti-leakage
+route renormalisation to prevent any test-participant statistics from influencing
+the training fold, and additionally reports false positive rates on a held-out
+cohort of participants with no induced errors---a safety-oriented audit that has
+not been reported in prior kinematic-based driver monitoring studies.

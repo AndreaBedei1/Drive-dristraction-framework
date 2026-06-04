@@ -20,6 +20,7 @@ from scipy.stats import mannwhitneyu, wilcoxon
 from scipy.spatial.distance import cdist
 import xgboost as xgb
 import random
+import joblib
 
 SEED   = 42
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -545,6 +546,28 @@ def _print_model(name, all_s, all_y, drv_aucs):
     print(f"    ECE    : {ece:.4f}")
     return {"auroc_mean": mean_d, "auroc_std": std_d,
             "auroc_ci": list(ci_d), "auprc": auprc, "brier": brier, "ece": ece}
+
+def save_deployment_bundle(ensemble_models, scaler_k, platt_lr, n_kin_feat,
+                           out_dir: Path, tag: str = "final"):
+    bundle_dir = out_dir / f"deploy_{tag}"
+    bundle_dir.mkdir(exist_ok=True)
+    for i, m in enumerate(ensemble_models):
+        torch.save(m.state_dict(), bundle_dir / f"tcn_{i:02d}.pt")
+    joblib.dump(scaler_k, bundle_dir / "scaler_k.joblib")
+    joblib.dump(platt_lr, bundle_dir / "platt_lr.joblib")
+    meta = {
+        "n_kin_feat":    n_kin_feat,
+        "ensemble_k":    len(ensemble_models),
+        "kin_cols":      KIN_COLS,
+        "lookback_s":    LOOKBACK_S,
+        "gap":           GAP,           # baseline window = lookback_s + gap at inference
+        "roll_scales":   ROLL_SCALES,
+        "use_attention": True,
+    }
+    with open(bundle_dir / "meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  Bundle saved → {bundle_dir}")
+    return bundle_dir
 
 def main():
     df = pd.read_csv(Path(__file__).parent / "relab+unibo_dataset.csv")
@@ -1147,7 +1170,71 @@ def main():
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\n  Results saved → {out_path}")
+    # ── Final model: train on ALL data for deployment ──────────────────
+    print(f"\n{'='*72}")
+    print("FINAL MODEL — training on full dataset for deployment")
     print(f"{'='*72}")
+
+    rng_final   = np.random.default_rng(SEED)
+    val_d_final = rng_final.choice(np.unique(pid_all),
+                                   max(1, len(np.unique(pid_all)) // 5),
+                                   replace=False)
+    val_mask_f  = np.isin(pid_all, val_d_final)
+    tr_mask_f   = ~val_mask_f
+
+    X_tr_f   = X_raw_all[tr_mask_f];  y_tr_f   = y_all[tr_mask_f]
+    sc_tr_f  = scores_all[tr_mask_f]; pid_tr_f = pid_all[tr_mask_f]
+    rt_tr_f  = routes_all[tr_mask_f]; ts_tr_f  = ts_all[tr_mask_f]
+    X_val_f  = X_raw_all[val_mask_f]; y_val_f  = y_all[val_mask_f]
+
+    smrng_f = np.random.default_rng(SEED ^ SMOTE_SEED_SALT)
+    X_aug_f, y_aug_f, sc_aug_f, _an_f, _ne_f, _lm_f = smote_raw(
+        X_tr_f, y_tr_f, scores=sc_tr_f, rng=smrng_f,
+        pids=pid_tr_f, routes=rt_tr_f, t_starts=ts_tr_f)
+    n_real_f = len(y_tr_f)
+
+    Xtr_k_f  = apply_features_branch(X_aug_f[:n_real_f], KIN_IDX)
+    Xval_k_f = apply_features_branch(X_val_f,            KIN_IDX)
+
+    scaler_k_final = StandardScaler()
+    scaler_k_final.fit(Xtr_k_f.reshape(-1, n_kin_feat))
+    Xtr_k_f_sc  = scaler_k_final.transform(
+        Xtr_k_f.reshape(-1, n_kin_feat)).reshape(-1, LOOKBACK_S, n_kin_feat)
+    Xval_k_f_sc = scaler_k_final.transform(
+        Xval_k_f.reshape(-1, n_kin_feat)).reshape(-1, LOOKBACK_S, n_kin_feat)
+
+    if len(_an_f) > 0:
+        lbc_f = _lm_f[:, None, None]
+        Xsyn_f = ((1.0 - lbc_f) * Xtr_k_f_sc[_an_f]
+                  + lbc_f         * Xtr_k_f_sc[_ne_f])
+        Xtr_k_f_all = np.concatenate([Xtr_k_f_sc, Xsyn_f.astype(np.float32)])
+    else:
+        Xtr_k_f_all = Xtr_k_f_sc
+
+    final_models = []
+    final_val_preds = []
+    for k in range(ENSEMBLE_K):
+        kseed_f = SEED ^ (k * 0xDEAD)
+        torch.manual_seed(kseed_f); torch.cuda.manual_seed_all(kseed_f)
+        mk = KinTCN(n_kin_feat).to(DEVICE)
+        mk = train_kin_tcn(mk, Xtr_k_f_all, y_aug_f, sc_aug_f, Xval_k_f_sc, y_val_f)
+        mk.eval()
+        with torch.no_grad():
+            final_val_preds.append(
+                torch.sigmoid(mk(torch.as_tensor(Xval_k_f_sc).to(DEVICE))).cpu().numpy())
+        final_models.append(mk)
+        print(f"  Trained ensemble member {k+1}/{ENSEMBLE_K}")
+
+    val_mean_f = np.mean(final_val_preds, axis=0)
+    _, final_platt = val_platt_calibrate(val_mean_f, y_val_f, val_mean_f)
+
+    save_deployment_bundle(
+        ensemble_models=final_models,
+        scaler_k=scaler_k_final,
+        platt_lr=final_platt,
+        n_kin_feat=n_kin_feat,
+        out_dir=OUT_DIR,
+    )
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,116 @@
+\section{Introduction}
+\label{sec:intro}
+
+Road traffic injuries constitute one of the leading causes of preventable death worldwide.
+According to the World Health Organization, approximately \textbf{1.19 million people} die each year
+as a result of road traffic crashes~\cite{WHO2023}.
+In the United States alone, the National Highway Traffic Safety Administration reported that
+distraction-affected crashes accounted for \textbf{3,275 fatalities} in 2022,
+representing roughly 8\% of all traffic deaths that year~\cite{NHTSA2025}.
+Despite decades of road safety improvements, distracted and cognitively impaired driving
+remains a persistent and growing threat, exacerbated by the proliferation of in-vehicle
+infotainment systems and mobile devices~\cite{Young2007, Kaplan2015}.
+
+Existing approaches to driver impairment detection fall broadly into three categories,
+each carrying fundamental practical limitations.
+\textit{Physiological monitoring}---relying on heart rate, electrodermal activity, or
+electroencephalography---offers direct access to the driver's arousal state but requires
+intrusive wearable or embedded sensors that are costly, susceptible to motion artefacts,
+and difficult to deploy at scale~\cite{Healey2005}.
+\textit{Camera-based systems} that track eye gaze, head pose, or facial expression achieve
+strong performance in controlled laboratory settings but raise privacy concerns and
+degrade under variable lighting and partial occlusion~\cite{Vora2018}.
+A third line of work frames the problem as \textit{crash or error prediction}---forecasting
+discrete safety-critical events from sensor streams.
+This formulation is, however, fundamentally ill-posed: errors are rare and highly
+context-dependent, and their occurrence is jointly determined by the driver's state,
+road geometry, and surrounding traffic---factors that in-vehicle sensors alone cannot
+fully observe~\cite{Dingus2016}.
+Naturalistic driving data confirm that driver-related factors are present in approximately
+88\% of crashes, yet no deployed system reliably forecasts the \textit{next} error;
+what remains feasible is detecting the driver \textit{state} that elevates error probability~\cite{Dingus2016}.
+
+This distinction is not merely semantic.
+A well-established body of work in driving psychology demonstrates that
+vehicle kinematics carry reliable information about driver workload and attentional state.
+Steering entropy theory, introduced by Nakayama et al.~\cite{Nakayama1999} and
+further developed by Boer~\cite{Boer2000}, formalises this intuition: under increased
+cognitive load, steering corrections become less predictable and more irregular,
+reflecting degraded closed-loop vehicle control.
+Subsequent work has confirmed that steering wheel reversal rates are sensitive to
+cognitive secondary task load~\cite{Kountouriotis2016},
+that cognitive distraction produces measurable degradation in speed maintenance and
+braking response~\cite{Strayer2003, Strayer2006},
+and that visual and cognitive distraction produce distinct, identifiable signatures
+across speed regulation, lane-keeping precision, and lateral acceleration~\cite{Engstrom2005}.
+A comprehensive theoretical account of these effects is provided by
+Engstr\"{o}m et al.~\cite{Engstrom2017}, who establish that cognitive load
+systematically reduces the bandwidth of the driver's closed-loop vehicle control,
+producing observable kinematic consequences before overt errors occur.
+Taken together, this body of evidence establishes that in-vehicle kinematic signals
+carry systematic information about driver impairment state---a finding grounded in
+decades of human factors research~\cite{Nakayama1999, Boer2000, Engstrom2017}.
+
+Yet this established link has not been operationalised into what practitioners actually
+need: a \textbf{fitness-to-drive index}---a continuous, real-time score that quantifies
+how safely a driver is currently operating, without requiring physiological sensors,
+cameras, or knowledge of the road environment.
+Existing kinematic-based systems either rely on hand-crafted thresholds
+that do not generalise across drivers, or are evaluated within-subject in ways that
+overestimate real-world performance~\cite{Kaplan2015}.
+We argue that the correct framing is not \textit{``will this driver make an error
+in the next N seconds?''} --- a question that is ill-posed given the rarity and
+context-dependence of errors~\cite{Dingus2016} --- but rather:
+\textit{``is this driver currently in a state associated with elevated error risk?''}
+The former demands event prediction; the latter demands \textbf{impairment state scoring},
+which kinematics are well-suited to provide.
+
+We present \textbf{KinTCN}, a Temporal Convolutional Network~\cite{Bai2018} trained on
+four standard in-vehicle kinematic signals---speed, steering wheel angle, steering torque,
+and lateral acceleration---collected during a controlled driving simulator study
+($N = 30$~participants).
+Safety-critical error events serve as \textit{weak supervision}: windows preceding
+an error are used to define elevated-risk periods, but the model output is interpreted
+not as an error probability but as a continuous \textbf{fitness-to-drive index}---a
+well-calibrated score that ranks impaired driving periods above safe ones.
+Evaluation is conducted under \textbf{Leave-One-Participant-Out Cross-Validation (LOPO-CV)},
+the strictest available cross-participant protocol, ensuring that the index generalises
+to drivers never seen during training.
+
+The contributions of this work are threefold:
+
+\begin{itemize}
+    \item \textbf{A data-driven fitness-to-drive index.}
+          We propose a continuous, well-calibrated impairment score derived exclusively
+          from four standard in-vehicle kinematic signals, requiring no physiological
+          sensors, cameras, or external infrastructure.
+          The index is trained using safety-critical error events as weak supervision
+          and is explicitly framed as a measure of driver fitness rather than
+          a predictor of discrete crash events.
+
+    \item \textbf{KinTCN: a temporal deep learning approach with rigorous evaluation.}
+          We develop and evaluate KinTCN, a Temporal Convolutional Network that learns
+          kinematic impairment signatures directly from raw time series.
+          Evaluation is conducted under Leave-One-Participant-Out Cross-Validation,
+          the strictest available cross-participant protocol, achieving
+          AUROC~$= 0.781$ (ECE~$= 0.029$) and significantly outperforming competitive
+          baselines (Wilcoxon $p = 0.0014$).
+          Ablation studies over lookback duration and prediction horizon, together with
+          a false positive rate audit on error-free participants, further validate the
+          robustness of the approach.
+
+    \item \textbf{A labelled driving simulator dataset.}
+          We contribute a richly annotated dataset collected from $N = 30$ participants
+          under controlled distraction conditions, comprising synchronised kinematic
+          signals and timestamped safety-critical error events across multiple
+          distraction types and route configurations.
+\end{itemize}
+
+The remainder of the paper is organised as follows.
+Section~\ref{sec:related} reviews related work on driver impairment detection and
+kinematic-based driver monitoring.
+Section~\ref{sec:dataset} describes the simulator study and dataset.
+Section~\ref{sec:method} details the KinTCN method and evaluation protocol.
+Section~\ref{sec:results} presents experimental results.
+Section~\ref{sec:discussion} discusses findings and limitations.
+Section~\ref{sec:conclusion} concludes.
