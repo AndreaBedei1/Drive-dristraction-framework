@@ -1,0 +1,18 @@
+{
+  "n_kin_feat": 36,
+  "ensemble_k": 10,
+  "kin_cols": [
+    "speed.x",
+    "steeringWheelAngle",
+    "steeringTorq",
+    "acceleration.y"
+  ],
+  "lookback_s": 45,
+  "gap": 5,
+  "roll_scales": [
+    5,
+    10,
+    25
+  ],
+  "use_attention": true
+}
