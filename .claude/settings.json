@@ -11,7 +11,27 @@
       "Bash(python -m py_compile drive/tcn_dann_ext4.py)",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''drive/tcn_dann_ext4.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
       "Bash(python -c \"import ast, sys; ast.parse\\(open\\(''drive/tcn_dann_ext4.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\(''drive/tcn_dann_ext4.py''\\).read\\(\\)\\); print\\(''OK''\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''drive/tcn_dann_ext4.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
+      "Bash(python3.11 -c \"import torch; print\\(torch.__version__\\)\")",
+      "Bash(python3.12 -c \"import torch; print\\(torch.__version__\\)\")",
+      "Bash(/Users/lorenzobacchiani/Desktop/Drive-dristraction-framework/.venv/bin/python -c \"import torch; import joblib; print\\('torch', torch.__version__, '| joblib', joblib.__version__\\)\")",
+      "Bash(find /Users/lorenzobacchiani -name \"torch\" -type d 2>/dev/null | grep site-packages | head -5)",
+      "Read(//Users/lorenzobacchiani/**)",
+      "Bash(pip3 show *)",
+      "Bash(pip show *)",
+      "Bash(find /usr /opt/homebrew ~/miniforge3 ~/anaconda3 ~/miniconda3 -name \"python*\" -type f 2>/dev/null | grep -v __pycache__ | grep \"bin/python\" | head -10)",
+      "Read(//usr/**)",
+      "Bash(/usr/local/Cellar/micromamba/2.5.0_2/envs/dbm/bin/python3.11 -c \"import torch; import joblib; print\\('torch', torch.__version__, '| joblib ok'\\)\")",
+      "Bash(micromamba env *)",
+      "Bash(conda env *)",
+      "Bash(micromamba run *)",
+      "Bash(conda run *)",
+      "Bash(/Users/lorenzobacchiani/Desktop/Drive-dristraction-framework/.venv/bin/python3 -c ' *)",
+      "Bash(find /Users/lorenzobacchiani -name \"python3\" -type f 2>/dev/null | head -10 && find /opt -name \"python3\" -type f 2>/dev/null | head -5)",
+      "Read(//opt/**)",
+      "Bash(/Users/lorenzobacchiani/Desktop/Drive-dristraction-framework/venv/bin/python3 -c ' *)",
+      "Bash(/Users/lorenzobacchiani/Desktop/Drive-dristraction-framework/venv/bin/pip show *)",
+      "Bash(/Users/lorenzobacchiani/Desktop/Drive-dristraction-framework/venv/bin/pip list *)"
     ]
   }
 }
