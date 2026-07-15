@@ -66,6 +66,11 @@ USE_SMOTE         = True
 SMOTE_K_NEIGHBORS = 5
 SMOTE_SEED_SALT   = 0xABCD
 
+# Experimental switch.  The historical behaviour remains the default; derived
+# experiments can disable route-population renormalisation while reusing the
+# otherwise identical LOPO pipeline.
+USE_ROUTE_RENORM = True
+
 if os.environ.get("PYTHONHASHSEED") != str(SEED):
     import subprocess
     env = os.environ.copy()
@@ -506,6 +511,8 @@ def _check_sampling_rate(df):
 def _loo_renorm(X_arr, pid_arr, routes_arr,
                 all_session_stats, route_sum_mus, route_sum_sigs2, route_counts,
                 ci_norm_map, label="windows"):
+    if not USE_ROUTE_RENORM:
+        return X_arr.copy()
     X_out = X_arr.copy()
     n_singleton = 0
     for pid in np.unique(pid_arr):
@@ -690,6 +697,8 @@ def main():
         for route_v in np.unique(routes_te):
             r_mask = routes_te == route_v
             for col_v, ci_v in ci_norm_map.items():
+                if not USE_ROUTE_RENORM:
+                    continue
                 key_test  = (d, route_v, col_v)
                 key_route = (route_v, col_v)
                 if key_test not in all_session_stats or key_route not in _route_tr_stats_d:
@@ -701,12 +710,14 @@ def main():
                 X_te[r_mask, :, ci_v] = (
                     X_te[r_mask, :, ci_v] * (test_sig + 1e-6) + test_mu - tr_mu
                 ) / max(tr_sig, 1e-6)
-        X_te = np.clip(X_te, -RENORM_CLIP, RENORM_CLIP)
+        if USE_ROUTE_RENORM:
+            X_te = np.clip(X_te, -RENORM_CLIP, RENORM_CLIP)
 
         X_tr = _loo_renorm(X_tr, pid_tr, routes_tr, all_session_stats,
                            _route_sum_mus, _route_sum_sigs2, _route_counts,
                            ci_norm_map, f"train (test={d})")
-        X_tr = np.clip(X_tr, -RENORM_CLIP, RENORM_CLIP)
+        if USE_ROUTE_RENORM:
+            X_tr = np.clip(X_tr, -RENORM_CLIP, RENORM_CLIP)
 
         df_val_fold = df[df["id"].isin(val_ids_set)].copy()
         X_val_raw, y_val_d, _, _pids_val, _routes_val, _ = build_windows(df_val_fold)
@@ -715,6 +726,8 @@ def main():
             for _vrt in np.unique(_routes_val[_pids_val == _vpid]):
                 _vmask = (_pids_val == _vpid) & (_routes_val == _vrt)
                 for _vcol, _vci in ci_norm_map.items():
+                    if not USE_ROUTE_RENORM:
+                        continue
                     _key_own = (_vpid, _vrt, _vcol)
                     _key_rte = (_vrt, _vcol)
                     if _key_own not in all_session_stats or _key_rte not in _route_pure_train_stats:
@@ -726,7 +739,8 @@ def main():
                     X_val_raw[_vmask, :, _vci] = (
                         X_val_raw[_vmask, :, _vci] * (_vsig + 1e-6) + _vmu - _tr_mu
                     ) / max(_tr_sig, 1e-6)
-        X_val_raw = np.clip(X_val_raw, -RENORM_CLIP, RENORM_CLIP)
+        if USE_ROUTE_RENORM:
+            X_val_raw = np.clip(X_val_raw, -RENORM_CLIP, RENORM_CLIP)
 
         X_bl   = X_tr[~vmask]; y_bl = y_tr[~vmask]
         pw_bl  = float((y_bl == 0).sum() / max((y_bl == 1).sum(), 1))
@@ -1026,6 +1040,8 @@ def main():
             for rv in np.unique(routes_te_s):
                 rm = routes_te_s == rv
                 for col_v, ci_v in ci_norm_map.items():
+                    if not USE_ROUTE_RENORM:
+                        continue
                     k_own = (s, rv, col_v);  k_rte = (rv, col_v)
                     if k_own not in all_session_stats or k_rte not in _rs_all_stats:
                         continue
@@ -1036,12 +1052,14 @@ def main():
                     X_te_s[rm, :, ci_v] = (
                         X_te_s[rm, :, ci_v] * (t_sig + 1e-6) + t_mu - r_mu
                     ) / max(r_sig, 1e-6)
-            X_te_s = np.clip(X_te_s, -RENORM_CLIP, RENORM_CLIP)
+            if USE_ROUTE_RENORM:
+                X_te_s = np.clip(X_te_s, -RENORM_CLIP, RENORM_CLIP)
 
             X_tr_s = _loo_renorm(X_tr_s, pid_tr_s, routes_tr_s, all_session_stats,
                                   _rs_sum_mus, _rs_sum_sigs2, _rs_counts,
                                   ci_norm_map, f"safe_fold_{s}_train")
-            X_tr_s = np.clip(X_tr_s, -RENORM_CLIP, RENORM_CLIP)
+            if USE_ROUTE_RENORM:
+                X_tr_s = np.clip(X_tr_s, -RENORM_CLIP, RENORM_CLIP)
 
             df_val_s = df[df["id"].isin(val_ids_set_s)].copy()
             X_val_s, y_val_s, _, _pv, _rv, _ = build_windows(df_val_s)
@@ -1050,6 +1068,8 @@ def main():
                 for _vr in np.unique(_rv[_pv == _vp]):
                     _vm = (_pv == _vp) & (_rv == _vr)
                     for _vc, _vci in ci_norm_map.items():
+                        if not USE_ROUTE_RENORM:
+                            continue
                         _ko = (_vp, _vr, _vc);  _kr = (_vr, _vc)
                         if _ko not in all_session_stats or _kr not in _rs_pure_stats:
                             continue
@@ -1060,7 +1080,8 @@ def main():
                         X_val_s[_vm, :, _vci] = (
                             X_val_s[_vm, :, _vci] * (_vsig + 1e-6) + _vmu - _trmu
                         ) / max(_trsig, 1e-6)
-            X_val_s = np.clip(X_val_s, -RENORM_CLIP, RENORM_CLIP)
+            if USE_ROUTE_RENORM:
+                X_val_s = np.clip(X_val_s, -RENORM_CLIP, RENORM_CLIP)
 
             X_tr_s_tr  = X_tr_s[~vmask_s];  y_tr_s_tr  = y_tr_s[~vmask_s]
             sc_s_tr    = sc_tr_s[~vmask_s];  pid_s_tr   = pid_tr_s[~vmask_s]
