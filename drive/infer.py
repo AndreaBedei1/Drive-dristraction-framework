@@ -90,28 +90,28 @@ class _KinTCN(nn.Module):
 
 # ── feature engineering (mirrors tcnKin_45.py) ───────────────────────────────
 
-def _engineer_features(window: np.ndarray, roll_scales=(5, 10, 25)) -> np.ndarray:
-    """window: (T, C) float32 → (T, n_feat) float32"""
-    diff1  = np.diff(window, axis=0, prepend=window[:1])
-    w_mean = window.mean(axis=0, keepdims=True)
-    w_std  = window.std(axis=0,  keepdims=True) + 1e-6
-    z      = (window - w_mean) / w_std
-    parts  = [window, diff1, z]
-    cs     = np.cumsum(window,       axis=0)
-    cs_sq  = np.cumsum(window ** 2,  axis=0)
-    T      = len(window)
+def _engineer_features_batch(windows: np.ndarray, roll_scales=(5, 10, 25)) -> np.ndarray:
+    """windows: (N, T, C) float32 → (N, T, n_feat) float32"""
+    diff1  = np.diff(windows, axis=1, prepend=windows[:, :1, :])
+    w_mean = windows.mean(axis=1, keepdims=True)
+    w_std  = windows.std(axis=1,  keepdims=True) + 1e-6
+    z      = (windows - w_mean) / w_std
+    parts  = [windows, diff1, z]
+    cs     = np.cumsum(windows,        axis=1)
+    cs_sq  = np.cumsum(windows ** 2,   axis=1)
+    T      = windows.shape[1]
     for k in roll_scales:
         cs_lag    = np.zeros_like(cs)
         cs_sq_lag = np.zeros_like(cs_sq)
         if k < T:
-            cs_lag[k:]    = cs[:T - k]
-            cs_sq_lag[k:] = cs_sq[:T - k]
-        win_len   = np.minimum(np.arange(1, T + 1)[:, None], k)
+            cs_lag[:, k:, :]    = cs[:, :T - k, :]
+            cs_sq_lag[:, k:, :] = cs_sq[:, :T - k, :]
+        win_len   = np.minimum(np.arange(1, T + 1)[None, :, None], k)
         roll_mean = (cs - cs_lag) / win_len
         roll_var  = (cs_sq - cs_sq_lag) / win_len - roll_mean ** 2
         roll_std  = np.sqrt(np.maximum(roll_var, 0.0)) + 1e-6
         parts.extend([roll_mean, roll_std])
-    return np.concatenate(parts, axis=1).astype(np.float32)
+    return np.concatenate(parts, axis=2).astype(np.float32)
 
 
 # ── predictor ─────────────────────────────────────────────────────────────────
@@ -163,10 +163,7 @@ class ImpairmentPredictor:
         returns : (N, T, n_feat) tensor ready for the TCN
         """
         N, T, _ = windows.shape
-        feats   = np.stack([
-            _engineer_features(windows[i], self.roll_scales)
-            for i in range(N)
-        ])                                                      # (N, T, n_feat)
+        feats   = _engineer_features_batch(windows, self.roll_scales)  # (N, T, n_feat)
         scaled  = self.scaler.transform(
             feats.reshape(-1, self._n_feat)
         ).reshape(N, T, self._n_feat).astype(np.float32)
@@ -184,12 +181,12 @@ class ImpairmentPredictor:
 
         x = self._preprocess(windows)
         with torch.no_grad():
-            logits = torch.stack(
-                [m(x) for m in self.models], dim=0
+            scores = torch.stack(
+                [torch.sigmoid(m(x)) for m in self.models], dim=0
             ).mean(dim=0).cpu().numpy()                        # (N,)
 
         probs = self.platt_lr.predict_proba(
-            logits.reshape(-1, 1)
+            scores.reshape(-1, 1)
         )[:, 1].astype(np.float32)
         return probs
 
@@ -234,3 +231,32 @@ if __name__ == "__main__":
     batch = rng.normal(0, 1, (5, predictor.lookback_s, 4)).astype(np.float32)
     probs = predictor.predict_batch(batch)
     print(f"[batch of 5]   impairment probs = {np.round(probs, 3)}")
+
+    # --- Feature engineering self-test: batched == per-window loop ---
+    def _engineer_features_ref(window, roll_scales=(5, 10, 25)):
+        diff1  = np.diff(window, axis=0, prepend=window[:1])
+        w_mean = window.mean(axis=0, keepdims=True)
+        w_std  = window.std(axis=0,  keepdims=True) + 1e-6
+        z      = (window - w_mean) / w_std
+        parts  = [window, diff1, z]
+        cs     = np.cumsum(window,       axis=0)
+        cs_sq  = np.cumsum(window ** 2,  axis=0)
+        T      = len(window)
+        for k in roll_scales:
+            cs_lag    = np.zeros_like(cs)
+            cs_sq_lag = np.zeros_like(cs_sq)
+            if k < T:
+                cs_lag[k:]    = cs[:T - k]
+                cs_sq_lag[k:] = cs_sq[:T - k]
+            win_len   = np.minimum(np.arange(1, T + 1)[:, None], k)
+            roll_mean = (cs - cs_lag) / win_len
+            roll_var  = (cs_sq - cs_sq_lag) / win_len - roll_mean ** 2
+            roll_std  = np.sqrt(np.maximum(roll_var, 0.0)) + 1e-6
+            parts.extend([roll_mean, roll_std])
+        return np.concatenate(parts, axis=1).astype(np.float32)
+
+    test_wins = rng.normal(0, 1, (8, predictor.lookback_s, 4)).astype(np.float32)
+    ref  = np.stack([_engineer_features_ref(test_wins[i], predictor.roll_scales) for i in range(8)])
+    fast = _engineer_features_batch(test_wins, predictor.roll_scales)
+    assert np.allclose(ref, fast, atol=1e-6), "Feature engineering mismatch!"
+    print("[self-test] batched feature engineering matches per-window loop ✓")
